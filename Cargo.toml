@@ -1,0 +1,41 @@
+[package]
+name = "winfxstart"
+version = "0.1.0"
+edition = "2021"
+authors = ["RebelliousSmile <contact@rebellioussmile.com>"]
+description = "Windows 11 Command Launcher with WinUI 3 native UI"
+license = "MIT"
+
+[dependencies]
+# Window management
+winit = "0.29"
+
+# UI bindings (WinUI 3)
+tao = { version = "0.26", features = ["custom-fonts"] }
+
+# Windows APIs
+windows = { version = "0.52", features = [
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+] }
+
+# JSON storage
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Image handling for icons
+image = "0.24"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
