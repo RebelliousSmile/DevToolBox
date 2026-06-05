@@ -4,6 +4,7 @@
 //! for the command-grid UI.
 
 mod ui;
+mod windows;
 
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
