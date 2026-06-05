@@ -3,19 +3,18 @@ name = "winfxstart"
 version = "0.1.0"
 edition = "2021"
 authors = ["RebelliousSmile <contact@rebellioussmile.com>"]
-description = "Windows 11 Command Launcher with WinUI 3 native UI"
+description = "Windows 11 Command Launcher with native Win32 UI"
 license = "MIT"
 
 [dependencies]
 # Window management
-winit = "0.29"
+tao = "0.26"
 
-# UI bindings (WinUI 3)
-tao = { version = "0.26", features = ["custom-fonts"] }
+# raw-window-handle 0.6 to extract HWND from the tao window
+raw-window-handle = "0.6"
 
 # Windows APIs
 windows = { version = "0.52", features = [
-    "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
@@ -28,9 +27,6 @@ windows = { version = "0.52", features = [
 # JSON storage
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Image handling for icons
-image = "0.24"
 
 # Logging
 log = "0.4"
