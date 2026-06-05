@@ -7,3 +7,4 @@
 //! compiler level.
 
 pub mod process;
+pub mod registry;
