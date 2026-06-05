@@ -4,11 +4,10 @@
 //! `image` crate, then resizes it to a fixed square and returns an RGBA pixel
 //! buffer (`DecodedIcon`).
 
-use std::io::Cursor;
 use std::path::Path;
 
 use image::imageops::FilterType;
-use image::{ImageFormat, RgbaImage};
+use image::RgbaImage;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -103,7 +102,7 @@ pub fn decode_resize_file(path: &Path, size: u32) -> Result<DecodedIcon, DecodeE
 /// Attempt to guess the image format from `bytes` without fully decoding.
 /// Used only in tests to verify the format of in-memory buffers.
 #[cfg(test)]
-fn guess_format(bytes: &[u8]) -> Option<ImageFormat> {
+fn guess_format(bytes: &[u8]) -> Option<image::ImageFormat> {
     image::guess_format(bytes).ok()
 }
 
@@ -113,8 +112,11 @@ fn guess_format(bytes: &[u8]) -> Option<ImageFormat> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use image::ImageFormat;
+
     use super::*;
-    use std::io::Write;
 
     /// Build an in-memory PNG of the given dimensions using the `image` crate.
     fn make_in_memory_png(w: u32, h: u32) -> Vec<u8> {

@@ -21,5 +21,7 @@ pub mod resolve;
 #[cfg(windows)]
 pub mod gdi;
 
+#[allow(unused_imports)]
 pub use decode::{DecodedIcon, DecodeError, decode_resize_file, decode_resize_rgba};
+#[allow(unused_imports)]
 pub use resolve::{IconResolution, icons_dirs, resolve_icon};
