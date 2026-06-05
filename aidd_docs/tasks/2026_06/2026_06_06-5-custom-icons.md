@@ -196,6 +196,30 @@ flowchart TD
 
 <!-- APPEND ONLY. One entry per step attempt. Never rewrite. -->
 
+🤖 2026-06-06 Phase 1 — Pure icon core implemented and committed.
+- Re-added `image = "0.25"` with `default-features = false, features = ["png","jpeg","bmp","gif"]` (Decision D1).
+- Created `src/icons/mod.rs`, `src/icons/resolve.rs`, `src/icons/decode.rs` (GDI-free, fully unit-tested).
+- Created `src/icons/gdi.rs` (`#[cfg(windows)]`) as part of Phase 2 structure.
+- Added `mod icons;` to `src/main.rs`.
+- `cargo build --release` exits 0. `cargo test` exits 0: 49 tests (35 existing + 14 new icon tests).
+- All Phase 1 acceptance criteria met. Committed as feat(icons)/phase1.
+
+🤖 2026-06-06 Phase 2 — GDI bitmap bridge verified (already created in Phase 1 commit).
+- `src/icons/gdi.rs` contains `rgba_to_hbitmap`, `set_button_bitmap`, `delete_bitmap` with documented unsafe blocks.
+- RGBA->BGRA channel swap + top-down DIB (negative height) implemented per Decision D2.
+- All unsafe blocks carry safety comments per AC requirements.
+- `cargo clippy --release --all-targets` clean (only dead_code warnings on not-yet-consumed items — acceptable per plan).
+- Manual validation note: HBITMAP creation wired into Phase 3 UiHost.
+
+🤖 2026-06-06 Phase 3 — UiHost wired with icon pipeline + leak-safe ownership.
+- Extended `GridCell` with `icon: String` and `command_id: Option<String>`.
+- Introduced `GridEntry` with `label_only()` convenience constructor; `build_grid` now takes `&[GridEntry]`.
+- Updated all 5 existing `xaml_gen` tests to new shape + added 2 new tests (icon/command_id threading).
+- Updated `UiHost` to own `bitmaps: Vec<HBITMAP>`, implement `Drop`, and expose `clear_bitmaps()`.
+- `layout_children` unchanged (SetWindowPos only — no bitmap creation).
+- Icon pipeline: resolve_icon -> decode_resize_file -> rgba_to_hbitmap -> set_button_bitmap per cell.
+- `cargo build --release` exits 0. `cargo test` exits 0: 51 tests. `cargo clippy` clean (dead_code only).
+
 ## Validation flow demonstration
 
 1. Run `cargo build --release` from the repo root and confirm it exits 0 (with `image` re-added and the `icons` module wired).
