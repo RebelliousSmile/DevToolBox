@@ -1,9 +1,6 @@
-//! Application state: settings + command list loaded from `config/default.json`,
+//! Application state: settings + command list loaded from `crate::storage`,
 //! and the Win32 child-control host that renders them as a native button grid.
 
-use std::path::Path;
-
-use serde::Deserialize;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, SetWindowPos, ShowWindow, HWND_TOP, SWP_NOZORDER, SW_SHOW,
@@ -12,28 +9,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use crate::ui::xaml_gen::{build_grid, GridModel};
-
-// ---------------------------------------------------------------------------
-// JSON config structures
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct AppConfig {
-    pub commands: Vec<CommandEntry>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct CommandEntry {
-    #[allow(dead_code)]
-    pub id: String,
-    pub name: String,
-    /// Raw command string passed to `launch_command` when the button is clicked.
-    /// Click-binding is deferred to issue #11; suppress the lint until then.
-    #[allow(dead_code)]
-    pub command: String,
-    #[serde(default)]
-    pub is_favorite: bool,
-}
 
 // ---------------------------------------------------------------------------
 // Host state
@@ -48,9 +23,53 @@ pub struct UiHost {
 }
 
 impl UiHost {
-    /// Load config, create Win32 BUTTON children parented to `parent_hwnd`.
+    /// Load config via `crate::storage::load`, create Win32 BUTTON children
+    /// parented to `parent_hwnd`.
     pub fn new(parent_hwnd: HWND) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = load_config()?;
+        let config = crate::storage::load().unwrap_or_else(|err| {
+            log::warn!("storage::load failed ({err}); falling back to built-in defaults");
+            crate::storage::Config {
+                version: "0.1.0".to_string(),
+                default_settings: crate::storage::Settings {
+                    show_categories: true,
+                    icon_size: 80,
+                    theme: "light".to_string(),
+                    launch_at_startup: false,
+                    show_descriptions: true,
+                },
+                categories: Vec::new(),
+                commands: vec![
+                    crate::storage::Command {
+                        id: "notepad".into(),
+                        name: "Bloc-notes".into(),
+                        command: "notepad.exe".into(),
+                        category: "system".into(),
+                        icon: "📝".into(),
+                        is_favorite: true,
+                        shortcut: None,
+                    },
+                    crate::storage::Command {
+                        id: "cmd".into(),
+                        name: "Invite de commandes".into(),
+                        command: "cmd.exe".into(),
+                        category: "system".into(),
+                        icon: "💻".into(),
+                        is_favorite: true,
+                        shortcut: None,
+                    },
+                    crate::storage::Command {
+                        id: "ipconfig".into(),
+                        name: "Adresse IP".into(),
+                        command: "ipconfig /all".into(),
+                        category: "system".into(),
+                        icon: "🌐".into(),
+                        is_favorite: true,
+                        shortcut: None,
+                    },
+                ],
+            }
+        });
+
         let favorites: Vec<String> = config
             .commands
             .iter()
@@ -148,55 +167,6 @@ impl UiHost {
 }
 
 // ---------------------------------------------------------------------------
-// Config loader
-// ---------------------------------------------------------------------------
-
-fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
-    // Try the path relative to the executable first, then relative to cwd.
-    let candidates = [
-        Path::new("config/default.json").to_path_buf(),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("config/default.json")))
-            .unwrap_or_default(),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            let text = std::fs::read_to_string(path)?;
-            let cfg: AppConfig = serde_json::from_str(&text)?;
-            log::info!("Config loaded from {}", path.display());
-            return Ok(cfg);
-        }
-    }
-
-    // Fallback: return a hard-coded minimal config so the app still opens.
-    log::warn!("config/default.json not found — using built-in fallback");
-    Ok(AppConfig {
-        commands: vec![
-            CommandEntry {
-                id: "notepad".into(),
-                name: "Bloc-notes".into(),
-                command: "notepad.exe".into(),
-                is_favorite: true,
-            },
-            CommandEntry {
-                id: "cmd".into(),
-                name: "Invite de commandes".into(),
-                command: "cmd.exe".into(),
-                is_favorite: true,
-            },
-            CommandEntry {
-                id: "ipconfig".into(),
-                name: "Adresse IP".into(),
-                command: "ipconfig /all".into(),
-                is_favorite: true,
-            },
-        ],
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Deferred call seam (issue #2 — click-binding deferred to issue #11)
 // ---------------------------------------------------------------------------
 
@@ -205,6 +175,8 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 /// Parses `command` and spawns it with `CREATE_NO_WINDOW`. Exposed here so
 /// a later issue can bind it to button-click (`WM_COMMAND`) handling without
 /// any architectural change.
+///
+/// The `command` field comes from [`crate::storage::Command::command`].
 ///
 /// # Errors
 /// Returns [`crate::windows::process::LaunchError`] on parse failure or
