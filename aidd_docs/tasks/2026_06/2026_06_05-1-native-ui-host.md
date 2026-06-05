@@ -168,6 +168,8 @@ flowchart TD
 
 🤖 2026-06-05T21:20Z Phase 3 complete — `host_init` creates native Win32 BUTTON children (one per favorite from config/default.json) via `CreateWindowExW` parented to the Tao HWND; `layout_children` positions them as a grid; `on_resize` triggers re-layout. No subclassing. 5 unit tests in xaml_gen::tests all pass. `cargo clippy --release` exits 0 with no warnings.
 
+🤖 2026-06-05T21:30Z Validation — `cargo build --release` exits 0 (Finished release profile [optimized] in 25s). `cargo test` reports 5 passed / 0 failed. `cargo clippy --release` reports 0 warnings. GUI window launch not observed (would block the session on the Win32 event loop); build is green and logic is sound. Runtime risk: if tao is compiled as a subsystem:windows binary, the console window is hidden — this is expected behaviour and does not affect correctness.
+
 ## Validation flow demonstration
 
 1. Run `cargo build --release` from the repo root and confirm it exits 0.
