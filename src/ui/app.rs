@@ -27,6 +27,8 @@ pub struct CommandEntry {
     #[allow(dead_code)]
     pub id: String,
     pub name: String,
+    /// Raw command string passed to `launch_command` when the button is clicked.
+    /// Click-binding is deferred to issue #11; suppress the lint until then.
     #[allow(dead_code)]
     pub command: String,
     #[serde(default)]
@@ -192,4 +194,24 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
             },
         ],
     })
+}
+
+// ---------------------------------------------------------------------------
+// Deferred call seam (issue #2 — click-binding deferred to issue #11)
+// ---------------------------------------------------------------------------
+
+/// Thin pass-through from the UI layer to the process executor.
+///
+/// Parses `command` and spawns it with `CREATE_NO_WINDOW`. Exposed here so
+/// a later issue can bind it to button-click (`WM_COMMAND`) handling without
+/// any architectural change.
+///
+/// # Errors
+/// Returns [`crate::windows::process::LaunchError`] on parse failure or
+/// spawn error — the caller can surface the message via `Display`.
+#[allow(dead_code)] // Remove this attribute when issue #11 wires click handling.
+pub fn launch_command(
+    command: &str,
+) -> Result<crate::windows::process::LaunchOutcome, crate::windows::process::LaunchError> {
+    crate::windows::process::launch(command)
 }
