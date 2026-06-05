@@ -38,8 +38,16 @@ erDiagram
     }
 ```
 
-- A `Command` references a `Category` by `id`.
+- A `Command` references a `Category` by `id` (the `category` field stores the category's `id` string).
 - `Settings` are app-level (theme, icon size, startup, etc.).
+
+## Schema stability (issue #6)
+
+The schema is intentionally unchanged by issue #6. Key invariants:
+
+- `"uncategorized"` is a **synthetic grouping bucket**, never a stored `Category`. Commands with an empty or unknown `category` id are grouped under it at runtime only.
+- The `category` field of a `Command` is an empty string `""` when the command has no category or its category was removed. This is the on-disk representation of "Uncategorized".
+- No new JSON field was added in issue #6; the issue #3 lossless round-trip tests are unaffected.
 
 ## Migrations
 
