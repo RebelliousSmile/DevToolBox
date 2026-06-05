@@ -3,6 +3,7 @@
 //! Native Rust application using tao for windowing and Win32 child controls
 //! for the command-grid UI.
 
+mod icons;
 mod storage;
 mod ui;
 mod windows;
