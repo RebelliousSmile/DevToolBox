@@ -3,6 +3,14 @@
 //! Currently produces an in-memory layout description consumed by the Win32
 //! child-control host in `app.rs`. When WinUI 3 / XAML Islands become
 //! available in Rust, this module is the insertion point (Decision D1).
+//!
+//! ## Layout helpers (issue #7)
+//!
+//! - [`cell_size`]: derives button (width, height) from `icon_size`, clamped to
+//!   a sane non-degenerate range so dimensions are always non-zero.
+//! - [`assign_control_ids`]: assigns unique `u16` ids (base 1000+) to grid cells
+//!   that carry a `command_id`, returning an ordered `Vec<(u16, String)>`.
+//! - [`command_for_id`]: resolves a `u16` control id back to a command id string.
 
 /// A single cell in the command grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +218,90 @@ pub fn build_sectioned(sections: &[GridSection], preferred_cols: u32) -> Section
     }
 
     SectionedModel { cols, rows }
+}
+
+// ---------------------------------------------------------------------------
+// Layout helpers (issue #7)
+// ---------------------------------------------------------------------------
+
+/// Minimum cell dimension (width and height) in pixels.
+///
+/// Enforces a sane floor so buttons are never invisible regardless of the
+/// `icon_size` value stored in config.
+const CELL_MIN: u32 = 40;
+
+/// Maximum cell dimension in pixels.
+///
+/// Prevents absurdly large buttons for out-of-range `icon_size` values.
+const CELL_MAX: u32 = 256;
+
+/// Fixed label-area padding added to `icon_size` to produce the cell height.
+///
+/// The height accommodates the icon plus a text label below it.
+const LABEL_PAD: u32 = 20;
+
+/// Fixed horizontal padding added to `icon_size` to produce the cell width.
+///
+/// Ensures the label is not clipped for typical command names.
+const WIDTH_PAD: u32 = 16;
+
+/// Derive button cell dimensions from `icon_size`.
+///
+/// Formula:
+/// - width  = clamp(icon_size + WIDTH_PAD,  CELL_MIN, CELL_MAX)
+/// - height = clamp(icon_size + LABEL_PAD,  CELL_MIN, CELL_MAX)
+///
+/// Both dimensions are guaranteed to be in `[CELL_MIN, CELL_MAX]` and thus
+/// always non-zero (AC3 — Decision D6).
+///
+/// The result is monotonically non-decreasing in `icon_size` within the
+/// unclamped range `[CELL_MIN − WIDTH_PAD, CELL_MAX − WIDTH_PAD]` for width
+/// and `[CELL_MIN − LABEL_PAD, CELL_MAX − LABEL_PAD]` for height.
+pub fn cell_size(icon_size: u32) -> (u32, u32) {
+    let w = icon_size.saturating_add(WIDTH_PAD).clamp(CELL_MIN, CELL_MAX);
+    let h = icon_size.saturating_add(LABEL_PAD).clamp(CELL_MIN, CELL_MAX);
+    (w, h)
+}
+
+/// Private base for button control ids (avoids id 0 and low system ids).
+///
+/// Win32 uses 0 as "no id"; ids below 1000 may collide with dialog control
+/// ids in other contexts.  Starting at 1000 gives a private, collision-free
+/// space for this window's child buttons (Decision D4).
+const CONTROL_ID_BASE: u16 = 1000;
+
+/// Assign unique `u16` control ids to all grid cells that carry a `command_id`.
+///
+/// Ids are allocated sequentially starting from [`CONTROL_ID_BASE`] and are
+/// stable within one build (i.e. the same list of cells always yields the same
+/// mapping).  They are NOT stable across rebuilds — the map is rebuilt from
+/// scratch on every `UiHost::new` / `UiHost::reload` (Decision D3).
+///
+/// Returns an ordered `Vec<(control_id, command_id)>` where the index in the
+/// vec matches the button creation order in `app.rs`.  Cells without a
+/// `command_id` are silently skipped.
+pub fn assign_control_ids(cells: &[GridCell]) -> Vec<(u16, String)> {
+    cells
+        .iter()
+        .filter_map(|cell| cell.command_id.as_deref().map(|cid| cid.to_string()))
+        .enumerate()
+        .map(|(i, cid)| {
+            // Saturating add keeps us within u16 range; in practice the number
+            // of buttons is far below 64 k so this never saturates.
+            let id = CONTROL_ID_BASE.saturating_add(i as u16);
+            (id, cid)
+        })
+        .collect()
+}
+
+/// Resolve a `u16` control id to its `command_id` string.
+///
+/// `map` is the slice returned by [`assign_control_ids`].
+/// Returns `None` when `control_id` is not present in `map`.
+pub fn command_for_id<'a>(map: &'a [(u16, String)], control_id: u16) -> Option<&'a str> {
+    map.iter()
+        .find(|(id, _)| *id == control_id)
+        .map(|(_, cid)| cid.as_str())
 }
 
 #[cfg(test)]
@@ -440,5 +532,204 @@ mod tests {
         assert_eq!(model.cells[0], cell(0, 0, "A"));
         assert_eq!(model.cells[1], cell(0, 1, "B"));
         assert_eq!(model.cells[2], cell(1, 0, "C"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cell_size tests (issue #7 Phase 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cell_size_normal_value_passes_through_with_padding() {
+        // icon_size = 48: w = 48+16 = 64, h = 48+20 = 68 (both in [40,256])
+        let (w, h) = cell_size(48);
+        assert_eq!(w, 64);
+        assert_eq!(h, 68);
+    }
+
+    #[test]
+    fn cell_size_zero_clamps_to_min() {
+        let (w, h) = cell_size(0);
+        assert_eq!(w, CELL_MIN, "width must be CELL_MIN for icon_size=0");
+        assert_eq!(h, CELL_MIN, "height must be CELL_MIN for icon_size=0");
+    }
+
+    #[test]
+    fn cell_size_tiny_clamps_to_min() {
+        // icon_size = 1: w = 1+16 = 17 < 40 → clamped; h = 1+20 = 21 < 40 → clamped
+        let (w, h) = cell_size(1);
+        assert_eq!(w, CELL_MIN);
+        assert_eq!(h, CELL_MIN);
+    }
+
+    #[test]
+    fn cell_size_huge_clamps_to_max() {
+        let (w, h) = cell_size(u32::MAX);
+        assert_eq!(w, CELL_MAX, "width must be CELL_MAX for very large icon_size");
+        assert_eq!(h, CELL_MAX, "height must be CELL_MAX for very large icon_size");
+    }
+
+    #[test]
+    fn cell_size_large_value_clamps_to_max() {
+        // icon_size = 512: both padded values exceed 256 → clamped
+        let (w, h) = cell_size(512);
+        assert_eq!(w, CELL_MAX);
+        assert_eq!(h, CELL_MAX);
+    }
+
+    #[test]
+    fn cell_size_never_zero() {
+        for icon_size in [0u32, 1, 8, 16, 24, 32, 48, 64, 80, 96, 128, 256, 512, u32::MAX] {
+            let (w, h) = cell_size(icon_size);
+            assert!(w > 0, "width must never be 0 (icon_size={icon_size})");
+            assert!(h > 0, "height must never be 0 (icon_size={icon_size})");
+        }
+    }
+
+    #[test]
+    fn cell_size_monotonic_in_unclamped_range() {
+        // In the unclamped range both w and h should grow with icon_size.
+        // CELL_MIN=40, WIDTH_PAD=16 → icon_size >= 24 gives w unclamped at 40+.
+        // CELL_MAX=256, WIDTH_PAD=16 → icon_size <= 240 keeps w <= 256.
+        let sizes = [24u32, 32, 48, 64, 80, 96, 128, 200, 240];
+        for i in 0..sizes.len() - 1 {
+            let (w0, h0) = cell_size(sizes[i]);
+            let (w1, h1) = cell_size(sizes[i + 1]);
+            assert!(
+                w1 >= w0,
+                "width must be non-decreasing: cell_size({})={w0} > cell_size({})={w1}",
+                sizes[i],
+                sizes[i + 1]
+            );
+            assert!(
+                h1 >= h0,
+                "height must be non-decreasing: cell_size({})={h0} > cell_size({})={h1}",
+                sizes[i],
+                sizes[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn cell_size_within_bounds() {
+        for icon_size in (0u32..=512).step_by(8) {
+            let (w, h) = cell_size(icon_size);
+            assert!(w >= CELL_MIN && w <= CELL_MAX, "width {w} out of [{CELL_MIN},{CELL_MAX}]");
+            assert!(h >= CELL_MIN && h <= CELL_MAX, "height {h} out of [{CELL_MIN},{CELL_MAX}]");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // assign_control_ids / command_for_id tests (issue #7 Phase 2)
+    // -----------------------------------------------------------------------
+
+    fn cell_with_id(label: &str, command_id: Option<&str>) -> GridCell {
+        GridCell {
+            row: 0,
+            col: 0,
+            label: label.to_string(),
+            icon: String::new(),
+            command_id: command_id.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn assign_control_ids_empty_cells_returns_empty() {
+        let map = assign_control_ids(&[]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn assign_control_ids_skips_cells_without_command_id() {
+        let cells = vec![
+            cell_with_id("No ID", None),
+            cell_with_id("With ID", Some("notepad")),
+        ];
+        let map = assign_control_ids(&cells);
+        assert_eq!(map.len(), 1, "only cells with command_id get an id");
+        assert_eq!(map[0].1, "notepad");
+    }
+
+    #[test]
+    fn assign_control_ids_starts_at_base() {
+        let cells = vec![cell_with_id("A", Some("cmd_a"))];
+        let map = assign_control_ids(&cells);
+        assert_eq!(map[0].0, CONTROL_ID_BASE, "first id must be CONTROL_ID_BASE");
+    }
+
+    #[test]
+    fn assign_control_ids_are_unique_and_sequential() {
+        let cells = vec![
+            cell_with_id("Notepad", Some("notepad")),
+            cell_with_id("Cmd", Some("cmd")),
+            cell_with_id("Paint", Some("paint")),
+        ];
+        let map = assign_control_ids(&cells);
+        assert_eq!(map.len(), 3);
+
+        // Ids must be unique.
+        let ids: Vec<u16> = map.iter().map(|(id, _)| *id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "control ids must be unique");
+
+        // Ids must be sequential from base.
+        assert_eq!(ids[0], CONTROL_ID_BASE);
+        assert_eq!(ids[1], CONTROL_ID_BASE + 1);
+        assert_eq!(ids[2], CONTROL_ID_BASE + 2);
+    }
+
+    #[test]
+    fn assign_control_ids_order_matches_cell_order() {
+        let cells = vec![
+            cell_with_id("A", Some("cmd_a")),
+            cell_with_id("B", Some("cmd_b")),
+            cell_with_id("C", Some("cmd_c")),
+        ];
+        let map = assign_control_ids(&cells);
+        assert_eq!(map[0].1, "cmd_a");
+        assert_eq!(map[1].1, "cmd_b");
+        assert_eq!(map[2].1, "cmd_c");
+    }
+
+    #[test]
+    fn command_for_id_resolves_assigned_id() {
+        let cells = vec![
+            cell_with_id("Notepad", Some("notepad")),
+            cell_with_id("Cmd", Some("cmd")),
+        ];
+        let map = assign_control_ids(&cells);
+        assert_eq!(
+            command_for_id(&map, CONTROL_ID_BASE),
+            Some("notepad"),
+            "first id must resolve to first command"
+        );
+        assert_eq!(
+            command_for_id(&map, CONTROL_ID_BASE + 1),
+            Some("cmd"),
+            "second id must resolve to second command"
+        );
+    }
+
+    #[test]
+    fn command_for_id_unknown_id_returns_none() {
+        let cells = vec![cell_with_id("Notepad", Some("notepad"))];
+        let map = assign_control_ids(&cells);
+        assert_eq!(
+            command_for_id(&map, 9999),
+            None,
+            "unassigned id must resolve to None"
+        );
+        assert_eq!(
+            command_for_id(&map, 0),
+            None,
+            "id 0 must resolve to None"
+        );
+    }
+
+    #[test]
+    fn command_for_id_on_empty_map_returns_none() {
+        let map: Vec<(u16, String)> = Vec::new();
+        assert_eq!(command_for_id(&map, CONTROL_ID_BASE), None);
     }
 }
