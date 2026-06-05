@@ -16,6 +16,20 @@ fn main() {
 
     log::info!("WinFXStart v0.1.0 starting");
 
+    // Best-effort boot sync: align the registry startup entry with config.
+    match storage::load() {
+        Ok(cfg) => {
+            if let Err(e) =
+                windows::registry::sync_startup(cfg.default_settings.launch_at_startup)
+            {
+                log::warn!("boot sync_startup failed: {}", e);
+            }
+        }
+        Err(e) => {
+            log::warn!("could not load config for boot sync: {}", e);
+        }
+    }
+
     let event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
