@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/target-*/
 *.rlib
 *.so
 *.dylib
@@ -25,3 +26,10 @@ Cargo.lock
 # Temporary files
 tmp/
 temp/
+
+# SFTP fetcher local configuration and downloads
+/scripts/sftp_fetch/config.yaml
+/scripts/sftp_fetch/downloads/
+/scripts/sftp_fetch/.venv/
+__pycache__/
+*.py[cod]

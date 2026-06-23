@@ -19,6 +19,9 @@
 //! // Then call UiHost::reload() to refresh the visible grid.
 //! ```
 
+// Staged favorite-toggle API (issue #9): fully tested but not yet wired to the UI.
+#![allow(dead_code)]
+
 use crate::storage::models::Config;
 
 // ---------------------------------------------------------------------------
@@ -118,10 +121,7 @@ mod tests {
                 name: "Système".to_string(),
                 icon: String::new(),
             }],
-            commands: vec![
-                make_command("notepad", true),
-                make_command("paint", false),
-            ],
+            commands: vec![make_command("notepad", true), make_command("paint", false)],
         }
     }
 
@@ -148,7 +148,12 @@ mod tests {
         let new_state = toggle_favorite(&mut config, "notepad").expect("toggle failed");
         assert!(!new_state, "returned state must be the new (flipped) value");
         assert!(
-            !config.commands.iter().find(|c| c.id == "notepad").unwrap().is_favorite,
+            !config
+                .commands
+                .iter()
+                .find(|c| c.id == "notepad")
+                .unwrap()
+                .is_favorite,
             "is_favorite must be false after toggle"
         );
     }
@@ -160,7 +165,12 @@ mod tests {
         let new_state = toggle_favorite(&mut config, "paint").expect("toggle failed");
         assert!(new_state, "returned state must be the new (flipped) value");
         assert!(
-            config.commands.iter().find(|c| c.id == "paint").unwrap().is_favorite,
+            config
+                .commands
+                .iter()
+                .find(|c| c.id == "paint")
+                .unwrap()
+                .is_favorite,
             "is_favorite must be true after toggle"
         );
     }
@@ -168,10 +178,23 @@ mod tests {
     #[test]
     fn toggle_only_affects_target_command() {
         let mut config = two_command_config();
-        let paint_before = config.commands.iter().find(|c| c.id == "paint").unwrap().is_favorite;
+        let paint_before = config
+            .commands
+            .iter()
+            .find(|c| c.id == "paint")
+            .unwrap()
+            .is_favorite;
         toggle_favorite(&mut config, "notepad").expect("toggle failed");
-        let paint_after = config.commands.iter().find(|c| c.id == "paint").unwrap().is_favorite;
-        assert_eq!(paint_before, paint_after, "other commands must not be affected");
+        let paint_after = config
+            .commands
+            .iter()
+            .find(|c| c.id == "paint")
+            .unwrap()
+            .is_favorite;
+        assert_eq!(
+            paint_before, paint_after,
+            "other commands must not be affected"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -194,7 +217,10 @@ mod tests {
         let mut config = two_command_config();
         let original = config.clone();
         let _ = toggle_favorite(&mut config, "ghost");
-        assert_eq!(config, original, "config must be unchanged when id is not found");
+        assert_eq!(
+            config, original,
+            "config must be unchanged when id is not found"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -204,12 +230,22 @@ mod tests {
     #[test]
     fn double_toggle_restores_original_state() {
         let mut config = two_command_config();
-        let original_fav = config.commands.iter().find(|c| c.id == "notepad").unwrap().is_favorite;
+        let original_fav = config
+            .commands
+            .iter()
+            .find(|c| c.id == "notepad")
+            .unwrap()
+            .is_favorite;
 
         toggle_favorite(&mut config, "notepad").expect("first toggle failed");
         toggle_favorite(&mut config, "notepad").expect("second toggle failed");
 
-        let restored_fav = config.commands.iter().find(|c| c.id == "notepad").unwrap().is_favorite;
+        let restored_fav = config
+            .commands
+            .iter()
+            .find(|c| c.id == "notepad")
+            .unwrap()
+            .is_favorite;
         assert_eq!(
             restored_fav, original_fav,
             "two consecutive toggles must restore the original is_favorite value"

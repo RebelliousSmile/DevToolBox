@@ -2,11 +2,13 @@
 
 This document outlines the testing strategy for WinFXStart.
 
-> Current state: no automated tests exist yet (MVP, Phase 1). The strategy below is the intended target.
+> Current state: automated Rust unit tests cover the application modules. The standalone
+> SFTP script has its own isolated Python unit-test suite.
 
 ## Tools and Frameworks
 
 - Rust built-in test framework (`cargo test`, `#[test]` / `#[cfg(test)]`)
+- Python built-in test framework (`unittest`) for standalone scripts
 
 ## Testing Strategy
 
@@ -18,6 +20,7 @@ This document outlines the testing strategy for WinFXStart.
 ## Test Execution Process
 
 - Run all tests: `cargo test`
+- Run SFTP script tests: `cd scripts/sftp_fetch && python -m unittest discover -s tests -v`
 - Release build sanity: `cargo build --release`
 
 > No CI integration yet; tests are run locally.

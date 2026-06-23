@@ -10,10 +10,23 @@
 //! are provided so unit tests can operate in a temp directory without touching
 //! the real `%APPDATA%`.
 
+// The write side (`save` / `save_to`) is tested but not yet wired to the UI.
+#![allow(dead_code)]
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::storage::models::Config;
+use serde::Deserialize;
+
+use crate::storage::models::{Category, Command, Config};
+
+#[derive(Deserialize)]
+struct BuiltinActions {
+    #[serde(default)]
+    categories: Vec<Category>,
+    #[serde(default)]
+    commands: Vec<Command>,
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -36,7 +49,10 @@ impl fmt::Display for StorageError {
             StorageError::Io(e) => write!(f, "storage I/O error: {e}"),
             StorageError::Parse(e) => write!(f, "storage parse error: {e}"),
             StorageError::NoConfigFound => {
-                write!(f, "no config found (user file and bundled default both missing)")
+                write!(
+                    f,
+                    "no config found (user file and bundled default both missing)"
+                )
             }
         }
     }
@@ -70,9 +86,11 @@ impl From<serde_json::Error> for StorageError {
 
 /// Returns `%APPDATA%\WinFXStart\config.json`, or `None` if `APPDATA` is unset.
 pub fn user_config_path() -> Option<PathBuf> {
-    std::env::var("APPDATA")
-        .ok()
-        .map(|appdata| PathBuf::from(appdata).join("WinFXStart").join("config.json"))
+    std::env::var("APPDATA").ok().map(|appdata| {
+        PathBuf::from(appdata)
+            .join("WinFXStart")
+            .join("config.json")
+    })
 }
 
 /// Returns the path to the bundled `config/default.json` using the same
@@ -80,15 +98,29 @@ pub fn user_config_path() -> Option<PathBuf> {
 /// 1. Relative to the current working directory.
 /// 2. Relative to the executable directory.
 pub fn default_config_path() -> Option<PathBuf> {
-    let relative = PathBuf::from("config/default.json");
+    bundled_config_path("default.json")
+}
+
+fn bundled_config_path(filename: &str) -> Option<PathBuf> {
+    let relative = PathBuf::from("config").join(filename);
     if relative.exists() {
         return Some(relative);
     }
 
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("config/default.json")))
-        .filter(|p| p.exists())
+    let mut roots = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        roots.push(current);
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots.into_iter().find_map(|root| {
+        root.ancestors()
+            .map(|ancestor| ancestor.join("config").join(filename))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +139,7 @@ pub fn load() -> Result<Config, StorageError> {
     if let Some(user_path) = user_config_path() {
         if user_path.exists() {
             log::info!("Loading config from user file: {}", user_path.display());
-            return load_from(&user_path);
+            return merge_builtin_actions(load_from(&user_path)?);
         }
     }
 
@@ -117,11 +149,40 @@ pub fn load() -> Result<Config, StorageError> {
             "User config absent — loading bundled default: {}",
             default_path.display()
         );
-        return load_from(&default_path);
+        return merge_builtin_actions(load_from(&default_path)?);
     }
 
     log::warn!("No config file found (user file and bundled default both missing)");
     Err(StorageError::NoConfigFound)
+}
+
+fn merge_builtin_actions(mut config: Config) -> Result<Config, StorageError> {
+    let Some(path) = bundled_config_path("builtin-actions.json") else {
+        return Ok(config);
+    };
+    let text = std::fs::read_to_string(&path)?;
+    let builtins: BuiltinActions = serde_json::from_str(&text)?;
+
+    for category in builtins.categories {
+        if !config
+            .categories
+            .iter()
+            .any(|existing| existing.id == category.id)
+        {
+            config.categories.push(category);
+        }
+    }
+    for command in builtins.commands {
+        if !config
+            .commands
+            .iter()
+            .any(|existing| existing.id == command.id)
+        {
+            config.commands.push(command);
+        }
+    }
+    log::info!("Merged built-in actions from {}", path.display());
+    Ok(config)
 }
 
 /// Load configuration from an explicit path.
@@ -336,5 +397,22 @@ mod tests {
                 "user config path must end with config.json, got: {display}"
             );
         }
+    }
+
+    #[test]
+    fn load_merges_builtin_actions_without_duplicates() {
+        let merged = merge_builtin_actions(sample_config()).expect("merge failed");
+        assert!(merged.categories.iter().any(|item| item.id == "sftp-sync"));
+        assert!(merged.commands.iter().any(|item| item.id == "sftp-pro"));
+
+        let merged_again = merge_builtin_actions(merged).expect("second merge failed");
+        assert_eq!(
+            merged_again
+                .commands
+                .iter()
+                .filter(|item| item.id == "sftp-pro")
+                .count(),
+            1
+        );
     }
 }

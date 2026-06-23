@@ -1,6 +1,21 @@
-# WinFXStart - Windows 11 Command Launcher
+# WinFXStart - Lanceur d'actions personnalisées Windows
 
-Une application Rust minimaliste pour lancer des commandes CLI Windows avec une interface graphique native WinUI 3.
+Une application Rust minimaliste pour centraliser et lancer des commandes, scripts et
+actions personnalisées Windows avec une interface graphique native.
+
+## Actions de script
+
+Les commandes classiques restent acceptées telles quelles. Une action Python utilise
+le préfixe `@python` et un chemin relatif à la racine WinFXStart :
+
+```text
+@python scripts/sftp_fetch/sftp_fetch.py config.yaml --only pro
+```
+
+WinFXStart utilise en priorité `.venv/Scripts/python.exe` à côté du script, puis la
+variable `WINFXSTART_PYTHON`, et enfin `python3` disponible dans le système. Le script
+est exécuté depuis son propre dossier, ce qui rend ses fichiers de configuration
+relatifs portables.
 
 ## 🎯 Objectifs
 

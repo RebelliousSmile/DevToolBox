@@ -17,13 +17,17 @@
 //! `WinFXStart` name overwrites in place — no dedup code is needed and no
 //! duplicate can be created (see Decision D4 in the plan).
 
+// Read-side helpers (`open_key_read`, `query_value`, `is_startup_enabled`) are
+// part of the registry API surface but not all are wired to the UI yet.
+#![allow(dead_code)]
+
 use std::fmt;
 use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_VALUE_TYPE, REG_SZ,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, REG_VALUE_TYPE,
 };
 
 // ---------------------------------------------------------------------------
@@ -38,9 +42,8 @@ pub const APP_VALUE_NAME: &str = "WinFXStart";
 
 // HRESULT value that corresponds to ERROR_FILE_NOT_FOUND (Win32 code 2).
 // HRESULT::from_win32(x) = (x & 0xFFFF) | (7 << 16) | 0x80000000 for x > 0.
-const HRESULT_FILE_NOT_FOUND: i32 = (ERROR_FILE_NOT_FOUND.0 as i32 & 0x0000_FFFF)
-    | (7 << 16)
-    | 0x8000_0000_u32 as i32;
+const HRESULT_FILE_NOT_FOUND: i32 =
+    (ERROR_FILE_NOT_FOUND.0 as i32 & 0x0000_FFFF) | (7 << 16) | 0x8000_0000_u32 as i32;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -143,7 +146,10 @@ unsafe fn open_or_create_key(sub_key: &str, access: u32) -> Result<HKEY, Registr
 ///
 /// Returns `Ok(None)` when the subkey does not exist (`ERROR_FILE_NOT_FOUND`).
 /// Maps other failures to [`RegistryError::Win32`].
-unsafe fn open_key(sub_key: &str, access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Result<Option<HKEY>, RegistryError> {
+unsafe fn open_key(
+    sub_key: &str,
+    access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+) -> Result<Option<HKEY>, RegistryError> {
     let wide_key = to_wide(sub_key);
     let mut hkey = HKEY::default();
 
@@ -182,10 +188,8 @@ pub fn set_value(sub_key: &str, value_name: &str, data: &str) -> Result<(), Regi
         let wide_name = to_wide(value_name);
         // REG_SZ byte length includes the null terminator.
         let wide_data = to_wide(data);
-        let byte_slice = std::slice::from_raw_parts(
-            wide_data.as_ptr() as *const u8,
-            wide_data.len() * 2,
-        );
+        let byte_slice =
+            std::slice::from_raw_parts(wide_data.as_ptr() as *const u8, wide_data.len() * 2);
 
         let result = RegSetValueExW(
             hkey,
@@ -291,8 +295,7 @@ pub fn delete_value(sub_key: &str, value_name: &str) -> Result<(), RegistryError
         };
 
         let wide_name = to_wide(value_name);
-        let result =
-            RegDeleteValueW(hkey, windows::core::PCWSTR(wide_name.as_ptr()));
+        let result = RegDeleteValueW(hkey, windows::core::PCWSTR(wide_name.as_ptr()));
         let _ = RegCloseKey(hkey);
 
         match result {
@@ -395,10 +398,7 @@ mod tests {
         // Best-effort delete the test subkey itself.
         unsafe {
             let wide_key = to_wide(TEST_SUBKEY);
-            let _ = RegDeleteKeyW(
-                HKEY_CURRENT_USER,
-                windows::core::PCWSTR(wide_key.as_ptr()),
-            );
+            let _ = RegDeleteKeyW(HKEY_CURRENT_USER, windows::core::PCWSTR(wide_key.as_ptr()));
         }
     }
 
@@ -419,16 +419,8 @@ mod tests {
     #[test]
     fn executable_value_is_double_quoted() {
         let val = executable_value().expect("executable_value failed");
-        assert!(
-            val.starts_with('"'),
-            "expected leading quote, got: {}",
-            val
-        );
-        assert!(
-            val.ends_with('"'),
-            "expected trailing quote, got: {}",
-            val
-        );
+        assert!(val.starts_with('"'), "expected leading quote, got: {}", val);
+        assert!(val.ends_with('"'), "expected trailing quote, got: {}", val);
     }
 
     #[test]

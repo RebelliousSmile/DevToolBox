@@ -1,0 +1,51 @@
+{
+  "categories": [
+    {
+      "id": "sftp-sync",
+      "name": "Synchronisation SFTP",
+      "icon": "🔄"
+    }
+  ],
+  "commands": [
+    {
+      "id": "sftp-pro",
+      "name": "Synchroniser Pro",
+      "command": "@python scripts/sftp_fetch/sftp_fetch.py config.yaml --only pro",
+      "category": "sftp-sync",
+      "icon": "💼",
+      "is_favorite": true
+    },
+    {
+      "id": "sftp-perso",
+      "name": "Synchroniser Perso",
+      "command": "@python scripts/sftp_fetch/sftp_fetch.py config.yaml --only perso",
+      "category": "sftp-sync",
+      "icon": "🏠",
+      "is_favorite": true
+    },
+    {
+      "id": "sftp-hermes",
+      "name": "Synchroniser Hermes",
+      "command": "@python scripts/sftp_fetch/sftp_fetch.py config.yaml --only hermes",
+      "category": "sftp-sync",
+      "icon": "🤖",
+      "is_favorite": true
+    },
+    {
+      "id": "sftp-all",
+      "name": "Tout synchroniser",
+      "command": "@python scripts/sftp_fetch/sftp_fetch.py config.yaml",
+      "category": "sftp-sync",
+      "icon": "🔄",
+      "is_favorite": true
+    },
+    {
+      "id": "sftp-all-code",
+      "name": "Tout synchroniser avec _code",
+      "command": "@python scripts/sftp_fetch/sftp_fetch.py config.yaml --include-code",
+      "category": "sftp-sync",
+      "icon": "🧑‍💻",
+      "is_favorite": false
+    }
+  ]
+}

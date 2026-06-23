@@ -14,6 +14,10 @@
 //! use crate::storage::{toggle_favorite, FavoriteError};
 //! ```
 
+// Thin re-export facade for the staged storage API (issues #6/#7/#9); several
+// re-exports below are not yet consumed by the UI.
+#![allow(unused_imports)]
+
 pub mod categories;
 pub mod commands;
 pub mod json;

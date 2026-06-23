@@ -165,8 +165,7 @@ mod tests {
         let serialized = serde_json::to_string(&config).expect("serialize failed");
 
         // The `cmd` command must not emit a `shortcut` key
-        let value: serde_json::Value =
-            serde_json::from_str(&serialized).expect("re-parse failed");
+        let value: serde_json::Value = serde_json::from_str(&serialized).expect("re-parse failed");
         let commands = value["commands"].as_array().expect("commands array");
         let cmd_entry = commands
             .iter()

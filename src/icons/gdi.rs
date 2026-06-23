@@ -34,15 +34,12 @@ use crate::icons::DecodedIcon;
 pub enum GdiError {
     /// `CreateDIBSection` returned a null handle.
     CreateDibFailed,
-    /// `SetDIBits` reported failure (returned 0 or GDI_ERROR).
-    SetDibFailed,
 }
 
 impl std::fmt::Display for GdiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GdiError::CreateDibFailed => write!(f, "CreateDIBSection returned null"),
-            GdiError::SetDibFailed => write!(f, "SetDIBits failed"),
         }
     }
 }
@@ -96,14 +93,14 @@ pub fn rgba_to_hbitmap(icon: &DecodedIcon) -> Result<HBITMAP, GdiError> {
     // Safety: CreateDIBSection allocates a DIB section and returns a pointer to
     // the pixel data in `ppv_bits`. We copy into it immediately before any other
     // DC operation and never alias the pointer after that.
-    let hbitmap = unsafe {
-        CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut ppv_bits, None, 0)
-    };
+    let hbitmap = unsafe { CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut ppv_bits, None, 0) };
 
     // Release the temporary DC — we only needed it for CreateDIBSection.
     if !hdc.is_invalid() {
         // Safety: hdc was created by CreateCompatibleDC above.
-        unsafe { let _ = DeleteDC(hdc); }
+        unsafe {
+            let _ = DeleteDC(hdc);
+        }
     }
 
     let hbitmap = match hbitmap {
@@ -113,7 +110,9 @@ pub fn rgba_to_hbitmap(icon: &DecodedIcon) -> Result<HBITMAP, GdiError> {
 
     if ppv_bits.is_null() {
         // Safety: hbitmap is valid but ppv_bits is null — unexpected; clean up.
-        unsafe { let _ = DeleteObject(HGDIOBJ(hbitmap.0)); }
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(hbitmap.0));
+        }
         return Err(GdiError::CreateDibFailed);
     }
 

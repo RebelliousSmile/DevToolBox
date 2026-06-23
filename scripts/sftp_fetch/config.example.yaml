@@ -1,0 +1,37 @@
+server:
+  host: sftp.example.com
+  port: 22
+  username: mon-utilisateur
+  # Recommandé en automatisation. Sinon, les clés connues du système sont utilisées.
+  known_hosts: ~/.ssh/known_hosts
+  timeout_seconds: 15
+
+auth:
+  # Authentification par clé (recommandée).
+  private_key: ~/.ssh/id_ed25519
+  passphrase_env: SFTP_KEY_PASSPHRASE
+  # Pour un mot de passe, commentez les deux lignes précédentes :
+  # password_env: SFTP_PASSWORD
+  allow_agent: true
+  look_for_keys: true
+
+destination: ./downloads
+overwrite: false
+skip_unchanged: true
+parallel_downloads: 4
+continue_on_error: true
+
+downloads:
+  # Forme courte : conserve l'arborescence distante sous destination.
+  - /exports/rapport.pdf
+
+  # Forme détaillée : permet de choisir le chemin local.
+  - name: factures
+    remote: /exports/factures/juin.csv
+    local: comptabilite/factures-juin.csv
+
+  # Téléchargement récursif explicite d'un dossier.
+  - name: photos
+    remote: /exports/photos
+    local: photos
+    recursive: true

@@ -65,6 +65,7 @@ pub struct GridEntry {
 
 impl GridEntry {
     /// Convenience constructor for label-only entries (backward compat).
+    #[allow(dead_code)] // used by unit tests; kept as a public convenience.
     pub fn label_only(label: impl Into<String>) -> Self {
         GridEntry {
             label: label.into(),
@@ -148,6 +149,7 @@ pub struct SectionedModel {
     pub rows: Vec<SectionRow>,
 }
 
+#[allow(dead_code)] // convenience accessors exercised by unit tests.
 impl SectionedModel {
     /// Total number of rows (including header rows).
     pub fn row_count(&self) -> usize {
@@ -258,8 +260,12 @@ const WIDTH_PAD: u32 = 16;
 /// unclamped range `[CELL_MIN − WIDTH_PAD, CELL_MAX − WIDTH_PAD]` for width
 /// and `[CELL_MIN − LABEL_PAD, CELL_MAX − LABEL_PAD]` for height.
 pub fn cell_size(icon_size: u32) -> (u32, u32) {
-    let w = icon_size.saturating_add(WIDTH_PAD).clamp(CELL_MIN, CELL_MAX);
-    let h = icon_size.saturating_add(LABEL_PAD).clamp(CELL_MIN, CELL_MAX);
+    let w = icon_size
+        .saturating_add(WIDTH_PAD)
+        .clamp(CELL_MIN, CELL_MAX);
+    let h = icon_size
+        .saturating_add(LABEL_PAD)
+        .clamp(CELL_MIN, CELL_MAX);
     (w, h)
 }
 
@@ -298,7 +304,8 @@ pub fn assign_control_ids(cells: &[GridCell]) -> Vec<(u16, String)> {
 ///
 /// `map` is the slice returned by [`assign_control_ids`].
 /// Returns `None` when `control_id` is not present in `map`.
-pub fn command_for_id<'a>(map: &'a [(u16, String)], control_id: u16) -> Option<&'a str> {
+#[allow(dead_code)] // resolver kept for callers that don't hold the id→cmd map.
+pub fn command_for_id(map: &[(u16, String)], control_id: u16) -> Option<&str> {
     map.iter()
         .find(|(id, _)| *id == control_id)
         .map(|(_, cid)| cid.as_str())
@@ -502,8 +509,8 @@ mod tests {
     fn build_sectioned_section_idx_matches_original_position() {
         let sections = vec![
             section("First", &["A"]),
-            section("Empty", &[]),       // idx=1, skipped
-            section("Third", &["B"]),    // idx=2
+            section("Empty", &[]),    // idx=1, skipped
+            section("Third", &["B"]), // idx=2
         ];
         let model = build_sectioned(&sections, 3);
 
@@ -564,8 +571,14 @@ mod tests {
     #[test]
     fn cell_size_huge_clamps_to_max() {
         let (w, h) = cell_size(u32::MAX);
-        assert_eq!(w, CELL_MAX, "width must be CELL_MAX for very large icon_size");
-        assert_eq!(h, CELL_MAX, "height must be CELL_MAX for very large icon_size");
+        assert_eq!(
+            w, CELL_MAX,
+            "width must be CELL_MAX for very large icon_size"
+        );
+        assert_eq!(
+            h, CELL_MAX,
+            "height must be CELL_MAX for very large icon_size"
+        );
     }
 
     #[test]
@@ -578,7 +591,22 @@ mod tests {
 
     #[test]
     fn cell_size_never_zero() {
-        for icon_size in [0u32, 1, 8, 16, 24, 32, 48, 64, 80, 96, 128, 256, 512, u32::MAX] {
+        for icon_size in [
+            0u32,
+            1,
+            8,
+            16,
+            24,
+            32,
+            48,
+            64,
+            80,
+            96,
+            128,
+            256,
+            512,
+            u32::MAX,
+        ] {
             let (w, h) = cell_size(icon_size);
             assert!(w > 0, "width must never be 0 (icon_size={icon_size})");
             assert!(h > 0, "height must never be 0 (icon_size={icon_size})");
@@ -613,8 +641,14 @@ mod tests {
     fn cell_size_within_bounds() {
         for icon_size in (0u32..=512).step_by(8) {
             let (w, h) = cell_size(icon_size);
-            assert!(w >= CELL_MIN && w <= CELL_MAX, "width {w} out of [{CELL_MIN},{CELL_MAX}]");
-            assert!(h >= CELL_MIN && h <= CELL_MAX, "height {h} out of [{CELL_MIN},{CELL_MAX}]");
+            assert!(
+                (CELL_MIN..=CELL_MAX).contains(&w),
+                "width {w} out of [{CELL_MIN},{CELL_MAX}]"
+            );
+            assert!(
+                (CELL_MIN..=CELL_MAX).contains(&h),
+                "height {h} out of [{CELL_MIN},{CELL_MAX}]"
+            );
         }
     }
 
@@ -653,7 +687,10 @@ mod tests {
     fn assign_control_ids_starts_at_base() {
         let cells = vec![cell_with_id("A", Some("cmd_a"))];
         let map = assign_control_ids(&cells);
-        assert_eq!(map[0].0, CONTROL_ID_BASE, "first id must be CONTROL_ID_BASE");
+        assert_eq!(
+            map[0].0, CONTROL_ID_BASE,
+            "first id must be CONTROL_ID_BASE"
+        );
     }
 
     #[test]
@@ -720,11 +757,7 @@ mod tests {
             None,
             "unassigned id must resolve to None"
         );
-        assert_eq!(
-            command_for_id(&map, 0),
-            None,
-            "id 0 must resolve to None"
-        );
+        assert_eq!(command_for_id(&map, 0), None, "id 0 must resolve to None");
     }
 
     #[test]

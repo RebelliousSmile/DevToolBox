@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! WinFXStart - Windows 11 Command Launcher
 //!
 //! Native Rust application using tao for windowing and Win32 child controls
@@ -12,16 +14,62 @@ use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
 use tao::window::WindowBuilder;
 
-fn main() {
-    env_logger::init();
+struct FlushFile(std::fs::File);
 
-    log::info!("WinFXStart v0.1.0 starting");
+impl std::io::Write for FlushFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = std::io::Write::write(&mut self.0, buffer)?;
+        std::io::Write::flush(&mut self.0)?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.0)
+    }
+}
+
+fn init_logging() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let directory = base.join("WinFXStart");
+    std::fs::create_dir_all(&directory).ok()?;
+    let path = directory.join("winfxstart.log");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    use std::io::Write as _;
+    let _ = writeln!(
+        file,
+        "\n--- WinFXStart bootstrap pid={} ---",
+        std::process::id()
+    );
+    let _ = file.flush();
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    builder
+        .filter_level(log::LevelFilter::Debug)
+        .format_timestamp_millis()
+        .target(env_logger::Target::Pipe(Box::new(FlushFile(file))))
+        .init();
+    Some(path)
+}
+
+fn main() {
+    let log_path = init_logging();
+
+    log::info!(
+        "WinFXStart v0.1.0 starting; pid={}; log={:?}",
+        std::process::id(),
+        log_path
+    );
 
     // Best-effort boot sync: align the registry startup entry with config.
     match storage::load() {
         Ok(cfg) => {
-            if let Err(e) =
-                windows::registry::sync_startup(cfg.default_settings.launch_at_startup)
+            if let Err(e) = windows::registry::sync_startup(cfg.default_settings.launch_at_startup)
             {
                 log::warn!("boot sync_startup failed: {}", e);
             }
@@ -34,7 +82,7 @@ fn main() {
     let event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
-        .with_title("WinFXStart - Command Launcher")
+        .with_title("WinFXStart - Actions Windows")
         .with_inner_size(tao::dpi::LogicalSize::new(800u32, 600u32))
         .with_min_inner_size(tao::dpi::LogicalSize::new(400u32, 300u32))
         .build(&event_loop)

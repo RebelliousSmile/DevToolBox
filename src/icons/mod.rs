@@ -22,6 +22,6 @@ pub mod resolve;
 pub mod gdi;
 
 #[allow(unused_imports)]
-pub use decode::{DecodedIcon, DecodeError, decode_resize_file, decode_resize_rgba};
+pub use decode::{decode_resize_file, decode_resize_rgba, DecodeError, DecodedIcon};
 #[allow(unused_imports)]
-pub use resolve::{IconResolution, icons_dirs, resolve_icon};
+pub use resolve::{icons_dirs, resolve_icon, IconResolution};

@@ -21,6 +21,9 @@
 //! ```
 //! then call `crate::storage::save(&config)` to persist the mutation.
 
+// Staged category CRUD API (issue #9): fully tested but not yet wired to the UI.
+#![allow(dead_code)]
+
 use crate::storage::models::{Category, Command, Config};
 
 // ---------------------------------------------------------------------------
@@ -200,8 +203,8 @@ pub fn remove_category(config: &mut Config, id: &str) -> Result<(), CategoryErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::models::{Category, Command, Config, Settings};
     use crate::storage::json::{load_from, save_to};
+    use crate::storage::models::{Category, Command, Config, Settings};
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -291,7 +294,9 @@ mod tests {
     fn orphan_command_lands_in_trailing_uncategorized_bucket() {
         let mut config = three_category_config();
         // Add a command with an unknown category id.
-        config.commands.push(make_command("orphan", "unknown_cat", false));
+        config
+            .commands
+            .push(make_command("orphan", "unknown_cat", false));
 
         let groups = group_commands_by_category(&config);
 
@@ -341,8 +346,7 @@ mod tests {
             .collect();
         seen.sort_unstable();
 
-        let mut expected: Vec<&str> =
-            config.commands.iter().map(|c| c.id.as_str()).collect();
+        let mut expected: Vec<&str> = config.commands.iter().map(|c| c.id.as_str()).collect();
         expected.sort_unstable();
 
         assert_eq!(seen, expected, "every command must appear exactly once");
@@ -395,7 +399,11 @@ mod tests {
         let mut config = three_category_config();
         rename_category(&mut config, "network", "Réseau Étendu").expect("rename failed");
 
-        let cat = config.categories.iter().find(|c| c.id == "network").unwrap();
+        let cat = config
+            .categories
+            .iter()
+            .find(|c| c.id == "network")
+            .unwrap();
         assert_eq!(cat.name, "Réseau Étendu");
     }
 
@@ -403,10 +411,7 @@ mod tests {
     fn rename_category_returns_error_for_unknown_id() {
         let mut config = three_category_config();
         let result = rename_category(&mut config, "ghost", "Fantôme");
-        assert_eq!(
-            result,
-            Err(CategoryError::NotFound("ghost".to_string()))
-        );
+        assert_eq!(result, Err(CategoryError::NotFound("ghost".to_string())));
     }
 
     // -----------------------------------------------------------------------
@@ -442,7 +447,10 @@ mod tests {
             .find(|g| g.category.is_none())
             .expect("Uncategorized bucket must exist after remove");
         let unc_ids: Vec<&str> = unc.commands.iter().map(|c| c.id.as_str()).collect();
-        assert!(unc_ids.contains(&"notepad"), "notepad must be Uncategorized");
+        assert!(
+            unc_ids.contains(&"notepad"),
+            "notepad must be Uncategorized"
+        );
         assert!(unc_ids.contains(&"cmd"), "cmd must be Uncategorized");
     }
 
@@ -450,10 +458,7 @@ mod tests {
     fn remove_category_returns_error_for_unknown_id() {
         let mut config = three_category_config();
         let result = remove_category(&mut config, "ghost");
-        assert_eq!(
-            result,
-            Err(CategoryError::NotFound("ghost".to_string()))
-        );
+        assert_eq!(result, Err(CategoryError::NotFound("ghost".to_string())));
     }
 
     #[test]
@@ -511,7 +516,11 @@ mod tests {
         let loaded = load_from(&path).expect("load_from failed");
 
         assert_eq!(loaded, config, "round-trip must be lossless");
-        let cat = loaded.categories.iter().find(|c| c.id == "network").unwrap();
+        let cat = loaded
+            .categories
+            .iter()
+            .find(|c| c.id == "network")
+            .unwrap();
         assert_eq!(cat.name, "LAN");
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
