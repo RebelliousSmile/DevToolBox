@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Orchestrator + CLI entry point for the system inventory tool.
 
-Aggregates every enabled scanner source (only ``registry`` in Part 1 of the
-master plan), sorts the combined result by descending on-disk/estimated
-size, and prints either a text report or a ``--json`` payload, always with
-a grand total. Read-only, offline, stdlib only — see ``README.md``.
+Aggregates every enabled scanner source (all seven, as of Part 3 of the
+master plan: ``registry``, ``appdata``, ``dotfolder``, ``programdata``,
+``scoop-choco``, ``path``, ``docker-wsl``), sorts the combined result by
+descending on-disk/estimated size, and prints either a text report or a
+``--json`` payload, always with a grand total. Read-only, offline, stdlib
+only — see ``README.md``.
 
 Import bootstrap (deliberate, see the module docstring of
 ``tests/test_common.py`` for the sibling half of this story): this file is
@@ -54,32 +56,58 @@ from scripts.system_inventory.registry import (  # noqa: E402
     WinregUnavailableError,
     scan_registry,
 )
+from scripts.system_inventory.appdata import (  # noqa: E402
+    scan_appdata,
+    scan_dotfolders,
+    scan_programdata,
+)
+from scripts.system_inventory.packages import scan_scoop_choco  # noqa: E402
+from scripts.system_inventory.path_env import scan_path  # noqa: E402
+from scripts.system_inventory.docker_wsl import scan_docker_wsl  # noqa: E402
 
-# Every enabled scanner source, keyed by its stable ``source`` tag. Parts 2
-# and 3 of the master plan add ``appdata``, ``dotfolder``, ``programdata``,
-# ``scoop-choco``, ``path``, ``docker-wsl`` here — nothing else in this
-# module needs to change for that: ``--source`` choices, the default
-# all-sources set, and the aggregation loop all derive from this dict.
-SCANNERS: dict[str, Callable[[], list[InventoryItem]]] = {
+# Every enabled scanner source, keyed by its stable ``source`` tag. All seven
+# sources from the master plan are now registered: ``--source`` choices, the
+# default all-sources set, and the aggregation loop all derive from this dict.
+#
+# Type is ``Callable[..., ...]`` rather than ``Callable[[], ...]`` because
+# ``scan_appdata`` (and, less commonly, ``scan_docker_wsl``) accept optional
+# keyword arguments (``exclude_paths=`` / ``base=``) that ``main()`` passes
+# explicitly in the ``docker-wsl`` + ``appdata`` special case below; every
+# other call site still invokes each scanner with zero arguments.
+SCANNERS: dict[str, Callable[..., list[InventoryItem]]] = {
     "registry": scan_registry,
+    "appdata": scan_appdata,
+    "dotfolder": scan_dotfolders,
+    "programdata": scan_programdata,
+    "scoop-choco": scan_scoop_choco,
+    "path": scan_path,
+    "docker-wsl": scan_docker_wsl,
 }
+
+# Sources that require ``winreg`` (Windows-only stdlib) to run at all. Each
+# also raises ``WinregUnavailableError`` itself if called anyway, but
+# pre-filtering here lets ``_resolve_active_sources`` return an empty list
+# (rather than a list whose scanners are guaranteed to fail) so the
+# no-active-source guard in ``main()`` can report a clear message.
+_WINREG_DEPENDENT_SOURCES = frozenset({"registry", "path", "docker-wsl"})
 
 
 def _resolve_active_sources(requested: list[str] | None) -> list[str]:
     """Resolve the ``--source`` CLI argument into the list of sources to run.
 
     ``requested is None`` (flag omitted entirely) means "all currently
-    registered sources", i.e. ``list(SCANNERS)`` — just ``["registry"]`` in
-    Part 1. A source is dropped from the active list (rather than raising)
-    when its dependency is unavailable on this platform: today the only
-    such case is ``"registry"`` requiring ``winreg`` (Windows-only stdlib).
-    An empty return value signals "nothing runnable" to the caller, which
-    is the trigger for the non-zero-exit guard in ``main()``.
+    registered sources", i.e. ``list(SCANNERS)`` — all seven. A source is
+    dropped from the active list (rather than raising) when its dependency
+    is unavailable on this platform: today that means any of
+    ``_WINREG_DEPENDENT_SOURCES`` when ``winreg`` (Windows-only stdlib)
+    failed to import. An empty return value signals "nothing runnable" to
+    the caller, which is the trigger for the non-zero-exit guard in
+    ``main()``.
     """
     names = requested if requested is not None else list(SCANNERS)
     active: list[str] = []
     for name in names:
-        if name == "registry" and not WINREG_AVAILABLE:
+        if name in _WINREG_DEPENDENT_SOURCES and not WINREG_AVAILABLE:
             continue
         active.append(name)
     return active
@@ -129,8 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Inventaire en lecture seule des traces disque des outils de dev "
-            "Windows (registre Uninstall pour l'instant ; AppData/Scoop/Choco/"
-            "PATH/Docker-WSL suivront dans les parties 2 et 3)."
+            "Windows : registre Uninstall, AppData/dotfolders/ProgramData, "
+            "Scoop/Chocolatey, entrées PATH (utilisateur + système, avec "
+            "détection des entrées mortes) et fichiers .vhdx Docker/WSL2 "
+            "(disques + distros WSL enregistrées) — sept sources au total."
         )
     )
     parser.add_argument(
@@ -193,12 +223,42 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Double-count avoidance (Part 3): a docker-wsl .vhdx can live nested
+    # inside a LOCALAPPDATA first-level folder (Docker\wsl\ or
+    # Packages\<PackageFamilyName>\LocalState\) that the generic appdata
+    # scan would otherwise also sum. When both sources are active, run
+    # docker-wsl first, collect every returned item's absolute path, and
+    # thread that set into scan_appdata()'s exclude_paths= so those exact
+    # bytes are skipped there and attributed only once, to docker-wsl. When
+    # docker-wsl is not active (e.g. --source appdata alone), scan_appdata()
+    # runs with no exclusions — a documented, accepted over-count in that
+    # filtered view (see README.md).
+    thread_docker_wsl_excludes = "docker-wsl" in active_sources and "appdata" in active_sources
+
     items: list[InventoryItem] = []
+    appdata_exclude_paths: set[Path] | None = None
+
+    if thread_docker_wsl_excludes:
+        try:
+            docker_wsl_items = SCANNERS["docker-wsl"]()
+        except WinregUnavailableError as exc:
+            print(f"Source 'docker-wsl' indisponible : {exc}", file=sys.stderr)
+            docker_wsl_items = []
+        items.extend(docker_wsl_items)
+        appdata_exclude_paths = {
+            Path(item.path).resolve() for item in docker_wsl_items if item.path
+        }
+
     for name in active_sources:
+        if thread_docker_wsl_excludes and name == "docker-wsl":
+            continue  # already run above, first, to build appdata_exclude_paths
         scanner = SCANNERS[name]
         try:
-            items.extend(scanner())
-        except WinregUnavailableError as exc:  # pragma: no cover - guarded above already
+            if thread_docker_wsl_excludes and name == "appdata":
+                items.extend(scanner(exclude_paths=appdata_exclude_paths))
+            else:
+                items.extend(scanner())
+        except WinregUnavailableError as exc:
             print(f"Source '{name}' indisponible : {exc}", file=sys.stderr)
 
     if args.json:

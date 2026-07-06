@@ -18,6 +18,7 @@ import io
 import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts.system_inventory.common import InventoryItem
@@ -30,6 +31,25 @@ def _fake_registry_items() -> list[InventoryItem]:
         InventoryItem("registry", "Small App", "C:\\Small", 100, {"hive": "HKLM", "view": "64"}),
         InventoryItem("registry", "Unknown App", None, None, {"hive": "HKCU", "view": "64"}),
         InventoryItem("registry", "Medium App", None, 500, {"hive": "HKLM", "view": "32"}),
+    ]
+
+
+def _fake_docker_wsl_items() -> list[InventoryItem]:
+    return [
+        InventoryItem(
+            "docker-wsl",
+            "ext4.vhdx",
+            "C:\\LocalAppData\\Docker\\wsl\\data\\ext4.vhdx",
+            5000,
+            {"kind": "vhdx"},
+        ),
+        InventoryItem(
+            "docker-wsl",
+            "Ubuntu",
+            "C:\\LocalAppData\\Packages\\Ubuntu\\LocalState\\ext4.vhdx",
+            7000,
+            {"distro": "Ubuntu", "kind": "wsl-distro"},
+        ),
     ]
 
 
@@ -152,6 +172,84 @@ class NoActiveSourceGuardTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertEqual(out, "")
         self.assertIn("winreg", err)
+
+
+class DockerWslAppdataExcludePathsThreadingTests(unittest.TestCase):
+    """Covers the Part 3 double-count-avoidance wiring: with fake docker-wsl
+    and appdata scanners installed, the orchestrator must run docker-wsl
+    first and thread its items' resolved paths into appdata's
+    ``exclude_paths=`` keyword argument — and the grand total must reflect
+    that exclusion actually happening (no double count).
+    """
+
+    def test_appdata_receives_resolved_docker_wsl_paths_as_exclude_paths(self):
+        recorded_kwargs: dict[str, object] = {}
+
+        def fake_appdata(exclude_paths=None):
+            recorded_kwargs["exclude_paths"] = exclude_paths
+            return [InventoryItem("appdata", "Docker", "C:\\LocalAppData\\Docker", 1000, {"root": "LOCALAPPDATA"})]
+
+        with patch.dict(
+            SCANNERS,
+            {"docker-wsl": _fake_docker_wsl_items, "appdata": fake_appdata},
+            clear=True,
+        ):
+            code, out, err = _run(["--json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        expected_paths = {Path(item.path).resolve() for item in _fake_docker_wsl_items()}
+        self.assertEqual(recorded_kwargs["exclude_paths"], expected_paths)
+
+    def test_grand_total_does_not_double_count_excluded_docker_wsl_bytes(self):
+        # Simulates a real appdata scan: without exclude_paths it would sum
+        # the same vhdx bytes a second time (13000); with exclude_paths
+        # threaded in, it correctly reports only the non-overlapping bytes
+        # (1000).
+        def fake_appdata_respecting_exclusions(exclude_paths=None):
+            size = 1000 if exclude_paths else 13000
+            return [InventoryItem("appdata", "Docker", "C:\\LocalAppData\\Docker", size, {"root": "LOCALAPPDATA"})]
+
+        with patch.dict(
+            SCANNERS,
+            {"docker-wsl": _fake_docker_wsl_items, "appdata": fake_appdata_respecting_exclusions},
+            clear=True,
+        ):
+            code, out, _err = _run(["--json"])
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        docker_wsl_total = sum(item.size_bytes for item in _fake_docker_wsl_items())
+        # 5000 + 7000 (docker-wsl) + 1000 (appdata, correctly excluded) =
+        # 13000 — NOT 5000 + 7000 + 13000 = 25000, which would be the
+        # double-counted total if exclude_paths had not been threaded in.
+        self.assertEqual(payload["total_bytes"], docker_wsl_total + 1000)
+
+    def test_appdata_alone_without_docker_wsl_runs_with_no_exclude_paths(self):
+        recorded_kwargs: dict[str, object] = {"called": False}
+
+        def fake_appdata(exclude_paths=None):
+            recorded_kwargs["called"] = True
+            recorded_kwargs["exclude_paths"] = exclude_paths
+            return []
+
+        with patch.dict(SCANNERS, {"appdata": fake_appdata}, clear=True):
+            code, out, err = _run(["--json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertTrue(recorded_kwargs["called"])
+        self.assertIsNone(recorded_kwargs["exclude_paths"])
+
+    def test_docker_wsl_alone_without_appdata_runs_normally(self):
+        with patch.dict(SCANNERS, {"docker-wsl": _fake_docker_wsl_items}, clear=True):
+            code, out, err = _run(["--json"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual(payload["total_bytes"], 12000)
 
 
 if __name__ == "__main__":
