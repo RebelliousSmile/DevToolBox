@@ -59,6 +59,12 @@ fn init_logging() -> Option<std::path::PathBuf> {
 
 fn main() {
     let log_path = init_logging();
+    std::panic::set_hook(Box::new(|info| {
+        log::error!(
+            "panic: {info}\nbacktrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+    }));
 
     log::info!(
         "WinFXStart v0.1.0 starting; pid={}; log={:?}",

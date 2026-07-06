@@ -42,6 +42,12 @@ pub struct Command {
     pub is_favorite: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcut: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant_label: Option<String>,
 }
 
 /// Top-level configuration wrapper.
