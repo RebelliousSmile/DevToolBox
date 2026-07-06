@@ -22,3 +22,7 @@ flowchart TD
     MAIN -.will use.-> UIMOD
     MAIN -.will use.-> STOREMOD
 ```
+
+## Standalone scripts (`scripts/`)
+
+Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx).
