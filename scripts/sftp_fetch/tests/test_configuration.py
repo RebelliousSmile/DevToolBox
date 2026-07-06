@@ -67,17 +67,16 @@ class ConfigurationTests(unittest.TestCase):
             [
                 "/exports/report.pdf",
                 {
-                    "name": "photos",
-                    "remote": "/exports/photos",
-                    "local": "photos",
-                    "recursive": True,
+                    "name": "facture",
+                    "remote": "/exports/factures/juin.csv",
+                    "local": "compta/juin.csv",
                 },
             ]
         )
         self.assertEqual(parsed[0].name, "report.pdf")
         self.assertEqual(parsed[0].remote, "/exports/report.pdf")
-        self.assertEqual(parsed[1].local, Path("photos"))
-        self.assertTrue(parsed[1].recursive)
+        self.assertEqual(parsed[1].name, "facture")
+        self.assertEqual(parsed[1].local, Path("compta/juin.csv"))
 
     def test_duplicate_names_are_rejected_case_insensitively(self):
         with self.assertRaisesRegex(ConfigurationError, "nom unique"):

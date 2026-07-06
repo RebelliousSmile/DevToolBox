@@ -29,9 +29,3 @@ downloads:
   - name: factures
     remote: /exports/factures/juin.csv
     local: comptabilite/factures-juin.csv
-
-  # Téléchargement récursif explicite d'un dossier.
-  - name: photos
-    remote: /exports/photos
-    local: photos
-    recursive: true

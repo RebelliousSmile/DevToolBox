@@ -1,29 +1,7 @@
 from __future__ import annotations
 
-import fnmatch
-import io
-import posixpath
 import stat
 from types import SimpleNamespace
-
-
-class FakeGitWildMatchPattern:
-    """Small deterministic substitute used to isolate traversal tests from PathSpec."""
-
-    def __init__(self, line: str):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            self.include = None
-            self.pattern = ""
-            return
-        self.include = not line.startswith("!")
-        self.pattern = line.lstrip("!").lstrip("/").rstrip("/")
-
-    def match_file(self, path: str):
-        candidate = path.rstrip("/")
-        if fnmatch.fnmatch(candidate, self.pattern):
-            return object()
-        return None
 
 
 class FakeSFTP:
@@ -33,22 +11,6 @@ class FakeSFTP:
         self.tree = tree
         self.files = files or {}
         self.closed = False
-
-    def listdir_attr(self, remote: str):
-        return [
-            SimpleNamespace(
-                filename=name,
-                st_mode=(stat.S_IFDIR | 0o755) if kind == "dir" else (stat.S_IFREG | 0o644),
-                st_size=len(self.files.get(posixpath.join(remote, name), b"")),
-                st_mtime=1_700_000_000,
-            )
-            for name, kind in self.tree[remote]
-        ]
-
-    def open(self, remote: str, mode: str):
-        if remote not in self.files:
-            raise OSError(f"missing remote file: {remote}")
-        return io.BytesIO(self.files[remote])
 
     def stat(self, remote: str):
         if remote in self.tree:
@@ -75,8 +37,3 @@ class FakeSSH:
 
     def close(self):
         self.closed = True
-
-
-def remote_file(tree: dict[str, list[tuple[str, str]]], parent: str, name: str):
-    tree.setdefault(parent, []).append((name, "file"))
-    return posixpath.join(parent, name)

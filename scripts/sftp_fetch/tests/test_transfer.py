@@ -106,6 +106,20 @@ class TransferTests(unittest.TestCase):
         self.assertTrue(sftp.closed)
         self.assertTrue(ssh.closed)
 
+    def test_execute_rejects_directory_entries(self):
+        ssh = FakeSSH()
+        sftp = FakeSFTP({"/documents/photos": []}, {})
+        with tempfile.TemporaryDirectory() as directory:
+            config = {
+                "server": {"host": "example.test", "username": "alice"},
+                "destination": directory,
+                "parallel_downloads": 1,
+                "downloads": [{"name": "photos", "remote": "/documents/photos"}],
+            }
+            with patch("sftp_fetch.connect", return_value=(ssh, sftp)):
+                with self.assertLogs("sftp_fetch", level="ERROR"):
+                    self.assertEqual(execute(config), (0, 1))
+
     def test_execute_continues_after_missing_remote_when_configured(self):
         ssh = FakeSSH()
         sftp = FakeSFTP({}, {"/documents/present.txt": b"present"})

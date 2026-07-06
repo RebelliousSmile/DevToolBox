@@ -38,14 +38,6 @@
       "category": "sftp-sync",
       "icon": "🔄",
       "is_favorite": true
-    },
-    {
-      "id": "sftp-all-code",
-      "name": "Tout synchroniser avec _code",
-      "command": "@python scripts/sftp_fetch/sftp_fetch.py config.yaml --include-code",
-      "category": "sftp-sync",
-      "icon": "🧑‍💻",
-      "is_favorite": false
     }
   ]
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download an explicit list of files and directories from an SFTP server."""
+"""Download an explicit list of files from an SFTP server."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 import threading
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import paramiko
@@ -24,11 +24,6 @@ try:
     import yaml
 except ModuleNotFoundError:
     yaml = None  # type: ignore[assignment]
-
-try:
-    from pathspec.patterns.gitwildmatch import GitWildMatchPattern
-except ModuleNotFoundError:
-    GitWildMatchPattern = None  # type: ignore[assignment,misc]
 
 
 LOG = logging.getLogger("sftp_fetch")
@@ -47,7 +42,6 @@ class Download:
     name: str
     remote: str
     local: Path | None = None
-    recursive: bool = False
 
 
 @dataclass(frozen=True)
@@ -127,7 +121,7 @@ def parse_downloads(values: list[Any]) -> list[Download]:
     result: list[Download] = []
     for index, value in enumerate(values, start=1):
         if isinstance(value, str):
-            remote, local, recursive = value, None, False
+            remote, local = value, None
             name = PurePosixPath(remote).name
         elif isinstance(value, dict):
             remote = _required_text(value, "remote")
@@ -145,11 +139,6 @@ def parse_downloads(values: list[Any]) -> list[Download]:
                     f"downloads[{index}].local doit être une chaîne non vide"
                 )
             local = Path(local_value) if local_value else None
-            recursive = value.get("recursive", False)
-            if not isinstance(recursive, bool):
-                raise ConfigurationError(
-                    f"downloads[{index}].recursive doit être un booléen"
-                )
         else:
             raise ConfigurationError(
                 f"downloads[{index}] doit être un chemin ou un objet"
@@ -160,7 +149,7 @@ def parse_downloads(values: list[Any]) -> list[Download]:
             raise ConfigurationError(
                 f"downloads[{index}].remote doit être un chemin absolu SFTP"
             )
-        result.append(Download(name, normalized, local, recursive))
+        result.append(Download(name, normalized, local))
 
     names = [item.name.casefold() for item in result]
     if len(names) != len(set(names)):
@@ -217,103 +206,6 @@ def connect(config: dict[str, Any]) -> tuple[paramiko.SSHClient, paramiko.SFTPCl
         look_for_keys=bool(auth.get("look_for_keys", True)),
     )
     return client, client.open_sftp()
-
-
-def _read_gitignore_patterns(
-    sftp: paramiko.SFTPClient,
-    remote: str,
-    relative: PurePosixPath,
-) -> list[tuple[PurePosixPath, Any]]:
-    if GitWildMatchPattern is None:
-        raise DependencyError(
-            "PathSpec absent; exécutez: python -m pip install -r requirements.txt"
-        )
-    gitignore = posixpath.join(remote, ".gitignore")
-    try:
-        with sftp.open(gitignore, "r") as stream:
-            content = stream.read(1024 * 1024 + 1)
-    except OSError:
-        return []
-    if len(content) > 1024 * 1024:
-        LOG.warning(".gitignore trop volumineux, ignoré: %s", gitignore)
-        return []
-    if isinstance(content, bytes):
-        text = content.decode("utf-8-sig", errors="replace")
-    else:
-        text = content.lstrip("\ufeff")
-
-    patterns: list[tuple[PurePosixPath, Any]] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        try:
-            pattern = GitWildMatchPattern(line)
-        except Exception as exc:
-            LOG.warning("règle .gitignore invalide %s:%d: %s", gitignore, line_number, exc)
-            continue
-        if pattern.include is not None:
-            patterns.append((relative, pattern))
-    return patterns
-
-
-def _directory_is_ignored(
-    relative: PurePosixPath,
-    rules: list[tuple[PurePosixPath, Any]],
-) -> bool:
-    ignored = False
-    for base, pattern in rules:
-        try:
-            scoped = relative.relative_to(base)
-        except ValueError:
-            continue
-        if pattern.match_file(scoped.as_posix() + "/") is not None:
-            ignored = bool(pattern.include)
-    return ignored
-
-
-def walk_remote(
-    sftp: paramiko.SFTPClient,
-    remote: str,
-    include_code: bool,
-    relative: PurePosixPath = PurePosixPath(),
-    inherited_rules: list[tuple[PurePosixPath, Any]] | None = None,
-    scan_state: list[int] | None = None,
-) -> Iterable[RemoteFile]:
-    if scan_state is None:
-        scan_state = [0, 0]
-    scan_state[0] += 1
-    rules = list(inherited_rules or [])
-    entries = sftp.listdir_attr(remote)
-    if any(entry.filename == ".gitignore" for entry in entries):
-        rules.extend(_read_gitignore_patterns(sftp, remote, relative))
-
-    for entry in entries:
-        child = posixpath.join(remote, entry.filename)
-        child_relative = relative / entry.filename
-        if stat.S_ISDIR(entry.st_mode):
-            if entry.filename == ".git":
-                LOG.info("dossier .git ignoré: %s", child)
-                continue
-            if entry.filename == "_code" and not include_code:
-                LOG.info("dossier _code ignoré: %s", child)
-                continue
-            if _directory_is_ignored(child_relative, rules):
-                LOG.info("dossier ignoré par .gitignore: %s", child)
-                continue
-            yield from walk_remote(
-                sftp, child, include_code, child_relative, rules, scan_state
-            )
-        elif stat.S_ISREG(entry.st_mode):
-            scan_state[1] += 1
-            if scan_state[1] % 500 == 0:
-                LOG.info(
-                    "analyse: %d fichier(s), %d dossier(s)",
-                    scan_state[1],
-                    scan_state[0],
-                )
-            yield RemoteFile(
-                child,
-                getattr(entry, "st_size", None),
-                getattr(entry, "st_mtime", None),
-            )
 
 
 def download_file(
@@ -431,7 +323,6 @@ def execute(
     config: dict[str, Any],
     dry_run: bool = False,
     selected_names: list[str] | None = None,
-    include_code: bool = False,
 ) -> tuple[int, int]:
     destination = Path(config.get("destination", "downloads")).expanduser()
     downloads = select_downloads(parse_downloads(config["downloads"]), selected_names)
@@ -449,11 +340,10 @@ def execute(
         for item in downloads:
             relative = item.local or default_relative_path(item.remote)
             LOG.info(
-                "prévu [%s]: %s -> %s%s",
+                "prévu [%s]: %s -> %s",
                 item.name,
                 item.remote,
                 safe_local_path(destination, relative),
-                " (avec _code)" if include_code else " (_code exclus)",
             )
         return 0, 0
 
@@ -466,17 +356,10 @@ def execute(
                 remote_stat = sftp.stat(item.remote)
                 relative = item.local or default_relative_path(item.remote)
                 if stat.S_ISDIR(remote_stat.st_mode):
-                    if not item.recursive:
-                        raise IsADirectoryError(
-                            f"{item.remote} est un dossier; ajoutez recursive: true"
-                        )
-                    for remote_file in walk_remote(sftp, item.remote, include_code):
-                        suffix = PurePosixPath(remote_file.remote).relative_to(
-                            PurePosixPath(item.remote)
-                        )
-                        local = safe_local_path(destination, relative / Path(*suffix.parts))
-                        transfers.append(Transfer(remote_file, local))
-                elif stat.S_ISREG(remote_stat.st_mode):
+                    raise IsADirectoryError(
+                        f"{item.remote} est un dossier; seuls les fichiers sont pris en charge"
+                    )
+                if stat.S_ISREG(remote_stat.st_mode):
                     local = safe_local_path(destination, relative)
                     transfers.append(
                         Transfer(
@@ -544,7 +427,7 @@ def execute(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Télécharge une liste explicite de fichiers et dossiers via SFTP."
+        description="Télécharge une liste explicite de fichiers via SFTP."
     )
     parser.add_argument("config", type=Path, help="fichier de configuration YAML")
     parser.add_argument(
@@ -555,11 +438,6 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         metavar="NOM",
         help="ne télécharge que cette entrée YAML (répétable)",
-    )
-    parser.add_argument(
-        "--include-code",
-        action="store_true",
-        help="inclut les dossiers nommés _code, exclus par défaut",
     )
     parser.add_argument("--verbose", action="store_true", help="active les logs détaillés")
     args = parser.parse_args(argv)
@@ -573,7 +451,6 @@ def main(argv: list[str] | None = None) -> int:
             config,
             dry_run=args.dry_run,
             selected_names=args.only,
-            include_code=args.include_code,
         )
         LOG.info("terminé: %d fichier(s), %d échec(s)", completed, failed)
         return 1 if failed else 0

@@ -7,7 +7,7 @@ from sftp_fetch import ConfigurationError, main
 class CliTests(unittest.TestCase):
     @patch("sftp_fetch.execute", return_value=(3, 0))
     @patch("sftp_fetch.load_config", return_value={"downloads": ["/unused"]})
-    def test_main_forwards_selection_and_include_code(self, _load, execute):
+    def test_main_forwards_selection(self, _load, execute):
         result = main(
             [
                 "config.yaml",
@@ -15,7 +15,6 @@ class CliTests(unittest.TestCase):
                 "pro",
                 "--only",
                 "perso",
-                "--include-code",
             ]
         )
         self.assertEqual(result, 0)
@@ -23,7 +22,6 @@ class CliTests(unittest.TestCase):
             {"downloads": ["/unused"]},
             dry_run=False,
             selected_names=["pro", "perso"],
-            include_code=True,
         )
 
     @patch("sftp_fetch.execute", return_value=(2, 1))
