@@ -142,6 +142,10 @@ pub fn rgba_to_hbitmap(icon: &DecodedIcon) -> Result<HBITMAP, GdiError> {
 
 /// Set a native Win32 BUTTON to display `hbitmap` as its image.
 ///
+/// Not called in Phase 1 (owner-draw path); retained for potential Phase 2
+/// hybrid use.  Suppressed to keep clippy clean across Phase 1 development.
+#[allow(dead_code)]
+///
 /// Adds `BS_BITMAP` to the button's window style and sends `BM_SETIMAGE`.
 ///
 /// # Safety

@@ -256,6 +256,9 @@ mod tests {
                     icon: "📝".to_string(),
                     is_favorite: true,
                     shortcut: Some("Ctrl+N".to_string()),
+                variant_group: None,
+                group_name: None,
+                variant_label: None,
                 },
                 Command {
                     id: "cmd".to_string(),
@@ -265,6 +268,9 @@ mod tests {
                     icon: "💻".to_string(),
                     is_favorite: true,
                     shortcut: None,
+                variant_group: None,
+                group_name: None,
+                variant_label: None,
                 },
             ],
         }

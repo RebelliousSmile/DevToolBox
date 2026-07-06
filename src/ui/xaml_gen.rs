@@ -230,22 +230,22 @@ pub fn build_sectioned(sections: &[GridSection], preferred_cols: u32) -> Section
 ///
 /// Enforces a sane floor so buttons are never invisible regardless of the
 /// `icon_size` value stored in config.
-const CELL_MIN: u32 = 40;
+const CELL_MIN: u32 = 36;
 
 /// Maximum cell dimension in pixels.
 ///
 /// Prevents absurdly large buttons for out-of-range `icon_size` values.
-const CELL_MAX: u32 = 256;
+const CELL_MAX: u32 = 196;
 
 /// Fixed label-area padding added to `icon_size` to produce the cell height.
 ///
 /// The height accommodates the icon plus a text label below it.
-const LABEL_PAD: u32 = 20;
+const LABEL_PAD: u32 = 8;
 
 /// Fixed horizontal padding added to `icon_size` to produce the cell width.
 ///
 /// Ensures the label is not clipped for typical command names.
-const WIDTH_PAD: u32 = 16;
+const WIDTH_PAD: u32 = 8;
 
 /// Derive button cell dimensions from `icon_size`.
 ///
@@ -547,10 +547,10 @@ mod tests {
 
     #[test]
     fn cell_size_normal_value_passes_through_with_padding() {
-        // icon_size = 48: w = 48+16 = 64, h = 48+20 = 68 (both in [40,256])
+        // icon_size = 48: w = 48+8 = 56, h = 48+8 = 56 (both in [36,196])
         let (w, h) = cell_size(48);
-        assert_eq!(w, 64);
-        assert_eq!(h, 68);
+        assert_eq!(w, 56);
+        assert_eq!(h, 56);
     }
 
     #[test]
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn cell_size_tiny_clamps_to_min() {
-        // icon_size = 1: w = 1+16 = 17 < 40 → clamped; h = 1+20 = 21 < 40 → clamped
+        // icon_size = 1: w = 1+8 = 9 < 36 → clamped; h = 1+8 = 9 < 36 → clamped
         let (w, h) = cell_size(1);
         assert_eq!(w, CELL_MIN);
         assert_eq!(h, CELL_MIN);
@@ -616,9 +616,9 @@ mod tests {
     #[test]
     fn cell_size_monotonic_in_unclamped_range() {
         // In the unclamped range both w and h should grow with icon_size.
-        // CELL_MIN=40, WIDTH_PAD=16 → icon_size >= 24 gives w unclamped at 40+.
-        // CELL_MAX=256, WIDTH_PAD=16 → icon_size <= 240 keeps w <= 256.
-        let sizes = [24u32, 32, 48, 64, 80, 96, 128, 200, 240];
+        // CELL_MIN=36, WIDTH_PAD=8 → icon_size >= 28 gives w unclamped at 36+.
+        // CELL_MAX=196, WIDTH_PAD=8 → icon_size <= 188 keeps w <= 196.
+        let sizes = [28u32, 32, 48, 64, 80, 96, 128, 160, 188];
         for i in 0..sizes.len() - 1 {
             let (w0, h0) = cell_size(sizes[i]);
             let (w1, h1) = cell_size(sizes[i + 1]);

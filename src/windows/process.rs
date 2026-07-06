@@ -16,6 +16,7 @@
 // UI path uses `launch_captured`. Keep both available without dead-code noise.
 #![allow(dead_code)]
 
+use serde::Deserialize;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -155,7 +156,17 @@ pub enum ActionEvent {
     Output(String),
     Finished { code: Option<i32> },
     Failed(String),
-    AutomationsLoaded(String),
+    AutomationsLoaded(Result<Vec<ScheduledTask>, String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ScheduledTask {
+    pub name: String,
+    pub category: String,
+    pub next_run: String,
+    pub state: String,
+    pub author: String,
 }
 
 fn stream_output<R: Read + Send + 'static>(stream: R, sender: Sender<ActionEvent>) {
@@ -512,10 +523,12 @@ mod tests {
             .iter()
             .filter(|command| command.command.starts_with("@python"))
             .collect();
-        assert_eq!(python_actions.len(), 4);
+        assert_eq!(python_actions.len(), 14);
         for action in python_actions {
             resolve_action(&action.command, root)
                 .unwrap_or_else(|error| panic!("invalid action {}: {error}", action.id));
         }
     }
 }
+
+
