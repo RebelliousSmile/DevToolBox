@@ -9,11 +9,12 @@ import form that resolves under both
 
 from __future__ import annotations
 
+import platform
 import re
 import unittest
 from pathlib import Path
 
-from scripts.system_inventory.registry import _read_uninstall_entry
+from scripts.system_inventory.registry import WINREG_AVAILABLE, _read_uninstall_entry, scan_registry
 
 _REGISTRY_SOURCE = (Path(__file__).resolve().parent.parent / "registry.py").read_text(encoding="utf-8")
 
@@ -119,6 +120,27 @@ class RegistrySourceReadOnlyContractTests(unittest.TestCase):
                     match,
                     f"registry.py must never call the winreg write API winreg.{write_api}(...)",
                 )
+
+
+@unittest.skipUnless(WINREG_AVAILABLE and platform.system() == "Windows", "winreg only available on Windows")
+class ScanRegistryLiveSmokeTest(unittest.TestCase):
+    """Runs the real scanner against this machine's live registry.
+
+    Guarded to Windows only. On this development machine (Windows, Python
+    3.13) it is expected to actually execute, not merely be skipped: a
+    Windows machine always has at least one entry under
+    HKLM\\...\\Uninstall (Windows itself ships components registered there).
+    """
+
+    def test_returns_at_least_one_item_without_raising(self):
+        items = scan_registry()
+
+        self.assertGreater(len(items), 0)
+        for item in items:
+            self.assertEqual(item.source, "registry")
+            self.assertTrue(item.name)
+            self.assertIn(item.detail["hive"], ("HKLM", "HKCU"))
+            self.assertIn(item.detail["view"], ("32", "64"))
 
 
 if __name__ == "__main__":
