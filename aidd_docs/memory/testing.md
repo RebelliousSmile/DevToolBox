@@ -21,6 +21,8 @@ This document outlines the testing strategy for WinFXStart.
 
 - Run all tests: `cargo test`
 - Run SFTP script tests: `cd scripts/sftp_fetch && python -m unittest discover -s tests -v`
+- Run deps-audit script tests: `python -m unittest discover -s scripts/deps_audit/tests -v`
+- Run system-inventory script tests: `python -m unittest discover -s scripts/system_inventory/tests -v`
 - Release build sanity: `cargo build --release`
 
 > No CI integration yet; tests are run locally.
