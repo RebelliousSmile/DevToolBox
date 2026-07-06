@@ -512,7 +512,7 @@ mod tests {
             .iter()
             .filter(|command| command.command.starts_with("@python"))
             .collect();
-        assert_eq!(python_actions.len(), 5);
+        assert_eq!(python_actions.len(), 4);
         for action in python_actions {
             resolve_action(&action.command, root)
                 .unwrap_or_else(|error| panic!("invalid action {}: {error}", action.id));
