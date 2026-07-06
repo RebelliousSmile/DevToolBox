@@ -60,12 +60,28 @@ def dir_size_on_disk(
     """Sum the on-disk size of every regular file under ``path``.
 
     Walks iteratively (no recursion, so no stack-depth risk on deep trees).
-    Any entry (file or directory) whose resolved absolute path is present in
+    Any entry (file or directory) whose absolute path matches one in
     ``exclude_paths`` is skipped entirely: a directory match is not recursed
     into, a file match is not summed. This lets a source that claims a
     specific file or subtree exactly (e.g. a Docker/WSL ``.vhdx`` owned by
-    a future ``docker-wsl`` source) opt out of being re-summed by a broader
+    the ``docker_wsl`` source) opt out of being re-summed by a broader
     first-level folder scan.
+
+    The exclusion match is a lexical, case-insensitive string comparison
+    (``os.path.normcase(os.path.normpath(...))`` on both sides) rather than
+    a real ``Path.resolve()`` per entry. This is deliberate: ``resolve()``
+    performs a filesystem round-trip (it opens the entry to follow any
+    symlink chain), and calling it for *every single entry* of a full
+    ``%LOCALAPPDATA%``/``%APPDATA%`` walk — hundreds of thousands of files
+    on a real dev machine — turned a sub-minute scan into one that could run
+    for many minutes as soon as ``exclude_paths`` was non-empty (the
+    ``docker-wsl`` source populating it is exactly what first exercised this
+    at scale). A plain lexical comparison is sound here because any entry
+    reached by this walk is, by construction, never itself inside a
+    symlinked/junctioned directory: a reparse-point directory is skipped
+    below and never pushed onto the walk stack, so entries never need
+    symlink-following to compare correctly against the (already-resolved)
+    paths callers pass in ``exclude_paths``.
 
     Entries carrying ``FILE_ATTRIBUTE_REPARSE_POINT`` (symlinks, junctions,
     mount points) are skipped and never followed. Any ``OSError`` /
@@ -73,6 +89,7 @@ def dir_size_on_disk(
     swallowed and the walk continues with the remaining entries.
     """
     excluded = exclude_paths or set()
+    excluded_keys = {os.path.normcase(os.path.normpath(str(p))) for p in excluded}
     total = 0
     stack: list[Path] = [Path(path)]
     while stack:
@@ -84,12 +101,10 @@ def dir_size_on_disk(
         for entry in entries:
             try:
                 entry_path = Path(entry.path)
-                try:
-                    resolved = entry_path.resolve()
-                except OSError:
-                    resolved = entry_path
-                if resolved in excluded:
-                    continue
+                if excluded_keys:
+                    entry_key = os.path.normcase(os.path.normpath(str(entry_path)))
+                    if entry_key in excluded_keys:
+                        continue
                 stat_result = entry.stat(follow_symlinks=False)
                 attrs = getattr(stat_result, "st_file_attributes", 0)
                 if attrs & FILE_ATTRIBUTE_REPARSE_POINT:

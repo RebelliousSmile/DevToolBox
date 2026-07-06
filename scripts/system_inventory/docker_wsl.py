@@ -66,6 +66,37 @@ _VHDX_GLOB_SUBDIRS = ("", "data", "disk")
 
 _VHDX_FILENAME = "ext4.vhdx"
 
+# Extended-length path prefix Windows understands (bypasses MAX_PATH). Real
+# machines have been observed to store a registered distro's Lxss `BasePath`
+# value *with* this prefix already baked in (seen in the wild for the
+# `docker-desktop` internal distro: `\\?\C:\Users\...\Docker\wsl\main`) —
+# this is registry data, not something this module introduces. Neither
+# `os.path.normpath` nor `Path.resolve()` strips it back off once present.
+# Left as-is, a vhdx reached only through such a `BasePath` would report (and
+# be excluded on) a `\\?\`-prefixed path, while `common.dir_size_on_disk`'s
+# plain `os.scandir`-based walk (used by `appdata.scan_appdata()`) only ever
+# produces un-prefixed paths for the exact same file — the string comparison
+# would then never match, and the same vhdx bytes would be double-counted by
+# the generic `appdata` scan despite `docker-wsl` already claiming them. Both
+# sub-scans below strip this prefix (and its UNC variant) before the path is
+# stored on the emitted item, so every ``path`` this module reports is in the
+# same plain form ``dir_size_on_disk`` compares against.
+_EXTENDED_LENGTH_PREFIX = "\\\\?\\"
+_EXTENDED_LENGTH_UNC_PREFIX = "\\\\?\\UNC\\"
+
+
+def _strip_extended_length_prefix(path: Path) -> Path:
+    """Strip a leading ``\\\\?\\`` (or ``\\\\?\\UNC\\``) extended-length prefix, if present.
+
+    Pure string operation; a path without the prefix is returned unchanged.
+    """
+    text = str(path)
+    if text.startswith(_EXTENDED_LENGTH_UNC_PREFIX):
+        return Path("\\\\" + text[len(_EXTENDED_LENGTH_UNC_PREFIX) :])
+    if text.startswith(_EXTENDED_LENGTH_PREFIX):
+        return Path(text[len(_EXTENDED_LENGTH_PREFIX) :])
+    return path
+
 
 def _resolve_docker_wsl_root(base: dict[str, str] | None) -> Path | None:
     """Resolve the Docker/WSL vhdx root: ``%LOCALAPPDATA%\\Docker\\wsl`` by default.
@@ -129,7 +160,7 @@ def _vhdx_glob_items(base: dict[str, str] | None = None) -> list[InventoryItem]:
     for vhdx_path in _glob_vhdx_files(root):
         try:
             size = vhdx_path.stat().st_size
-            resolved_path = vhdx_path.resolve()
+            resolved_path = _strip_extended_length_prefix(vhdx_path.resolve())
         except OSError:
             continue
         items.append(
@@ -226,7 +257,7 @@ def _distro_items(records: list[dict[str, str]]) -> list[InventoryItem]:
             if not vhdx_path.is_file():
                 continue
             size = vhdx_path.stat().st_size
-            resolved_path = vhdx_path.resolve()
+            resolved_path = _strip_extended_length_prefix(vhdx_path.resolve())
         except OSError:
             continue
         items.append(

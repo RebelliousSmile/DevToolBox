@@ -20,6 +20,7 @@ from scripts.system_inventory.docker_wsl import (
     WINREG_AVAILABLE,
     _distro_items,
     _parse_lxss_distros,
+    _strip_extended_length_prefix,
     _vhdx_glob_items,
     scan_docker_wsl,
 )
@@ -118,6 +119,28 @@ class ParseLxssDistrosTests(unittest.TestCase):
         self.assertEqual(names, ["Debian", "Ubuntu"])
 
 
+class StripExtendedLengthPrefixTests(unittest.TestCase):
+    """A real dev machine has been observed to store a registered distro's
+    Lxss ``BasePath`` value with a Windows extended-length prefix already
+    baked in (``\\\\?\\C:\\...``, seen for the ``docker-desktop`` internal
+    distro) — this exercises the pure stripping helper directly.
+    """
+
+    def test_plain_path_is_unchanged(self):
+        plain = Path("C:\\Users\\fx\\AppData\\Local\\Docker\\wsl\\main\\ext4.vhdx")
+        self.assertEqual(_strip_extended_length_prefix(plain), plain)
+
+    def test_extended_length_prefix_is_stripped(self):
+        prefixed = Path("\\\\?\\C:\\Users\\fx\\AppData\\Local\\Docker\\wsl\\main\\ext4.vhdx")
+        stripped = _strip_extended_length_prefix(prefixed)
+        self.assertEqual(str(stripped), "C:\\Users\\fx\\AppData\\Local\\Docker\\wsl\\main\\ext4.vhdx")
+
+    def test_extended_length_unc_prefix_is_stripped_to_plain_unc(self):
+        prefixed = Path("\\\\?\\UNC\\server\\share\\ext4.vhdx")
+        stripped = _strip_extended_length_prefix(prefixed)
+        self.assertEqual(str(stripped), "\\\\server\\share\\ext4.vhdx")
+
+
 class DistroItemsTests(unittest.TestCase):
     def test_existing_vhdx_under_base_path_is_sized(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,6 +168,29 @@ class DistroItemsTests(unittest.TestCase):
     def test_nonexistent_base_path_is_skipped(self):
         items = _distro_items([{"name": "Ghost", "base_path": "Z:\\does\\not\\exist"}])
         self.assertEqual(items, [])
+
+    @unittest.skipUnless(platform.system() == "Windows", "extended-length prefix is a Windows path concept")
+    def test_extended_length_prefixed_base_path_yields_plain_stripped_item_path(self):
+        # Regression: on a real dev machine, the `docker-desktop` distro's
+        # Lxss `BasePath` registry value is genuinely stored *with* the
+        # `\\?\` extended-length prefix already baked in. Left unstripped,
+        # the emitted item's path would never lexically match the plain
+        # (un-prefixed) path `common.dir_size_on_disk()`'s `os.scandir()`
+        # walk produces for the identical file, so `appdata`'s generic
+        # `Docker` folder scan would double-count these bytes instead of
+        # skipping them via `exclude_paths`.
+        with tempfile.TemporaryDirectory() as tmp:
+            base_path = Path(tmp) / "main"
+            base_path.mkdir(parents=True)
+            (base_path / "ext4.vhdx").write_bytes(b"x" * 99)
+
+            prefixed_base_path = "\\\\?\\" + str(base_path)
+            items = _distro_items([{"name": "docker-desktop", "base_path": prefixed_base_path}])
+
+            self.assertEqual(len(items), 1)
+            plain_expected = str((base_path / "ext4.vhdx").resolve())
+            self.assertEqual(items[0].path, plain_expected)
+            self.assertFalse(items[0].path.startswith("\\\\?\\"))
 
 
 class ScanDockerWslTests(unittest.TestCase):
