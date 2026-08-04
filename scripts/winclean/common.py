@@ -482,6 +482,15 @@ class RunReport:
     free_space_after: dict[str, int] = field(default_factory=dict)
     warnings: list[CleanWarning] = field(default_factory=list)
     interrupted: bool = False
+    removal_attempted: bool = False
+    """Une suppression a été **tentée**, réussie ou non. Déclenche l'historique.
+
+    Positionné par la boucle d'application juste avant d'agir, jamais déduit des
+    totaux d'octets : `freed` vaut `None` quand la récupération n'est pas
+    mesurable, et un run `moderate` met en corbeille donc libère zéro. Un
+    historique conditionné aux octets manquerait le run destructeur le plus
+    courant. Voir `history.py`.
+    """
 
     @property
     def status(self) -> str:

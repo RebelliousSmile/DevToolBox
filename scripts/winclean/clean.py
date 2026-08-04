@@ -35,7 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.winclean import config as config_mod  # noqa: E402
-from scripts.winclean import guards, registry_mod, remove  # noqa: E402
+from scripts.winclean import guards, history, registry_mod, remove  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DROP_SANITY,
     LEVEL_ORDER,
@@ -86,6 +86,7 @@ __all__ = [
     "bin_allowance_warnings",
     "build_plan",
     "apply_plan",
+    "show_history",
     "ensure_windows",
     "main",
 ]
@@ -292,6 +293,16 @@ def _positive_depth(text: str) -> int:
     return value
 
 
+def _positive_history(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--history attend un entier, reçu {text!r}") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("--history attend un entier supérieur ou égal à 1")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Le CLI. Toutes les chaînes en français, les jetons machine en anglais.
 
@@ -313,7 +324,12 @@ def build_parser() -> argparse.ArgumentParser:
             "sous --apply. Voir README.md."
         ),
     )
-    parser.add_argument(
+    # `--apply` et `--history` sont exclusifs par construction, pas par
+    # convention : le premier détruit, le second se contente de relire un
+    # journal. Les accepter ensemble obligerait à trancher lequel gagne, et
+    # n'importe quel arbitrage ferait d'une faute de frappe une suppression.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--apply",
         action="store_true",
         help="Supprimer réellement. Sans lui, le plan est une simulation.",
@@ -443,6 +459,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "N'imprimer que les N plus gros éléments. Filtre d'affichage : le total "
             "et, avec --apply, la suppression portent sur le plan complet."
+        ),
+    )
+    mode.add_argument(
+        "--history",
+        type=_positive_history,
+        default=None,
+        metavar="N",
+        help=(
+            "Afficher les N derniers runs destructeurs enregistrés, puis sortir. "
+            "Ne découvre rien et ne touche à aucun chemin. Seuls les runs --apply "
+            "qui ont tenté une suppression y figurent : une simulation n'écrit rien."
         ),
     )
     return parser
@@ -800,6 +827,7 @@ def _remove_candidate(
     *,
     use_recycle: bool,
     failures: list[remove.RemovalError],
+    report: RunReport | None = None,
 ) -> SkippedEntry | None:
     """Retire un candidat porteur de chemin. La corbeille n'a **aucun** repli.
 
@@ -807,6 +835,11 @@ def _remove_candidate(
     octets viennent d'une mesure prise **juste avant** l'opération, jamais de
     `estimated_bytes` : entre le plan et l'application l'arbre a pu grossir, et
     rapporter l'estimation ferait passer une mesure pour une prédiction.
+
+    `report` sert à marquer la tentative de suppression, et le marquage arrive
+    **après** le refus de corbeille : un candidat que la corbeille ne peut pas
+    recevoir est omis, rien n'a été tenté sur lui, et l'inscrire au journal y
+    poserait un run qui n'a touché à rien.
     """
     assert candidate.path is not None  # garanti par l'appelant
     if use_recycle:
@@ -820,6 +853,8 @@ def _remove_candidate(
                     "chemin trop long) ; --no-recycle pour supprimer en direct"
                 ),
             )
+        if report is not None:
+            report.removal_attempted = True
         before = estimate_path(candidate.path)
         outcome = remove.recycle(candidate.path)
         if outcome.ok:
@@ -833,6 +868,8 @@ def _remove_candidate(
         result.recycle_failed_paths.append(candidate.path)
         failures.extend(outcome.errors)
         return None
+    if report is not None:
+        report.removal_attempted = True
     freed, failed, errors = remove.delete_tree(candidate.path)
     result.freed = _add(result.freed, freed)
     if failed:
@@ -928,12 +965,17 @@ def apply_plan(
                 )
                 continue
             no_undo = _remove_candidate(
-                candidate, result, use_recycle=use_recycle, failures=failures
+                candidate, result, use_recycle=use_recycle, failures=failures, report=report
             )
             if no_undo is not None:
                 result.skipped.append(no_undo)
 
         if pathless and module.clean is not None:
+            # Appeler le `clean()` d'un module est une tentative de suppression :
+            # `docker-light` n'a aucune branche d'omission, son `prune` part dès
+            # qu'il est appelé. Marquer d'après ses octets serait faux, il n'en
+            # rend aucun de mesurable.
+            report.removal_attempted = True
             _merge_result(
                 result,
                 module.clean(
@@ -959,6 +1001,44 @@ def ensure_windows(platform: str | None = None) -> None:
         )
 
 
+def show_history(limit: int, out: Output, *, as_json: bool = False) -> int:
+    """Imprime les `limit` derniers runs destructeurs. Mode requête, pas de run.
+
+    Aucune découverte, aucun `stat` de cible, aucune configuration chargée : les
+    trois coûtent un parcours de disque ou peuvent refuser le run, et aucun des
+    trois ne change ce que le journal contient. Sort toujours `0`, y compris sans
+    journal du tout : « aucun run enregistré » est une réponse, pas une erreur.
+    """
+    location = history.default_history_path()
+    records = history.read_runs(limit)
+    if as_json:
+        out.write(
+            _dump(
+                {
+                    "history": list(records),
+                    "path": None if location is None else str(location),
+                }
+            )
+        )
+    else:
+        out.write(history.format_history(records, location))
+    return EXIT_OK
+
+
+def _write_history(plan: Plan, report: RunReport) -> None:
+    """Ajoute une ligne au journal. Un échec est un avertissement, jamais un statut.
+
+    Appelée depuis le `finally` du run : si elle levait, elle masquerait le
+    chemin de sortie réel — jusqu'à transformer une interruption en `traceback`
+    de journalisation. Le run a déjà supprimé ce qu'il a supprimé ; ne pas savoir
+    l'écrire ne change rien à ce fait et ne doit pas changer son code de sortie.
+    """
+    try:
+        history.append_run(history.build_record(plan.level, report))
+    except Exception as exc:  # noqa: BLE001 - voir la docstring
+        print(f"Historique non écrit : {exc}", file=sys.stderr)
+
+
 def _volumes_touched(plan: Plan) -> list[str]:
     touched = list(plan.roots)
     touched.extend(c.path for c in plan.candidates if c.path)
@@ -976,6 +1056,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except PlatformError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_PLATFORM
+
+    # Avant le chargement de la configuration : relire le journal ne dépend
+    # d'aucun réglage, et une configuration illisible ferait sortir `2` une
+    # commande qui ne demandait qu'à lire un fichier de log.
+    if args.history is not None:
+        return show_history(args.history, out, as_json=args.as_json)
 
     try:
         settings = config_mod.load_config(args.config)
@@ -1054,6 +1140,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             out.write(_dump({**plan_payload, "run": report.to_json_payload()}))
         else:
             out.write(format_result_report(report))
+        # Le drapeau, pas les octets : voir `history.py`. Un run interrompu qui a
+        # tenté quelque chose est journalisé — c'est même le cas où le journal
+        # sert le plus.
+        if report.removal_attempted:
+            _write_history(plan, report)
 
     if failures and status == EXIT_OK:
         for error in failures:

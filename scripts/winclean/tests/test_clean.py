@@ -127,17 +127,28 @@ def registry_of(*modules: CleanModule):
         yield mapping
 
 
-def run_cli(argv: list[str]) -> tuple[int, str, str]:
-    """Lance le CLI, sans jamais lire le fichier de configuration de la machine.
+def run_cli(argv: list[str], *, history_path: str | Path | None = None) -> tuple[int, str, str]:
+    """Lance le CLI, sans toucher aux fichiers d'état de la machine.
 
-    La recherche à l'emplacement par défaut est neutralisée ici, une fois pour
-    toute la suite : sinon un `%APPDATA%\\winclean\\winclean.json` présent chez un
-    développeur changerait le plafond, la liste protégée ou les modules
-    sélectionnés de chaque test. Un test qui *veut* une configuration la nomme
-    avec `--config`, ce que ce contournement laisse intact.
+    Deux emplacements par défaut sont neutralisés ici, une fois pour toute la
+    suite :
+
+    - la **configuration** : sinon un `%APPDATA%\\winclean\\winclean.json` présent
+      chez un développeur changerait le plafond, la liste protégée ou les modules
+      sélectionnés de chaque test. Un test qui *veut* une configuration la nomme
+      avec `--config`, ce que ce contournement laisse intact.
+    - l'**historique** : un test `--apply` écrirait dans le vrai
+      `%LOCALAPPDATA%\\winclean\\history.jsonl`. Sans `history_path`, l'écriture
+      est un no-op ; avec, elle vise le fichier donné, et `--history` le relit.
     """
     out, err = io.StringIO(), io.StringIO()
-    with mock.patch.object(config_mod, "default_config_path", lambda env=None: None):
+    if history_path is None:
+        journal = mock.patch.object(clean.history, "append_run", lambda record, *a, **k: None)
+    else:
+        journal = mock.patch.object(
+            clean.history, "default_history_path", lambda env=None: Path(history_path)
+        )
+    with mock.patch.object(config_mod, "default_config_path", lambda env=None: None), journal:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = clean.main(argv)
     return code, out.getvalue(), err.getvalue()
@@ -270,6 +281,23 @@ class TestParser(unittest.TestCase):
     def test_only_accepts_repetition_and_commas(self):
         args = clean.build_parser().parse_args(["--only", "a,b", "--only", "c"])
         self.assertEqual(clean._split_names(args.only), ["a", "b", "c"])
+
+    def test_history_defaults_to_absent(self):
+        self.assertIsNone(clean.build_parser().parse_args([]).history)
+
+    def test_history_and_apply_are_refused_together(self):
+        """Exclusivité `argparse`, pas arbitrage : l'un détruit, l'autre lit."""
+        with self.assertRaises(SystemExit) as raised, contextlib.redirect_stderr(
+            io.StringIO()
+        ) as err:
+            clean.build_parser().parse_args(["--history", "3", "--apply"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--history", err.getvalue())
+
+    def test_history_refuses_zero(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as err:
+            clean.build_parser().parse_args(["--history", "0"])
+        self.assertIn("--history", err.getvalue())
 
 
 # --------------------------------------------------------------------------- #
@@ -1595,6 +1623,54 @@ class TestUserTempSecondaryGuard(unittest.TestCase):
         self.assertNotIn(SKIP_CHANGED, out)
         self.assertEqual(deletions, [str(branch)])
         self.assertFalse(branch.exists())
+
+
+# --------------------------------------------------------------------------- #
+# `--history` : un mode requête, pas un run
+# --------------------------------------------------------------------------- #
+
+
+class TestHistoryIsAQueryMode(unittest.TestCase):
+    """Le journal se relit sans découverte, sans suppression et sans configuration."""
+
+    def _absent_journal(self) -> Path:
+        return Path(_tempdir(self)) / "winclean" / "history.jsonl"
+
+    def test_it_discovers_nothing_and_deletes_nothing(self):
+        discoveries: list[dict] = []
+
+        def _discover(**kwargs):
+            discoveries.append(kwargs)
+            return []
+
+        module = fake_module("fake-a", discover=_discover)
+        with registry_of(module), deletion_spy() as deletions:
+            code, _out, err = run_cli(["--history", "3"], history_path=self._absent_journal())
+        self.assertEqual(code, clean.EXIT_OK)
+        self.assertEqual(discoveries, [])
+        self.assertEqual(deletions, [])
+        self.assertEqual(err, "")
+
+    def test_no_journal_at_all_is_an_answer_not_an_error(self):
+        journal = self._absent_journal()
+        code, out, err = run_cli(["--history", "3"], history_path=journal)
+        self.assertEqual(code, clean.EXIT_OK)
+        self.assertEqual(err, "")
+        self.assertIn("Aucun run enregistré", out)
+        self.assertIn("history.jsonl", out)
+        self.assertFalse(journal.exists())
+
+    def test_an_unreadable_configuration_does_not_block_the_query(self):
+        """La requête passe **avant** le chargement : elle ne dépend d'aucun réglage."""
+        root = _tempdir(self)
+        broken = root / "winclean.json"
+        broken.write_text("{ceci n'est pas du JSON", encoding="utf-8")
+        code, out, _err = run_cli(
+            ["--history", "3", "--config", str(broken)],
+            history_path=self._absent_journal(),
+        )
+        self.assertEqual(code, clean.EXIT_OK)
+        self.assertIn("Aucun run enregistré", out)
 
 
 if __name__ == "__main__":  # pragma: no cover
