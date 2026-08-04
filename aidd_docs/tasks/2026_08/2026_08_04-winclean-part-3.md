@@ -4,7 +4,7 @@ description: Part 3 - the aggressive cleanup level (Recycle Bin per volume, MSI 
 argument-hint: N/A
 objective: "winclean gains its operational layer: an aggressive level guarded by confirmation, a config file that can only restrict behaviour, a JSONL history of every run, and a report comparing what was estimated against what was actually reclaimed."
 success_condition: "python -m unittest discover -s scripts/winclean/tests -v exits 0 AND an --apply run that actually removed or recycled something appends exactly one well-formed JSONL line readable by --history 1 AND an unknown config key aborts the run before any discovery"
-status: in-progress
+status: implemented
 iteration: 0
 created_at: "2026-08-04T00:00:00Z"
 ---

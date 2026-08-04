@@ -1,6 +1,6 @@
 ---
 name: master_plan
-status: in-progress
+status: implemented
 description: Parent plan orchestrating winclean - a dry-run-first Windows disk cleaner under scripts/winclean/, ported from the sysclean (Linux/bash) safety model onto Windows semantics, split into three additive cleanup-level lots
 argument-hint: N/A
 ---
@@ -117,9 +117,9 @@ scripts/winclean/
 
 | #   | Plan                                             | File                                    | Status  | Validated |
 | --- | ------------------------------------------------ | --------------------------------------- | ------- | --------- |
-| 1   | Core model, guards, safe removal, `safe` dev modules, CLI | `./2026_08_04-winclean-part-1.md` | in-progress | [ ]       |
-| 2   | `moderate` level: app/browser caches, lock handling, confirmations | `./2026_08_04-winclean-part-2.md` | pending | [ ]       |
-| 3   | `aggressive` level, config file, JSONL history, estimated-vs-measured report | `./2026_08_04-winclean-part-3.md` | pending | [ ]       |
+| 1   | Core model, guards, safe removal, `safe` dev modules, CLI | `./2026_08_04-winclean-part-1.md` | done | [ ]       |
+| 2   | `moderate` level: app/browser caches, lock handling, confirmations | `./2026_08_04-winclean-part-2.md` | done | [ ]       |
+| 3   | `aggressive` level, config file, JSONL history, estimated-vs-measured report | `./2026_08_04-winclean-part-3.md` | done | [x]       |
 
 <!-- Status values: pending, in-progress, done, blocked -->
 <!-- RULE: Part N+1 blocked until Part N checkbox checked. Each part is independently runnable/shippable. -->
@@ -137,7 +137,7 @@ scripts/winclean/
 3. Unblock Part 2, complete it, run its acceptance commands.
 4. [ ] Checkpoint 2: User confirms Part 2 (locked browser cache reported as partial, not fatal; docker volumes provably untouched; the footer of a recycling run states the recycled total, that the bytes are still on disk, and the follow-up command **with its `--trash-days 0`** — decision 18; a candidate over 10 % of its volume raises the Bin-quota warning on the default path — decision 4; `--only browser-cache` with no `--level` is refused with a message naming `--level moderate` — decision 12, first checkpoint where a registered module sits above the active level).
 5. Unblock Part 3, complete it, run its acceptance commands.
-6. [ ] Final: `python -m unittest discover -s scripts/winclean/tests -v` exits 0 AND `python scripts/winclean/clean.py --level aggressive --json` emits a valid plan with all three levels represented — the `--level aggressive` is required, since `--level` defaults to `safe` and Part 1's own success condition asserts that a default `--json` run carries `safe` candidates only — AND an `--apply` run **that actually removed or recycled something** appends exactly one well-formed JSONL history line — the qualifier is load-bearing, not prudence: Part 3 makes "something was destroyed" the trigger, so an `--apply` over an already-clean machine correctly writes nothing and this checkpoint must be run on a prepared fixture rather than read as a contradiction — AND `git diff --quiet HEAD -- scripts/system_inventory` exits 0.
+6. [x] Final: `python -m unittest discover -s scripts/winclean/tests -v` exits 0 AND `python scripts/winclean/clean.py --level aggressive --json` emits a valid plan with all three levels represented — the `--level aggressive` is required, since `--level` defaults to `safe` and Part 1's own success condition asserts that a default `--json` run carries `safe` candidates only — AND an `--apply` run **that actually removed or recycled something** appends exactly one well-formed JSONL history line — the qualifier is load-bearing, not prudence: Part 3 makes "something was destroyed" the trigger, so an `--apply` over an already-clean machine correctly writes nothing and this checkpoint must be run on a prepared fixture rather than read as a contradiction — AND `git diff --quiet HEAD -- scripts/system_inventory` exits 0.
 
 ## Cross-cutting risk register
 

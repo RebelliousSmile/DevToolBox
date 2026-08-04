@@ -4,7 +4,7 @@ description: Part 2 - the moderate cleanup level (browser and editor caches, %TE
 argument-hint: N/A
 objective: "python scripts/winclean/clean.py --level moderate proposes application caches on top of the safe plan, and --apply reclaims them while reporting locked files as partial outcomes instead of failing the run."
 success_condition: "python -m unittest discover -s scripts/winclean/tests -v exits 0 AND python scripts/winclean/clean.py --level moderate --json emits a plan containing both safe and moderate candidates AND an --apply run against a locked file exits 0 with that file counted in failed"
-status: in-progress
+status: implemented
 iteration: 0
 created_at: "2026-08-04T00:00:00Z"
 ---

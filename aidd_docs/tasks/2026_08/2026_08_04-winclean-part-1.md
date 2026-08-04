@@ -1,6 +1,6 @@
 ---
 name: plan
-status: in-progress
+status: implemented
 description: Part 1 - candidate/result model, the four-layer guard stack, Windows-safe removal (long paths + Recycle Bin), the safe-level dev-artefact modules, and the dry-run-first CLI
 argument-hint: N/A
 objective: "python scripts/winclean/clean.py prints a dry-run plan of regenerable dev artefacts sorted by descending estimated size, and only --apply deletes them, with every guard enforced before the first byte is removed."
