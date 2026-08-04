@@ -890,6 +890,123 @@ class TestRecycleAtSafe(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Niveau `aggressive`
+# --------------------------------------------------------------------------- #
+
+
+def aggressive_module(name: str, target, size: int, **kwargs) -> CleanModule:
+    """Module `aggressive` d'épreuve, avec un candidat au même niveau."""
+    entry = dataclasses.replace(candidate(name, target, size), level=Level.AGGRESSIVE)
+    return fake_module(name, candidates=(entry,), level=Level.AGGRESSIVE, **kwargs)
+
+
+class TestRecycleAtAggressive(unittest.TestCase):
+    def test_recycle_is_inert_and_the_deletion_is_direct(self):
+        """`--recycle` à `aggressive` : dit inerte, et la corbeille n'est pas appelée.
+
+        Le drapeau est accepté à tous les niveaux, mais seul `moderate` met en
+        corbeille. Le dire est la moitié du contrat ; l'autre moitié est que
+        `recycle()` reste **non appelé**, sinon l'appelant croirait pouvoir annuler
+        une suppression que le run a faite en direct.
+        """
+        with tempdir(self) as tmp:
+            target = tmp / "cible"
+            target.mkdir()
+            write(target / "a.bin", 64)
+            module = aggressive_module("brutal", target, 64)
+            with registry_of(module), recycle_stub() as calls:
+                code, out, err = run_cli(
+                    ["--root", str(tmp), "--level", "aggressive", "--recycle", "--apply", "--yes"]
+                )
+            self.assertEqual(code, clean.EXIT_OK, err)
+            self.assertEqual(calls["recycle"], [])
+            self.assertEqual(calls["can"], [])
+            self.assertFalse(target.exists())
+            self.assertIn("--recycle est accepté mais sans effet", out)
+            self.assertIn("aggressive", out)
+
+
+class TestPerModuleConfirmation(unittest.TestCase):
+    """La confirmation propre à `package-cache` (décision 17).
+
+    Le registre d'épreuve remplace `MODULES`, jamais `EXTRA_CONFIRM` : un module
+    factice qui porte le nom `package-cache` traverse donc la vraie table, ce qui
+    est le seul moyen de prouver que la porte est bien accrochée au nom.
+    """
+
+    def _fixture(self, tmp: Path) -> tuple[CleanModule, CleanModule, Path, Path]:
+        cache = tmp / "cache"
+        cache.mkdir()
+        write(cache / "produit.msi", 128)
+        other = tmp / "autre"
+        other.mkdir()
+        write(other / "b.bin", 64)
+        return (
+            aggressive_module("package-cache", cache, 128),
+            aggressive_module("brutal", other, 64),
+            cache,
+            other,
+        )
+
+    def test_without_the_flag_and_without_a_tty_only_that_module_is_skipped(self):
+        """Omission ciblée : le module est écarté, le run continue et sort à 0.
+
+        Pas un avortement : les autres modules `aggressive` n'ont rien à voir avec
+        la question posée, et un code non nul ferait passer une omission pour une
+        panne.
+        """
+        with tempdir(self) as tmp:
+            cache_mod, other_mod, cache, other = self._fixture(tmp)
+            with registry_of(cache_mod, other_mod), no_tty():
+                code, out, err = run_cli(
+                    ["--root", str(tmp), "--level", "aggressive", "--apply", "--yes"]
+                )
+            self.assertEqual(code, clean.EXIT_OK, err)
+            self.assertIn("[skipped-unconfirmed]", out)
+            self.assertIn("package-cache", out)
+            self.assertIn("--yes-package-cache", out)
+            self.assertTrue(cache.exists())
+            self.assertFalse(other.exists())
+
+    def test_the_dedicated_flag_includes_the_module(self):
+        with tempdir(self) as tmp:
+            cache_mod, other_mod, cache, other = self._fixture(tmp)
+            with registry_of(cache_mod, other_mod), no_tty():
+                code, out, err = run_cli(
+                    [
+                        "--root",
+                        str(tmp),
+                        "--level",
+                        "aggressive",
+                        "--apply",
+                        "--yes",
+                        "--yes-package-cache",
+                    ]
+                )
+            self.assertEqual(code, clean.EXIT_OK, err)
+            self.assertNotIn("[skipped-unconfirmed]", out)
+            self.assertFalse(cache.exists())
+            self.assertFalse(other.exists())
+
+    def test_a_general_yes_does_not_answer_the_dedicated_question(self):
+        """`--yes` couvre le niveau, pas cette question-ci.
+
+        Les deux tests ci-dessus passent `--yes` : si celui-ci suffisait, le
+        premier n'aurait rien omis. Ce test le fixe explicitement pour qu'un
+        raccourci futur — « `--yes` répond à tout » — casse ici.
+        """
+        with tempdir(self) as tmp:
+            cache_mod, _other, cache, _o = self._fixture(tmp)
+            with registry_of(cache_mod), no_tty():
+                code, out, err = run_cli(
+                    ["--root", str(tmp), "--level", "aggressive", "--apply", "--yes"]
+                )
+            self.assertEqual(code, clean.EXIT_OK, err)
+            self.assertIn("[skipped-unconfirmed]", out)
+            self.assertTrue(cache.exists())
+
+
+# --------------------------------------------------------------------------- #
 # Validation
 # --------------------------------------------------------------------------- #
 
@@ -925,14 +1042,35 @@ class TestValidationExits(unittest.TestCase):
         self.assertEqual(seen, [])
         self.assertIn("Aucun élément trouvé", out)
 
-    def test_a_later_parts_module_name_reaches_nothing(self):
-        """`--only recycle-bin` : inconnu ici, donc refusé avant toute découverte."""
+    def test_an_unregistered_module_name_reaches_nothing(self):
+        """Un nom non enregistré est refusé avant toute découverte.
+
+        Le nom d'épreuve n'est plus `recycle-bin` : la partie 3 l'a enregistré, et
+        un nom devenu réel testerait le refus de **niveau**, pas celui d'un nom
+        inconnu. `corbeille-windows` n'est le nom d'aucun module — les jetons
+        machine sont en anglais (décision 20), donc un nom français ne peut pas
+        entrer en collision avec un ajout futur.
+        """
+        with deletion_spy() as calls:
+            code, _out, err = run_cli(["--apply", "--only", "corbeille-windows"])
+        self.assertEqual(code, clean.EXIT_VALIDATION)
+        self.assertEqual(calls, [])
+        self.assertIn("corbeille-windows", err)
+        self.assertIn("noms valides", err)
+
+    def test_an_aggressive_module_below_its_level_is_refused_by_level(self):
+        """`--only recycle-bin` à `safe` : refusé en nommant le niveau requis.
+
+        Le pendant du test ci-dessus depuis que le nom existe : le refus vient de
+        `validate_level`, et le message doit nommer `--level aggressive` — un plan
+        vide laisserait croire que la corbeille est déjà propre.
+        """
         with deletion_spy() as calls:
             code, _out, err = run_cli(["--apply", "--only", "recycle-bin"])
         self.assertEqual(code, clean.EXIT_VALIDATION)
         self.assertEqual(calls, [])
         self.assertIn("recycle-bin", err)
-        self.assertIn("noms valides", err)
+        self.assertIn("--level aggressive", err)
 
 
 # --------------------------------------------------------------------------- #

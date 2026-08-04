@@ -43,6 +43,7 @@ from scripts.winclean.common import (  # noqa: E402
     SKIP_CHANGED,
     SKIP_GONE,
     SKIP_NO_UNDO,
+    SKIP_UNCONFIRMED,
     CleanCandidate,
     CleanModule,
     CleanResult,
@@ -440,6 +441,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--yes-package-cache",
+        dest="yes_package_cache",
+        action="store_true",
+        help=(
+            "Répondre d'avance à la confirmation propre au module package-cache. "
+            "Drapeau distinct de --yes : la suppression du cache d'installation "
+            "casse les réparations et désinstallations futures, et cette "
+            "conséquence survit au run."
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=None,
         metavar="FICHIER",
@@ -596,6 +608,37 @@ def confirm_level(level: Level, *, yes: bool, stream: Any = None) -> bool:
     return answer.strip().lower() in ("o", "oui", "y", "yes")
 
 
+def confirm_module(
+    extra: registry_mod.ExtraConfirm,
+    *,
+    answered: bool,
+    stream: Any = None,
+) -> bool:
+    """Seconde confirmation d'un module, au-delà de celle du niveau.
+
+    `answered` porte **son** drapeau, jamais `--yes` : la question qu'elle pose
+    n'est pas « supprimer ? » mais « accepter une conséquence qui survit au
+    run ? », et deux questions différentes ne peuvent pas partager une réponse.
+
+    Comme `confirm_level`, sans terminal et sans le drapeau la réponse est
+    **non** : le module est alors omis, le reste du niveau s'exécute, et le run
+    sort `0` — l'utilisateur n'a rien demandé de contradictoire, il a lancé un
+    niveau dont un module réclame plus qu'il n'a donné.
+    """
+    if answered:
+        return True
+    source = sys.stdin if stream is None else stream
+    isatty = getattr(source, "isatty", None)
+    if isatty is None or not isatty():
+        return False
+    print(f"{extra.question} [oui/non] ", end="")
+    try:
+        answer = source.readline()
+    except (OSError, ValueError):  # pragma: no cover - stdin refermé
+        return False
+    return answer.strip().lower() in ("o", "oui", "y", "yes")
+
+
 def bin_allowance_warnings(
     candidates: Iterable[CleanCandidate],
     level: Level,
@@ -705,12 +748,18 @@ def build_plan(
 
     candidates: list[CleanCandidate] = []
     durations: dict[str, float] = {}
+    # `notes` est le canal d'un `discover_*()` vers le texte du plan : il ne rend
+    # que des candidats, et ce que `recycle-bin` a à dire porte justement sur ce
+    # qu'il n'a **pas** retenu — un SID irrésolu, des entrées trop récentes, des
+    # entrées indatables. Aucun candidat ne pourrait porter ces messages.
     for module in modules:
         started = time.monotonic()
         found = registry_mod.discover_module(
             module,
             roots=roots,
             max_depth=args.max_depth,
+            trash_days=config_mod.resolve_trash_days(args.trash_days, settings),
+            notes=warnings,
         )
         durations[module.name] = time.monotonic() - started
         candidates.extend(found)
@@ -894,8 +943,11 @@ def apply_plan(
     l'appelant même si cette fonction ne revient jamais. `--top` n'a aucun effet
     ici — c'est un filtre d'affichage, jamais de portée.
 
-    Un candidat sans chemin ne passe ni par le `stat` ni par `remove.py` : c'est
-    le `clean()` du module qui agit, appelé une fois avec ses candidats.
+    Un module qui porte un `clean()` reçoit **tous** ses candidats en un appel, y
+    compris ceux qui portent un chemin : `remove.py` ne sait retirer qu'un chemin
+    à la fois, et l'unité de suppression de `recycle-bin` est une paire. Les
+    gardes (processus, chemin disparu, horodatage changé) s'appliquent avant, à
+    l'identique.
     """
     known = registry_mod.MODULES if registry is None else registry
     grouped: dict[str, list[CleanCandidate]] = {}
@@ -924,12 +976,39 @@ def apply_plan(
         if module is None:  # pragma: no cover - le plan sort du registre
             continue
 
+        # Confirmation propre au module, avant son premier candidat : la poser
+        # après en aurait déjà supprimé. Refusée, elle omet **ce module** et
+        # laisse le reste du niveau agir — c'est une réserve sur une conséquence
+        # particulière, pas un désaveu du run.
+        extra = registry_mod.extra_confirm(name)
+        if extra is not None and not confirm_module(
+            extra, answered=bool(getattr(args, "yes_package_cache", False))
+        ):
+            for candidate in group:
+                result.skipped.append(
+                    SkippedEntry(
+                        label=candidate.label,
+                        path=candidate.path,
+                        status=SKIP_UNCONFIRMED,
+                        reason=(
+                            "confirmation propre au module absente - répondre « oui » "
+                            f"sur un terminal, ou passer {extra.flag}"
+                        ),
+                    )
+                )
+            continue
+
         state = None
         if module.proc_guard == PROC_GUARD_WARN_AND_SKIP and not args.yes:
             # Une seule interrogation des processus par module, pas par candidat.
             state = registry_mod.proc_guard_state(name)
 
-        pathless: list[CleanCandidate] = []
+        # Un module qui porte son propre `clean()` retire **tous** ses candidats,
+        # avec ou sans chemin : `recycle-bin` supprime par paires `$I`/`$R` et un
+        # candidat n'a qu'un `path`, donc le chemin passe par lui, pas par
+        # `remove.py`. Les gardes ci-dessous s'appliquent quand même d'abord — la
+        # délégation porte sur la suppression, pas sur les conditions de l'agir.
+        delegated: list[CleanCandidate] = []
         for candidate in group:
             skipped = registry_mod.proc_guard_skip(
                 module, candidate, yes=bool(args.yes), state=state
@@ -938,7 +1017,7 @@ def apply_plan(
                 result.skipped.append(skipped)
                 continue
             if candidate.path is None:
-                pathless.append(candidate)
+                delegated.append(candidate)
                 continue
             current = _current_mtime(candidate.path)
             if current is None:
@@ -964,13 +1043,16 @@ def apply_plan(
                     )
                 )
                 continue
+            if module.clean is not None:
+                delegated.append(candidate)
+                continue
             no_undo = _remove_candidate(
                 candidate, result, use_recycle=use_recycle, failures=failures, report=report
             )
             if no_undo is not None:
                 result.skipped.append(no_undo)
 
-        if pathless and module.clean is not None:
+        if delegated and module.clean is not None:
             # Appeler le `clean()` d'un module est une tentative de suppression :
             # `docker-light` n'a aucune branche d'omission, son `prune` part dès
             # qu'il est appelé. Marquer d'après ses octets serait faux, il n'en
@@ -979,7 +1061,7 @@ def apply_plan(
             _merge_result(
                 result,
                 module.clean(
-                    candidates=list(pathless),
+                    candidates=list(delegated),
                     recycle=use_recycle,
                     yes=bool(args.yes),
                 ),

@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -23,7 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import mod_apps, mod_dev, procs  # noqa: E402
+from scripts.winclean import mod_apps, mod_dev, mod_system, procs  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
     DISCOVERY_PATHLESS,
@@ -40,9 +41,12 @@ from scripts.winclean.common import (  # noqa: E402
 
 __all__ = [
     "ValidationError",
+    "ExtraConfirm",
     "MODULES",
     "MODULE_ORDER",
     "PROC_OWNERS",
+    "EXTRA_CONFIRM",
+    "extra_confirm",
     "ownership_rank",
     "modules_for_level",
     "validate_names",
@@ -180,6 +184,36 @@ _REGISTERED: tuple[CleanModule, ...] = (
         proc_guard=None,
         needs_network=False,
     ),
+    # --- niveau `aggressive` ----------------------------------------------- #
+    # Les deux suppriment en direct : `--recycle` est accepté et inerte ici
+    # (décision 4). Les deux sont `fixed` — la corbeille s'énumère par volume
+    # local, sans parcourir les racines — et `needs_network=False` : rien de ce
+    # qu'ils retirent ne se re-télécharge depuis un registre de paquets.
+    CleanModule(
+        name="recycle-bin",
+        level=Level.AGGRESSIVE,
+        requires=(),
+        discover=mod_system.discover_recycle_bin,
+        # Seul module `aggressive` à porter son propre `clean()` : son unité de
+        # suppression est la paire `$I`/`$R`, et un `CleanCandidate` n'a qu'un
+        # champ `path`.
+        clean=mod_system.clean_recycle_bin,
+        discovery=DISCOVERY_FIXED,
+        # Aucun propriétaire nommé : la corbeille n'appartient à aucun processus
+        # qu'on saurait interroger, et `explorer.exe` tourne toujours.
+        proc_guard=None,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="package-cache",
+        level=Level.AGGRESSIVE,
+        requires=(),
+        discover=mod_system.discover_package_cache,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=False,
+    ),
 )
 
 MODULES: dict[str, CleanModule] = {m.name: m for m in _REGISTERED}
@@ -198,6 +232,37 @@ PROC_OWNERS: dict[str, tuple[str, ...]] = {
     "browser-cache": mod_apps.BROWSER_OWNERS,
     "vscode-cache": mod_apps.EDITOR_OWNERS,
 }
+
+
+@dataclass(frozen=True)
+class ExtraConfirm:
+    """Seconde confirmation propre à un module, au-delà de celle du niveau.
+
+    `flag` est le drapeau qui y répond d'avance. Il est **distinct de `--yes`** :
+    la décision 4 ne donne à `--yes` que deux effets (répondre à la confirmation
+    de niveau, lever les omissions de garde de processus), et un `--yes` qui
+    emporterait aussi celle-ci ferait exactement ce que cette table existe pour
+    empêcher — un run non surveillé qui casse les réparations MSI de la machine.
+    """
+
+    question: str
+    flag: str
+
+
+#: Modules exigeant une confirmation à eux, par nom. Même forme que
+#: `PROC_OWNERS` : une table nom → données, lue par le CLI qui ne connaît aucun
+#: nom de module. Un module absent de la table n'a rien de plus à demander.
+EXTRA_CONFIRM: dict[str, ExtraConfirm] = {
+    "package-cache": ExtraConfirm(
+        question=mod_system.PACKAGE_CACHE_CONFIRM,
+        flag="--yes-package-cache",
+    ),
+}
+
+
+def extra_confirm(module: str) -> ExtraConfirm | None:
+    """Confirmation supplémentaire de ce module, ou `None`."""
+    return EXTRA_CONFIRM.get(module)
 
 
 def _registry(registry: Mapping[str, CleanModule] | None) -> Mapping[str, CleanModule]:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import guards, mod_apps, mod_dev, procs, registry_mod  # noqa: E402
+from scripts.winclean import (  # noqa: E402
+    guards,
+    mod_apps,
+    mod_dev,
+    mod_system,
+    procs,
+    registry_mod,
+)
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
     DISCOVERY_MODES,
@@ -72,6 +80,10 @@ EXPECTED_DISCOVERY: dict[str, str] = {
     "user-temp": DISCOVERY_FIXED,
     "crashdumps": DISCOVERY_FIXED,
     "docker-light": DISCOVERY_PATHLESS,
+    # `recycle-bin` énumère les volumes locaux au lieu de résoudre un chemin
+    # documenté, et reste `fixed` : le critère est que `--root` ne le borne pas.
+    "recycle-bin": DISCOVERY_FIXED,
+    "package-cache": DISCOVERY_FIXED,
 }
 
 EXPECTED_PROC_GUARD: dict[str, str | None] = {
@@ -91,6 +103,11 @@ EXPECTED_PROC_GUARD: dict[str, str | None] = {
     "user-temp": None,
     "crashdumps": None,
     "docker-light": None,
+    # Ni l'un ni l'autre n'interroge `procs.is_running` : une réparation MSI est
+    # cassée par la **suppression**, pas par un processus concurrent, et la
+    # corbeille n'a pas de propriétaire nommé qu'on saurait interroger.
+    "recycle-bin": None,
+    "package-cache": None,
 }
 
 EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
@@ -113,18 +130,28 @@ EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
     "user-temp": False,
     "crashdumps": False,
     "docker-light": False,
+    # `package-cache` est le module le plus conséquent et pourtant `False` : rien
+    # ne se recharge automatiquement, donc `--offline` n'a rien à protéger ici.
+    "recycle-bin": False,
+    "package-cache": False,
 }
 
 
 @contextlib.contextmanager
 def neutral_user_paths(case: unittest.TestCase) -> Iterator[Path]:
-    """Neutralise l'environnement des modules `fixed` de la Part 2.
+    """Neutralise l'environnement des modules `fixed` des parties 2 et 3.
 
     Les quatre modules `moderate` porteurs de chemin lisent des variables
     d'environnement réelles, et `docker-light` interroge un vrai démon. Un test
     qui parcourt tout le registre mesurerait alors le `%TEMP%` de la machine —
     lent, et différent d'une machine à l'autre. La sonde Docker est coupée au
     premier étage pour la même raison.
+
+    Les deux modules `aggressive` le sont aussi, et pour la même raison en pire :
+    `package-cache` tarifierait le vrai cache MSI de la machine, et `recycle-bin`
+    parcourrait la vraie corbeille du compte qui lance les tests. Le SID est
+    rendu irrésolu, ce qui suffit — c'est la branche fermée de la tâche 1, et elle
+    rend zéro candidat sans jamais toucher un volume.
     """
     sandbox = tempdir(case)
     with contextlib.ExitStack() as stack:
@@ -135,10 +162,14 @@ def neutral_user_paths(case: unittest.TestCase) -> Iterator[Path]:
                     "TEMP": str(sandbox),
                     "LOCALAPPDATA": str(sandbox),
                     "APPDATA": str(sandbox),
+                    "PROGRAMDATA": str(sandbox),
                 },
             )
         )
         stack.enter_context(mock.patch.object(mod_apps.shutil, "which", return_value=None))
+        stack.enter_context(
+            mock.patch.object(mod_system, "current_user_sid", return_value=None)
+        )
         yield sandbox
 
 
@@ -228,8 +259,15 @@ class TestDiscoveryBehaviour(unittest.TestCase):
                         "TEMP": str(fake_temp),
                         "LOCALAPPDATA": str(empty),
                         "APPDATA": str(empty),
+                        "PROGRAMDATA": str(empty),
                     },
                 )
+            )
+            # Même raison que le correctif ci-dessous, pour les deux modules
+            # `aggressive` : sans lui, ce test parcourt la vraie corbeille et
+            # tarifie le vrai cache MSI de la machine.
+            stack.enter_context(
+                mock.patch.object(mod_system, "current_user_sid", return_value=None)
             )
             # Les autres modules `fixed` pointeraient sur les vrais caches de la
             # machine : mesurés, ils rendraient le test lent et dépendant du poste.
@@ -432,16 +470,47 @@ class TestValidateLevel(unittest.TestCase):
             select_modules(Level.SAFE, only=["factice-moderate"], registry=registry)
 
 
+#: Le seul `mod_*` autorisé à voir `remove.py`, et la liste **fermée** de ce
+#: qu'il peut y lire. La partie 3 phase 3 tâche 1 l'exige : l'unité de
+#: suppression de `recycle-bin` est la paire `$I`/`$R`, `remove.py` ne retire
+#: qu'un chemin à la fois, donc le module porte son propre `clean()`. L'invariant
+#: n'est pas abandonné pour autant, il est borné : la découverte peut consulter
+#: le type de volume, la suppression peut effacer un arbre — et rien ne peut
+#: atteindre la corbeille (`recycle`, `_sh_file_operation`), qui est exactement
+#: ce que le niveau `aggressive` ne fait pas.
+_REMOVAL_EXEMPT = "mod_system.py"
+_ALLOWED_REMOVAL_USES = frozenset(
+    {"delete_tree", "is_lock_error", "_get_drive_type", "DRIVE_FIXED"}
+)
+
+
 class TestNoRemovalInModules(unittest.TestCase):
     def test_no_mod_module_imports_the_removal_layer(self) -> None:
         package = Path(registry_mod.__file__).parent
         sources = sorted(package.glob("mod_*.py"))
         self.assertTrue(sources)
+        exempt = [s for s in sources if s.name == _REMOVAL_EXEMPT]
+        self.assertEqual(len(exempt), 1, "l'exception doit désigner un fichier réel")
         for source in sources:
+            if source.name == _REMOVAL_EXEMPT:
+                continue
             with self.subTest(module=source.name):
                 text = source.read_text(encoding="utf-8")
                 self.assertNotIn("import remove", text)
                 self.assertNotIn("winclean.remove", text)
+
+    def test_the_exempt_module_touches_only_the_sanctioned_removal_names(self) -> None:
+        """L'exception est bornée : `mod_system` ne lit que quatre noms de `remove`.
+
+        Sans cette borne, l'exception rendrait la couche de suppression
+        entièrement accessible depuis un `mod_*`, et notamment `recycle()` — dont
+        l'usage ici serait la mise à la corbeille de la corbeille.
+        """
+        source = Path(registry_mod.__file__).parent / _REMOVAL_EXEMPT
+        text = source.read_text(encoding="utf-8")
+        used = set(re.findall(r"\bremove\.([A-Za-z_][A-Za-z_0-9]*)", text))
+        self.assertTrue(used, "le fichier exempté doit vraiment utiliser `remove`")
+        self.assertEqual(used - _ALLOWED_REMOVAL_USES, set())
 
 
 class TestDiscoveryIsCheapEnough(unittest.TestCase):

@@ -47,7 +47,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.winclean import guards, registry_mod  # noqa: E402
-from scripts.winclean.common import CleanModule  # noqa: E402
+from scripts.winclean.common import DEFAULT_TRASH_DAYS, CleanModule  # noqa: E402
 
 __all__ = [
     "ConfigError",
@@ -66,8 +66,9 @@ __all__ = [
 ]
 
 #: Décision 15, plancher d'âge de la corbeille. Non nul : une entrée supprimée il
-#: y a cinq minutes doit survivre à un run non surveillé.
-DEFAULT_TRASH_DAYS = 7
+#: y a cinq minutes doit survivre à un run non surveillé. Défini dans `common.py`
+#: (le module qui l'applique en a besoin sans pouvoir importer celui-ci) et
+#: ré-exporté ici, où le reste du programme le lit.
 #: Décision 15, plafond d'octets du plan. Le fichier ne peut que l'abaisser.
 DEFAULT_MAX_DELETE_BYTES = 50 * 1024**3
 

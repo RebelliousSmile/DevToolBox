@@ -50,6 +50,7 @@ __all__ = [
     "PROC_GUARDS",
     "SKIP_TOKENS",
     "RECYCLE_FOOTER_LINES",
+    "DEFAULT_TRASH_DAYS",
     "estimate_path",
     "volume_of",
     "free_space_by_volume",
@@ -81,6 +82,14 @@ class Level(str, Enum):
 #: Du plus prudent au plus agressif. `--only` ne peut pas remonter ce tableau
 #: (décision 12) et `modules_for_level()` prend tout ce qui est <= au niveau.
 LEVEL_ORDER: tuple[Level, ...] = (Level.SAFE, Level.MODERATE, Level.AGGRESSIVE)
+
+#: Plancher d'âge par défaut des éléments de la corbeille, en jours
+#: (décision 15). Déclaré **ici** et non dans `config.py` : `mod_system` en a
+#: besoin et `config` importe déjà `registry_mod`, qui importe `mod_system` —
+#: l'y lire créerait un cycle d'import résolu par un module à moitié initialisé.
+#: `config.py` le ré-exporte, il reste donc lisible comme
+#: `config.DEFAULT_TRASH_DAYS`.
+DEFAULT_TRASH_DAYS = 7
 
 #: Mode de découverte déclaré par module (décision 15). Trois valeurs, pas un
 #: booléen : `--root` ne borne que `walking`.
@@ -579,6 +588,36 @@ WARNING_TEMPLATES: dict[str, str] = {
     "recycle-bin-allowance-unknown": (
         "{label} n'a pas pu être mesuré sur le volume {volume} : on ignore donc si "
         "la corbeille l'acceptera, et l'annulation ne peut pas être garantie."
+    ),
+    # Texte de plan du module `recycle-bin` (partie 3, phase 3). Un `discover_*()`
+    # ne rend que des candidats : ces quatre codes sont son seul canal vers le
+    # plan, et trois d'entre eux parlent précisément des cas où il n'y a **pas**
+    # de candidat à porter le message.
+    "recycle-bin-floor": (
+        "Corbeille : plancher d'âge de {days} jour(s). Les éléments plus récents "
+        "sont conservés."
+    ),
+    "recycle-bin-floor-none": (
+        "Corbeille : aucun plancher d'âge (--trash-days 0). Tout élément déjà en "
+        "corbeille est éligible."
+    ),
+    # Décision 18. La mention de `--trash-days 0` est **obligatoire** ici : c'est
+    # la seule chose qui rende éligibles les octets qu'un run `moderate` vient de
+    # mettre en corbeille, et un utilisateur qui arrive de ce run lit sinon un
+    # module qui ne vide rien sans savoir quoi changer.
+    "recycle-bin-not-yet-eligible": (
+        "Corbeille : {count} élément(s) plus récents que {days} jour(s), "
+        "{size} au total, ne sont pas encore éligibles. --trash-days 0 les rend "
+        "éligibles immédiatement."
+    ),
+    "recycle-bin-sid-unknown": (
+        "Corbeille ignorée : le SID du compte courant n'a pas pu être résolu, donc "
+        "aucun candidat n'est proposé. winclean n'énumère jamais les corbeilles des "
+        "autres comptes."
+    ),
+    "recycle-bin-undatable": (
+        "Corbeille : {count} élément(s) sans horodatage exploitable, omis. Une "
+        "entrée qu'on ne sait pas dater n'est jamais supposée ancienne."
     ),
 }
 
