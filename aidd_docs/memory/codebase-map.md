@@ -25,4 +25,14 @@ flowchart TD
 
 ## Standalone scripts (`scripts/`)
 
-Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx).
+Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx), `winclean/` (dry-run-first disk cleaner; imports `system_inventory` as its **read-only** discovery layer and must never modify it — see `memory/internal/decisions/winclean-separate-package.md`).
+
+### Gotchas shared by these scripts
+
+- An argparse `help=` string is `%`-formatted at render time: a literal
+  `%APPDATA%` must be written `%%APPDATA%%`, otherwise `--help` raises
+  `ValueError` for the **whole** parser. No `parse_args` test catches it —
+  formatting only happens on render, so assert on `format_help()`.
+- A `--out <file>` option writes UTF-8, but **redirected stdout follows the
+  console code page** (cp1252 here). Reading a script's piped output therefore
+  needs `encoding='cp1252'`, and a `--json` pipe is not UTF-8-safe.

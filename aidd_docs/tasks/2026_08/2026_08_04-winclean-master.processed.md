@@ -117,9 +117,9 @@ scripts/winclean/
 
 | #   | Plan                                             | File                                    | Status  | Validated |
 | --- | ------------------------------------------------ | --------------------------------------- | ------- | --------- |
-| 1   | Core model, guards, safe removal, `safe` dev modules, CLI | `./2026_08_04-winclean-part-1.md` | done | [ ]       |
-| 2   | `moderate` level: app/browser caches, lock handling, confirmations | `./2026_08_04-winclean-part-2.md` | done | [ ]       |
-| 3   | `aggressive` level, config file, JSONL history, estimated-vs-measured report | `./2026_08_04-winclean-part-3.md` | done | [x]       |
+| 1   | Core model, guards, safe removal, `safe` dev modules, CLI | `./2026_08_04-winclean-part-1.processed.md` | done | [ ]       |
+| 2   | `moderate` level: app/browser caches, lock handling, confirmations | `./2026_08_04-winclean-part-2.processed.md` | done | [ ]       |
+| 3   | `aggressive` level, config file, JSONL history, estimated-vs-measured report | `./2026_08_04-winclean-part-3.processed.md` | done | [x]       |
 
 <!-- Status values: pending, in-progress, done, blocked -->
 <!-- RULE: Part N+1 blocked until Part N checkbox checked. Each part is independently runnable/shippable. -->
