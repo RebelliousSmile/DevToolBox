@@ -23,12 +23,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import mod_dev, procs  # noqa: E402
+from scripts.winclean import mod_apps, mod_dev, procs  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
+    DISCOVERY_PATHLESS,
     DISCOVERY_WALKING,
     LEVEL_ORDER,
     PROC_GUARD_WARN_AND_SKIP,
+    PROC_GUARD_WARN_ONLY,
     SKIP_RUNNING,
     CleanCandidate,
     CleanModule,
@@ -117,6 +119,67 @@ _REGISTERED: tuple[CleanModule, ...] = (
     _cache_module("pip-cache"),
     _cache_module("uv-cache"),
     _cache_module("nuget-packages"),
+    # --- niveau `moderate` ------------------------------------------------- #
+    # Aucun ne parcourt les racines : quatre chemins documentés par utilisateur
+    # (`fixed`) et un seul candidat sans chemin (`pathless`). Tous portent
+    # `needs_network=False` : aucun ne se re-télécharge depuis un registre de
+    # paquets, donc `--offline` n'a aucune raison de les écarter.
+    CleanModule(
+        name="browser-cache",
+        level=Level.MODERATE,
+        requires=(),
+        discover=mod_apps.discover_browser_cache,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        # `warn-only` et non `warn-and-skip` : un navigateur ouvert tient ses
+        # fichiers de cache **ouverts**, il ne réécrit pas l'arbre supprimé. Le
+        # résultat attendu est un `winerror 32` rapporté dans `locked_paths`, pas
+        # une omission silencieuse de tous les candidats du module.
+        proc_guard=PROC_GUARD_WARN_ONLY,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="vscode-cache",
+        level=Level.MODERATE,
+        requires=(),
+        discover=mod_apps.discover_vscode_cache,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=PROC_GUARD_WARN_ONLY,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="user-temp",
+        level=Level.MODERATE,
+        requires=(),
+        discover=mod_apps.discover_user_temp,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        # `None` est un constat sur `%TEMP%` : les deux forces de garde
+        # interrogent des propriétaires **nommés**, et `%TEMP%` n'en a pas.
+        proc_guard=None,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="crashdumps",
+        level=Level.MODERATE,
+        requires=(),
+        discover=mod_apps.discover_crashdumps,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="docker-light",
+        level=Level.MODERATE,
+        requires=("docker",),
+        discover=mod_apps.discover_docker_light,
+        clean=mod_apps.clean_docker_light,
+        discovery=DISCOVERY_PATHLESS,
+        proc_guard=None,
+        needs_network=False,
+    ),
 )
 
 MODULES: dict[str, CleanModule] = {m.name: m for m in _REGISTERED}
@@ -132,6 +195,8 @@ MODULE_ORDER: tuple[str, ...] = tuple(m.name for m in _REGISTERED)
 PROC_OWNERS: dict[str, tuple[str, ...]] = {
     "cargo-target": mod_dev.CARGO_OWNERS,
     "dotnet-binobj": mod_dev.DOTNET_OWNERS,
+    "browser-cache": mod_apps.BROWSER_OWNERS,
+    "vscode-cache": mod_apps.EDITOR_OWNERS,
 }
 
 

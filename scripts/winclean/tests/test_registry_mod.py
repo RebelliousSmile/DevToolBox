@@ -10,25 +10,31 @@ déclarée est un mensonge.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Iterator
 from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import guards, mod_dev, procs, registry_mod  # noqa: E402
+from scripts.winclean import guards, mod_apps, mod_dev, procs, registry_mod  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
     DISCOVERY_MODES,
+    DISCOVERY_PATHLESS,
     DISCOVERY_WALKING,
     EXCLUDE_NEEDS_NETWORK,
     PROC_GUARDS,
     PROC_GUARD_WARN_AND_SKIP,
+    PROC_GUARD_WARN_ONLY,
     CleanModule,
     Level,
 )
@@ -61,6 +67,11 @@ EXPECTED_DISCOVERY: dict[str, str] = {
     "pip-cache": DISCOVERY_FIXED,
     "uv-cache": DISCOVERY_FIXED,
     "nuget-packages": DISCOVERY_FIXED,
+    "browser-cache": DISCOVERY_FIXED,
+    "vscode-cache": DISCOVERY_FIXED,
+    "user-temp": DISCOVERY_FIXED,
+    "crashdumps": DISCOVERY_FIXED,
+    "docker-light": DISCOVERY_PATHLESS,
 }
 
 EXPECTED_PROC_GUARD: dict[str, str | None] = {
@@ -75,6 +86,11 @@ EXPECTED_PROC_GUARD: dict[str, str | None] = {
     "pip-cache": None,
     "uv-cache": None,
     "nuget-packages": None,
+    "browser-cache": PROC_GUARD_WARN_ONLY,
+    "vscode-cache": PROC_GUARD_WARN_ONLY,
+    "user-temp": None,
+    "crashdumps": None,
+    "docker-light": None,
 }
 
 EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
@@ -89,7 +105,41 @@ EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
     "pip-cache": True,
     "uv-cache": True,
     "nuget-packages": True,
+    # Aucun module `moderate` ne se re-télécharge depuis un registre de paquets :
+    # `--offline` protège une machine qui ne peut pas reconstruire, et rien ici
+    # ne bloque une construction.
+    "browser-cache": False,
+    "vscode-cache": False,
+    "user-temp": False,
+    "crashdumps": False,
+    "docker-light": False,
 }
+
+
+@contextlib.contextmanager
+def neutral_user_paths(case: unittest.TestCase) -> Iterator[Path]:
+    """Neutralise l'environnement des modules `fixed` de la Part 2.
+
+    Les quatre modules `moderate` porteurs de chemin lisent des variables
+    d'environnement réelles, et `docker-light` interroge un vrai démon. Un test
+    qui parcourt tout le registre mesurerait alors le `%TEMP%` de la machine —
+    lent, et différent d'une machine à l'autre. La sonde Docker est coupée au
+    premier étage pour la même raison.
+    """
+    sandbox = tempdir(case)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            mock.patch.dict(
+                os.environ,
+                {
+                    "TEMP": str(sandbox),
+                    "LOCALAPPDATA": str(sandbox),
+                    "APPDATA": str(sandbox),
+                },
+            )
+        )
+        stack.enter_context(mock.patch.object(mod_apps.shutil, "which", return_value=None))
+        yield sandbox
 
 
 def fixture_root(case: unittest.TestCase) -> Path:
@@ -124,10 +174,10 @@ class TestDeclaredTables(unittest.TestCase):
             with self.subTest(module=name):
                 self.assertIs(MODULES[name].needs_network, expected)
 
-    def test_no_pathless_module_is_registered_in_this_part(self) -> None:
-        # La moitié comportementale de `pathless` est celle de la Part 2, avec
-        # `docker-light` : un critère sur un panier vide est infalsifiable.
-        self.assertNotIn("pathless", set(EXPECTED_DISCOVERY.values()))
+    def test_the_three_discovery_modes_are_all_represented(self) -> None:
+        # La moitié comportementale de `pathless` arrive avec `docker-light` :
+        # un critère sur un panier vide est infalsifiable.
+        self.assertEqual(set(DISCOVERY_MODES), set(EXPECTED_DISCOVERY.values()))
 
 
 class TestDiscoveryBehaviour(unittest.TestCase):
@@ -154,6 +204,66 @@ class TestDiscoveryBehaviour(unittest.TestCase):
             found = discover_module(MODULES[name], roots=[], max_depth=6)
         self.assertEqual([c.estimated_bytes for c in found], [300])
 
+    def test_all_three_modes_at_once_on_a_single_empty_root(self) -> None:
+        """Un seul run prouve les trois modes de découverte.
+
+        Les deux étages de la sonde Docker sont corrigés — `shutil.which` et le
+        **statut de sortie** de `docker system df --format json` — et `%TEMP%`
+        pointe sur un fixture à une entrée. Aucun des deux correctifs n'est
+        optionnel : sans le premier le critère échoue sur toute machine sans
+        Docker, sans le second un module `fixed` qui ne rend rien est
+        indiscernable d'un module `walking`, qui est précisément la distinction
+        testée.
+        """
+        empty = tempdir(self)
+        fake_temp = tempdir(self)
+        write(fake_temp / "installeur.tmp", 700)
+
+        found: dict[str, list[str | None]] = {}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "TEMP": str(fake_temp),
+                        "LOCALAPPDATA": str(empty),
+                        "APPDATA": str(empty),
+                    },
+                )
+            )
+            # Les autres modules `fixed` pointeraient sur les vrais caches de la
+            # machine : mesurés, ils rendraient le test lent et dépendant du poste.
+            stack.enter_context(
+                mock.patch.object(mod_dev, "resolve_cache_path", return_value=None)
+            )
+            stack.enter_context(
+                mock.patch.object(mod_apps.shutil, "which", return_value="docker.exe")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    mod_apps,
+                    "_run",
+                    return_value=subprocess.CompletedProcess(
+                        args=list(mod_apps.DOCKER_DF_COMMAND), returncode=0, stdout="{}"
+                    ),
+                )
+            )
+            stack.enter_context(mock.patch.object(procs, "is_running", return_value=set()))
+            for name, module in MODULES.items():
+                found[name] = [
+                    c.path for c in discover_module(module, roots=[empty], max_depth=6)
+                ]
+
+        # `pathless` : découvert sans aucune racine utile, et sans chemin.
+        self.assertEqual([None], found["docker-light"])
+        # `fixed` : découvert bien que la racine soit vide.
+        self.assertEqual([str(fake_temp / "installeur.tmp")], found["user-temp"])
+        # `walking` : rien à trouver sous une racine vide.
+        for name, mode in EXPECTED_DISCOVERY.items():
+            if mode == DISCOVERY_WALKING:
+                with self.subTest(module=name):
+                    self.assertEqual([], found[name])
+
 
 class TestNeedsNetworkStamping(unittest.TestCase):
     def test_every_candidate_carries_its_module_declaration(self) -> None:
@@ -161,7 +271,8 @@ class TestNeedsNetworkStamping(unittest.TestCase):
         cache = tempdir(self)
         write(cache / "contenu" / "a", 90)
         seen = 0
-        with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
+        with neutral_user_paths(self):
+          with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
             with mock.patch.object(procs, "is_running", return_value=set()):
                 for name, module in MODULES.items():
                     found = discover_module(module, roots=[root], max_depth=6)
@@ -178,7 +289,8 @@ class TestNeedsNetworkStamping(unittest.TestCase):
         cache = tempdir(self)
         write(cache / "contenu" / "a", 90)
         candidates = []
-        with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
+        with neutral_user_paths(self):
+          with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
             with mock.patch.object(procs, "is_running", return_value=set()):
                 for module in MODULES.values():
                     candidates.extend(discover_module(module, roots=[root], max_depth=6))
@@ -195,7 +307,8 @@ class TestNeedsNetworkStamping(unittest.TestCase):
         root = fixture_root(self)
         cache = tempdir(self)
         write(cache / "contenu" / "a", 10)
-        with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
+        with neutral_user_paths(self):
+          with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
             with mock.patch.object(procs, "is_running", return_value=set()):
                 for name, module in MODULES.items():
                     if not module.needs_network:
@@ -220,10 +333,17 @@ class TestModuleOrder(unittest.TestCase):
 
 
 class TestLevelSelection(unittest.TestCase):
-    def test_safe_selects_every_module_of_this_part(self) -> None:
-        self.assertEqual(
-            [m.name for m in modules_for_level(Level.SAFE)], list(MODULE_ORDER)
-        )
+    def test_safe_selects_the_safe_modules_and_only_them(self) -> None:
+        selected = [m.name for m in modules_for_level(Level.SAFE)]
+        expected = [n for n in MODULE_ORDER if MODULES[n].level is Level.SAFE]
+        self.assertEqual(selected, expected)
+        self.assertNotIn("browser-cache", selected)
+
+    def test_moderate_adds_this_part_s_modules_to_the_safe_ones(self) -> None:
+        selected = [m.name for m in modules_for_level(Level.MODERATE)]
+        for name in ("browser-cache", "vscode-cache", "user-temp", "crashdumps", "docker-light"):
+            self.assertIn(name, selected)
+        self.assertIn("pycache", selected)
 
     def test_a_higher_level_still_includes_the_safe_ones(self) -> None:
         names = [m.name for m in modules_for_level(Level.AGGRESSIVE)]
