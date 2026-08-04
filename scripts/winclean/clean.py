@@ -322,7 +322,10 @@ def build_parser() -> argparse.ArgumentParser:
             "tous reconstructibles. moderate ajoute les caches d'applications "
             "(navigateurs, éditeurs), %TEMP%, les vidages mémoire et le nettoyage léger "
             "de Docker ; il passe par la corbeille par défaut et exige une confirmation "
-            "sous --apply. Voir README.md."
+            "sous --apply. aggressive ajoute la corbeille de l'utilisateur (plancher "
+            "d'âge de 7 jours, voir --trash-days) et le cache d'installation MSI ; les "
+            "deux suppriment en direct et le second demande sa propre confirmation. "
+            "Voir README.md."
         ),
     )
     # `--apply` et `--history` sont exclusifs par construction, pas par
@@ -390,8 +393,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="FICHIER",
         help=(
+            # `%%` et non `%` : argparse passe chaque `help` par un `%`-formatage
+            # (`_expand_help`), donc un `%A` littéral y lève `ValueError` et fait
+            # planter `--help` en entier — la première commande qu'on tape.
             "Fichier de configuration JSON (défaut : "
-            "%APPDATA%\\winclean\\winclean.json s'il existe). Il ne peut que "
+            "%%APPDATA%%\\winclean\\winclean.json s'il existe). Il ne peut que "
             "restreindre : désactiver des modules, ajouter des chemins protégés, "
             "abaisser le plafond, relever le plancher d'âge de la corbeille."
         ),
@@ -870,6 +876,25 @@ def _record(result: CleanResult, column: str, value: int | None) -> None:
     setattr(result, column, _add(current, value))
 
 
+def _measure(result: CleanResult, before: int | None, path: str) -> None:
+    """Verse dans `measured` la contribution d'un candidat, après opération.
+
+    Somme des contributions **connues** : une contribution non mesurable n'est pas
+    versée, donc `measured` reste `None` jusqu'à ce qu'une seule le soit — et vaut
+    `None` en propre pour un module dont aucun candidat n'a été tenté. Une
+    contribution de `0` octet est connue et se verse : ce n'est pas la même chose
+    qu'un module non mesurable, et le rapport les distingue.
+
+    `_record()` ne convient pas ici : sa branche `None` remet la colonne à `None`
+    dès qu'elle vaut `0`, ce qui est juste pour « rien mis en corbeille » et faux
+    pour une somme de mesures dont l'une a échoué après une autre qui valait zéro.
+    """
+    value = remove.measure_freed(before, path)
+    if value is None:
+        return
+    result.measured = _add(result.measured, value)
+
+
 def _remove_candidate(
     candidate: CleanCandidate,
     result: CleanResult,
@@ -909,17 +934,21 @@ def _remove_candidate(
         if outcome.ok:
             result.recycle_events += 1
             _record(result, "recycled", before)
+            _measure(result, before, candidate.path)
             return None
         # Décision 14 : un échec de corbeille est terminal, pas un repli. Le
         # chemin est intact, et il est nommé dans sa propre section — le confondre
         # avec un verrou enverrait l'utilisateur fermer une application innocente.
         _record(result, "failed", before)
+        _measure(result, before, candidate.path)
         result.recycle_failed_paths.append(candidate.path)
         failures.extend(outcome.errors)
         return None
     if report is not None:
         report.removal_attempted = True
+    before = estimate_path(candidate.path)
     freed, failed, errors = remove.delete_tree(candidate.path)
+    _measure(result, before, candidate.path)
     result.freed = _add(result.freed, freed)
     if failed:
         result.failed = _add(result.failed, failed)
@@ -1058,6 +1087,12 @@ def apply_plan(
             # qu'il est appelé. Marquer d'après ses octets serait faux, il n'en
             # rend aucun de mesurable.
             report.removal_attempted = True
+            # Le second avis vaut aussi pour un module qui supprime lui-même : la
+            # mesure d'avant est prise ici, avant l'appel, et relue après. Sans
+            # cela `recycle-bin` — dont tous les candidats sont délégués — serait
+            # le seul module dont la colonne `measured` reste vide alors qu'il a
+            # bien retiré des octets.
+            before = {c.path: estimate_path(c.path) for c in delegated if c.path}
             _merge_result(
                 result,
                 module.clean(
@@ -1066,6 +1101,8 @@ def apply_plan(
                     yes=bool(args.yes),
                 ),
             )
+            for path, value in before.items():
+                _measure(result, value, path)
 
 
 # --------------------------------------------------------------------------- #

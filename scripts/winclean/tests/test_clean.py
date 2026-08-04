@@ -13,6 +13,7 @@ import dataclasses
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -38,6 +39,7 @@ from scripts.winclean.common import (  # noqa: E402
     SKIP_CHANGED,
     SKIP_GONE,
     SKIP_NO_UNDO,
+    UNMEASURED_CELL,
     CleanCandidate,
     CleanModule,
     CleanResult,
@@ -254,6 +256,19 @@ class TestParser(unittest.TestCase):
                 clean.build_parser().parse_args(["--check"])
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("--check", err.getvalue())
+
+    def test_help_renders_and_shows_the_environment_variables_it_names(self):
+        """`--help` doit tenir debout : argparse `%`-formate chaque texte d'aide.
+
+        Un `%APPDATA%` non doublé y lève `ValueError` — pas sur l'option fautive,
+        mais sur `--help` en entier, la première commande qu'un utilisateur tape.
+        Aucun test de `parse_args` ne l'attrape : le formatage n'a lieu qu'au
+        rendu. On vérifie donc le rendu, et que le doublage n'a pas fui dans le
+        texte affiché.
+        """
+        text = clean.build_parser().format_help()
+        self.assertIn("%APPDATA%", text)
+        self.assertNotIn("%%", text)
 
     def test_frozen_defaults(self):
         args = clean.build_parser().parse_args([])
@@ -1509,6 +1524,137 @@ class TestBytesComeFromTheApply(unittest.TestCase):
         self.assertEqual(result["estimated"], 100)
         self.assertEqual(result["recycled"], 1000)
         self.assertEqual(result["freed"], 0)
+
+
+# --------------------------------------------------------------------------- #
+# Comparaison estimé / mesuré (Part 3 phase 4 tâche 1)
+# --------------------------------------------------------------------------- #
+
+
+def comparison_rows(text: str) -> dict[str, list[str]]:
+    """Les lignes de la table « Estimé vs mesuré », par module.
+
+    Lues dans le texte plutôt que reconstruites : la table et la charge JSON sont
+    produites par du code différent, et c'est justement ce que les critères 179 et
+    180 séparent.
+    """
+    rows: dict[str, list[str]] = {}
+    lines = text.split("\n")
+    start = next(i for i, line in enumerate(lines) if line.startswith("Estimé vs mesuré"))
+    for line in lines[start + 2 :]:
+        if not line.startswith("  "):
+            break
+        # Découpe sur les colonnes, pas sur les blancs : une cellule d'octets
+        # contient elle-même une espace (`+900 B`), qu'un `split()` nu couperait
+        # en deux et laisserait le test affirmer « B » au lieu de l'écart.
+        cells = re.split(r"\s{2,}", line.strip())
+        if len(cells) == 4:
+            rows[cells[0]] = cells[1:]
+    return rows
+
+
+class TestMeasuredComparison(unittest.TestCase):
+    def _grown_run(self, argv: list[str]) -> tuple[int, str, str]:
+        """Un arbre qui grossit entre le plan et l'application.
+
+        Un fixture **neuf par appel** : le run précédent a supprimé la cible, et
+        la recréer sous le même candidat déplacerait son mtime — le garde
+        secondaire l'omettrait alors, et la mesure ne dirait plus rien.
+        """
+        tmp = _tempdir(self)
+        target = tmp / "cache"
+        target.mkdir()
+        write(target / "gros.bin", 100)
+        built = candidate("factice", target, 100)
+
+        def _discover(**_kw):
+            # Réécriture d'une entrée existante : le mtime du répertoire ne bouge
+            # pas, donc le garde secondaire n'omet rien et la mesure seule joue.
+            write(target / "gros.bin", 1000)
+            return [dataclasses.replace(built)]
+
+        module = fake_module("factice", discover=_discover, discovery=DISCOVERY_FIXED)
+        with registry_of(module):
+            return run_cli(["--root", str(tmp), "--apply", "--yes", *argv])
+
+    def test_a_tree_that_grew_measures_above_its_estimate(self):
+        """Critère 180 : la croissance **est** l'assertion.
+
+        Nourri de l'estimation, `measured` vaudrait 100 et l'écart 0 sur ce même
+        fixture : un arbre de taille constante ne distingue pas un nombre audité
+        d'un nombre recopié.
+        """
+        code, out, err = self._grown_run(["--json"])
+        self.assertEqual(code, clean.EXIT_OK, err)
+        result = json.loads(out)["run"]["results"][0]
+        self.assertEqual(result["estimated"], 100)
+        self.assertEqual(result["measured"], 1000)
+        self.assertGreater(result["measured"], result["estimated"])
+
+    def test_the_grown_tree_prints_a_signed_delta(self):
+        """Le même écart, dans la table : signé, jamais `0 B` ni `—`."""
+        code, text, err = self._grown_run([])
+        self.assertEqual(code, clean.EXIT_OK, err)
+        delta = comparison_rows(text)["factice"][2]
+        self.assertTrue(delta.startswith("+"), delta)
+        self.assertNotEqual(delta, UNMEASURED_CELL)
+
+    def _mixed_run(self, argv: list[str]) -> tuple[int, str, str]:
+        """Un module qui agit, un module omis en entier, dans le même run.
+
+        L'omission totale passe par la confirmation propre à `package-cache`
+        refusée faute de terminal : c'est le seul chemin de la v1 où un module
+        traverse le plan sans qu'un seul de ses candidats soit tenté.
+        """
+        tmp = _tempdir(self)
+        cache = tmp / "cache"
+        cache.mkdir()
+        write(cache / "produit.msi", 128)
+        other = tmp / "autre"
+        other.mkdir()
+        write(other / "b.bin", 64)
+        with registry_of(
+            aggressive_module("package-cache", cache, 128),
+            aggressive_module("brutal", other, 64),
+        ), no_tty():
+            return run_cli(
+                ["--root", str(tmp), "--level", "aggressive", "--apply", "--yes", *argv]
+            )
+
+    def test_an_untouched_module_prints_a_dash_in_both_cells(self):
+        """Critère 181 : `—` dans la case `mesuré` **et** dans celle de l'écart.
+
+        Les deux sont vérifiées : un écart calculé `estimated - 0` passerait toute
+        assertion ne visant que la case `mesuré`, et ferait dire à la table « rien
+        n'a été récupéré » d'un module que le rapport déclare non tenté.
+        """
+        code, out, err = self._mixed_run([])
+        self.assertEqual(code, clean.EXIT_OK, err)
+        rows = comparison_rows(out)
+        skipped = rows["package-cache"]
+        self.assertEqual(skipped[-1], UNMEASURED_CELL)
+        self.assertEqual(skipped[-2], UNMEASURED_CELL)
+        acting = rows["brutal"]
+        self.assertNotEqual(acting[-1], UNMEASURED_CELL)
+        self.assertNotEqual(acting[-2], UNMEASURED_CELL)
+        self.assertIn("B", acting[-1])
+
+    def test_the_comparison_is_emitted_and_not_only_printed(self):
+        """Critère 182 : `null` dans la charge, ni `0` ni `—`.
+
+        Seule la charge survit à `--out` sous le lanceur (décision 16), et elle est
+        construite par un autre code que la table : l'affirmer sur le texte seul
+        laisserait le mode que l'interface lit sans vérification.
+        """
+        code, out, err = self._mixed_run(["--json"])
+        self.assertEqual(code, clean.EXIT_OK, err)
+        results = {r["module"]: r for r in json.loads(out)["run"]["results"]}
+        self.assertEqual(results["package-cache"]["estimated"], 128)
+        self.assertIsNone(results["package-cache"]["measured"])
+        self.assertEqual(results["brutal"]["estimated"], 64)
+        self.assertEqual(results["brutal"]["measured"], 64)
+        # `null` et non la chaîne de rendu : le texte est une vue, pas la donnée.
+        self.assertNotIn(UNMEASURED_CELL, out)
 
 
 # --------------------------------------------------------------------------- #

@@ -46,8 +46,8 @@ seul `--no-recycle` la désarme.
 module ne monte jamais le niveau à votre place, et la confirmation n'est même pas
 posée.
 
-> Les modules `aggressive` arrivent avec la partie 3 du plan. Le niveau existe
-> déjà dans le CLI ; aujourd'hui il ne sélectionne rien de plus que `moderate`.
+Le niveau `aggressive` a **sa propre confirmation en plus** de celle du niveau,
+pour le seul module `package-cache` (voir plus bas) : `--yes` n'y répond pas.
 
 ## Modules livrés
 
@@ -81,6 +81,35 @@ pas, aucune colonne d'octets n'est renseignée (`unknown` partout, jamais `0 B`)
 et la ligne `Total reclaimed space:` que Docker imprime n'est **pas** relue — ce
 serait une mesure inventée à partir du texte d'un tiers. Les volumes Docker ne
 sont jamais touchés.
+
+Niveau `aggressive` (n'apparaissent qu'avec `--level aggressive`) :
+
+| Module | Découverte | Réseau | Ce qu'il propose |
+| --- | --- | --- | --- |
+| `recycle-bin` | corbeille par volume | non | les éléments de **votre** corbeille plus vieux que le plancher d'âge |
+| `package-cache` | chemin fixe | non | `%ProgramData%\Package Cache` — **sans retour arrière** |
+
+Les deux suppriment **en direct** : `--recycle` est accepté et inerte à ce niveau.
+
+- **`recycle-bin` n'énumère que la corbeille du compte courant.** Elle est
+  identifiée par son SID ; si le SID ne se résout pas, le module ne propose
+  **rien** et le dit (`recycle-bin-sid-unknown`) au lieu de deviner. Les
+  corbeilles des autres comptes ne sont jamais parcourues, et seuls les volumes
+  que Windows rapporte comme disques fixes sont regardés.
+- **Plancher d'âge de 7 jours par défaut** (`--trash-days`, qu'un fichier de
+  configuration peut relever mais jamais abaisser). Un élément plus récent est
+  conservé, et le plan nomme le plancher en vigueur. La date vient de l'en-tête
+  `$I` de l'entrée ; illisible, elle retombe sur la date du `$R` apparié ;
+  indisponible, l'entrée est **omise** et signalée, jamais supprimée par défaut.
+- **`package-cache` casse les réparations futures.** Windows Installer garde là
+  les charges MSI/MSP des produits installés : les supprimer fait qu'une
+  réparation, une modification ou une désinstallation ultérieure réclame le média
+  d'origine ou échoue. Ces octets ne se reconstituent pas localement. La
+  conséquence **survit au run**, ce qu'aucun autre module ne fait — d'où une
+  confirmation dédiée : une réponse interactive, ou `--yes-package-cache`. Sans
+  l'un des deux (typiquement un appel sans terminal avec `--yes`), ce module
+  **seul** est omis en `skipped-unconfirmed` et le reste du run se déroule
+  normalement.
 
 `--only` et `--skip` prennent ces noms, répétables ou séparés par des virgules.
 Un nom inconnu arrête le run avant toute découverte, en listant les noms valides.
@@ -209,6 +238,83 @@ requis pour reconstituer » dans le plan. `--offline` les exclut, et les liste
 avec leur estimation dans une section « Exclus par `--offline` » — dans le texte
 comme dans la sortie `--json`. Ils sont exclus, pas escamotés.
 
+## Configuration
+
+Emplacement par défaut : **`%APPDATA%\winclean\winclean.json`**, lu s'il existe.
+`--config <fichier>` en désigne un autre — et un `--config` explicite pointant un
+fichier absent **échoue** (`2`), là où l'absence du fichier par défaut est
+normale : nommer un fichier est une intention, son silence serait une trahison.
+
+Le fichier est lu comme des **données** (`json.load`, jamais `eval`/`import`) et
+ne peut que **restreindre**. Il n'y a délibérément aucune clé pour `--apply`, le
+niveau, `--yes` ou des racines : élargir un run est un acte par invocation.
+Une clé inconnue arrête le run **avant toute découverte**, en code `2`.
+
+| Clé | Type | Défaut | Effet | Résolution |
+| --- | --- | --- | --- | --- |
+| `TRASH_DAYS` | entier ≥ 0 | `7` | plancher d'âge de `recycle-bin` | CLI > fichier > défaut |
+| `MAX_DELETE_BYTES` | entier ≥ 0 | `53687091200` (50 Gio) | plafond du total du plan | CLI > fichier > défaut |
+| `PROTECTED_PATHS` | liste de chemins **absolus** | `[]` | chemins protégés en plus des dossiers de données de l'utilisateur | **union** avec la CLI |
+| `DISABLED_MODULES` | liste de noms de modules connus | `[]` | modules retirés de toute sélection | **union** avec `--skip` |
+
+Deux comportements à retenir :
+
+- **Les scalaires suivent CLI > fichier > défaut** ; un `TRASH_DAYS: 0` écrit dans
+  le fichier n'est pas confondu avec son absence. Mais un fichier ne peut jamais
+  *desserrer* : le plafond ne peut être qu'abaissé, le plancher d'âge que relevé.
+- **Les deux clés d'ensemble s'unissent avec la ligne de commande** au lieu d'être
+  remplacées par elle. Une protection que le drapeau le plus courant peut défaire
+  ne protège pas un run non surveillé. Corollaire assumé : nommer un module
+  désactivé dans `--only` est une **erreur** non nulle, pas un plan vide qui se
+  lirait « rien à nettoyer ».
+
+`winclean.json.example` est du JSON strict — donc sans commentaire : le commentaire
+de chaque clé est ce tableau. Tolérer une clé de commentaire contredirait la
+validation de *toutes* les clés, qui est le point du fichier.
+
+## Historique des runs destructeurs
+
+Emplacement : **`%LOCALAPPDATA%\winclean\history.jsonl`** — `%LOCALAPPDATA%` et
+non `%APPDATA%`, un journal de machine ne se synchronise pas d'un poste à l'autre.
+Une ligne JSON par run, ajoutée à la fin, **500 lignes** conservées au plus
+(élagage par lignes, donc une ligne corrompue survit au lieu d'être escamotée).
+
+**Qui écrit une ligne** : un run qui a **tenté** une suppression, et lui seul. Une
+simulation n'écrit rien. Un run `--apply` dont tous les candidats ont été omis, ou
+qui s'est arrêté avant la boucle (plafond, confirmation refusée), n'écrit rien non
+plus. À l'inverse un run qui n'a rien pu mesurer (`docker-light`) ou qui n'a fait
+que recycler (`freed: 0`) écrit bien sa ligne : le déclencheur est la tentative,
+pas le total d'octets. Un échec d'écriture est un **avertissement** sur la sortie
+d'erreur, jamais un code de sortie ni un statut.
+
+```json
+{"timestamp":"2026-08-04T22:13:53Z","level":"safe","status":"completed",
+ "estimated_bytes":4096,"freed_bytes":4096,"recycled_bytes":0,"failed_bytes":0,
+ "modules":{"pycache":{"estimated":4096,"measured":4096}}}
+```
+
+`timestamp` est UTC, suffixé `Z`. `status` vaut `completed` ou `interrupted`. Il
+n'y a **pas** de champ « mode » : une simulation n'écrivant rien, la colonne serait
+constante. Un total non mesurable est `null`, jamais `0`.
+
+`--history N` relit les N derniers runs et sort : aucune découverte, aucun chemin
+touché. Elle est incompatible avec `--apply` par construction.
+
+## Estimé, puis mesuré
+
+Le rapport d'un run `--apply` imprime une table `estimé / mesuré / écart`, une
+ligne par module. Les deux chiffres viennent de **deux parcours indépendants à
+deux instants** : l'estimation au plan, la mesure juste avant et juste après
+chaque suppression. L'égalité n'est donc pas une propriété d'un run correct — un
+arbre qui a grossi entre-temps mesure plus que son estimation, et c'est le fait,
+pas un défaut.
+
+Un module qui n'a **rien tenté** (omis en entier) n'a rien mesuré : sa cellule
+`mesuré` et son écart affichent tous deux `—`, et le `--json` porte `null`. Un
+nombre *plus petit* que l'estimation veut dire autre chose : le candidat a été
+tenté et partiellement empêché — le cas du fichier verrouillé. Les deux se lisent
+donc sans ambiguïté.
+
 ## Options
 
 | Option | Effet |
@@ -221,7 +327,11 @@ comme dans la sortie `--json`. Ils sont exclus, pas escamotés.
 | `--max-delete-bytes` | plafond du plan, `50GiB` par défaut (`500m`, `1024`, `2TiB`…) |
 | `--offline` | exclut les candidats qui exigent le réseau |
 | `--recycle` / `--no-recycle` | force / interdit la corbeille (inerte hors `moderate`) |
-| `--yes` | acquitte l'avertissement de processus propriétaire **et** la confirmation de niveau |
+| `--yes` | acquitte l'avertissement de processus propriétaire **et** la confirmation de niveau ; jamais `--apply`, jamais le niveau, jamais `package-cache` |
+| `--yes-package-cache` | répond d'avance à la seule confirmation propre à `package-cache` |
+| `--config <fichier>` | fichier de configuration JSON (défaut `%APPDATA%\winclean\winclean.json` s'il existe) |
+| `--trash-days N` | plancher d'âge de `recycle-bin`, 7 jours par défaut ; `0` prend tout ce qui est éligible |
+| `--history N` | affiche les N derniers runs destructeurs et sort ; ne découvre rien, exclusif de `--apply` |
 | `--out <chemin>` | écrit le rapport dans un fichier, dans le format de stdout ; parent créé, fichier écrasé, stdout conservé |
 | `--json` | sortie machine, un seul document JSON |
 | `--top N` | tronque **l'affichage** aux N plus gros candidats ; le total, le plafond et l'ensemble supprimé restent le plan complet, et le pied de tableau dit combien de lignes sont masquées |
@@ -244,6 +354,38 @@ booléenne comme dans `deps_audit`, un plan vide est un résultat normal.
 Le rapport chiffré est émis **même en cas d'interruption** : des octets ont déjà
 disparu, un rapport vide serait un mensonge.
 
+## Ce que winclean ne fait **pas**
+
+Cette liste est un engagement, pas un retard de développement. Chaque entrée est
+un endroit où un nettoyeur peut casser Windows ou mentir sur ce qu'il a récupéré.
+
+- **WinSxS / le magasin de composants** (`%WINDIR%\WinSxS`). Ce n'est pas un
+  cache : les fichiers y sont *liés en dur* dans le système en service, et sa
+  taille apparente n'est pas de l'espace récupérable. Seul `DISM
+  /Cleanup-Image` sait ce qui y est encore référencé — et il exige une élévation.
+- **Le cache de Windows Update** (`%WINDIR%\SoftwareDistribution`). Le supprimer
+  à la main pendant qu'un service le tient produit des mises à jour qui échouent
+  en boucle. Cela passe par l'arrêt des services concernés, donc par une
+  élévation, et par le nettoyage de disque de Windows.
+- **Les clichés instantanés (VSS) et les points de restauration.** Ils sont la
+  dernière chance de revenir en arrière, y compris après un nettoyage raté. Un
+  outil qui détruit le filet en même temps que la poussière n'est pas un outil de
+  nettoyage.
+- **`hiberfil.sys`, `pagefile.sys`, `swapfile.sys`.** Ce sont des réglages du
+  système (veille prolongée, mémoire virtuelle), pas des fichiers : leur taille
+  se change par `powercfg` ou les propriétés système, et les effacer casse la
+  fonction qui les crée.
+- **L'intérieur des disques virtuels `.vhdx`** (WSL, Docker Desktop). Aucun
+  module n'en émet ; récupérer l'espace *dedans* passe par les commandes de
+  l'hôte concerné.
+- **Tout ce qui exige une élévation.** winclean tourne avec les droits de la
+  session, jamais plus : les caches système, le `%TEMP%` d'autres comptes, les
+  journaux d'événements sont hors de portée et ne sont pas proposés.
+- **Vider la corbeille implicitement.** Cela n'arrive qu'avec `--level aggressive`
+  et le module `recycle-bin`, nommément.
+- **Les volumes Docker**, et la ligne `Total reclaimed space:` que Docker
+  imprime : ce serait une mesure inventée à partir du texte d'un tiers.
+
 ## Limites connues
 
 - **Le garde anti-TOCTOU est secondaire, pas une garantie.** La date de
@@ -261,18 +403,17 @@ disparu, un rapport vide serait un mensonge.
 - **Les octets rapportés sont mesurés à l'application, jamais l'estimation du
   plan.** Un arbre qui a grossi entre les deux est rapporté à sa taille réelle :
   l'écart entre `estimated` et `freed`/`recycled` est normal et voulu.
-- **Aucune élévation.** winclean tourne avec les droits de la session. Ce qui
-  exige un administrateur (caches système, `%WINDIR%\Temp` d'autres comptes) est
-  hors de portée et n'est pas proposé.
-- **Les disques virtuels `.vhdx` (WSL, Docker Desktop) ne sont jamais touchés.**
-  Aucun module n'en émet, et la récupération d'espace *à l'intérieur* d'un
-  `.vhdx` n'est pas du ressort de cet outil : elle passe par les commandes de
-  l'hôte concerné.
 - **Chemins longs** : la suppression directe passe par le préfixe `\\?\` et gère
   donc les chemins au-delà de `MAX_PATH` ; la corbeille, non (voir plus haut).
 - **Estimations.** Une taille vaut `null`/`inconnu` quand elle n'a pas pu être
   mesurée. Ce n'est jamais rendu par `0` : un total incomplet est signalé comme
   tel plutôt que présenté comme exact.
+- **Encodage : `--out` écrit en UTF-8, stdout suit la console.** Sur une console
+  Windows en page de code héritée (cp1252), un `--json` **redirigé** sort dans
+  cette page de code et un lecteur qui suppose UTF-8 échoue sur le premier
+  accent. `--out <fichier>` est toujours en UTF-8 : c'est le canal à utiliser pour
+  un consommateur automatique, et c'est déjà celui qu'impose une invocation
+  depuis un lanceur.
 
 ## Invocation
 

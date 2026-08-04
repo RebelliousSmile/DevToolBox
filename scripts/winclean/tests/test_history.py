@@ -25,9 +25,11 @@ if str(_REPO_ROOT) not in sys.path:
 from scripts.winclean import clean, history  # noqa: E402
 from scripts.winclean.common import CleanResult, Level, RunReport  # noqa: E402
 from scripts.winclean.tests.test_clean import (  # noqa: E402
+    aggressive_module,
     candidate,
     docker_stub,
     fake_module,
+    no_tty,
     recycle_stub,
     registry_of,
     run_cli,
@@ -430,6 +432,63 @@ class TestWrittenOnlyByADestructiveRun(unittest.TestCase):
         self.assertIn("skipped-gone", out)
         self.assertFalse(journal.exists())
 
+    def test_an_abort_before_the_loop_appends_nothing(self):
+        """Plafond dépassé : le run s'arrête **avant** la boucle d'application.
+
+        Seconde famille du critère, distincte de « tous les candidats omis » : là
+        la boucle a tourné sans rien tenter, ici elle n'a pas commencé. Un
+        déclencheur posé sur `--apply` plutôt que sur « quelque chose a été
+        détruit » écrirait une ligne dans les deux cas.
+        """
+        root = tempdir(self)
+        target = Path(root) / "target"
+        write(target / "fichier.txt", 5000)
+        journal = self.journal()
+        module = fake_module("fake-a", candidates=(candidate("fake-a", target, 5000),))
+        with registry_of(module):
+            code, _out, err = run_cli(
+                ["--root", str(root), "--apply", "--yes", "--max-delete-bytes", "1000"],
+                history_path=journal,
+            )
+        self.assertEqual(code, clean.EXIT_CEILING)
+        self.assertIn("--max-delete-bytes", err)
+        self.assertTrue(target.exists())
+        self.assertFalse(journal.exists())
+
+    def test_an_unconfirmed_module_is_recorded_null_beside_the_ones_that_acted(self):
+        """`package-cache` non confirmé, les autres suppriment : une ligne écrite.
+
+        L'enregistrement ne nomme pas l'omission — il n'a pas de champ pour cela —
+        mais publie `measured: null` pour le module non tenté, à côté d'un nombre
+        **non nul** pour celui qui a agi. Ni un nombre plus petit (signature d'un
+        candidat tenté puis empêché, le cas du fichier verrouillé), ni l'égalité
+        avec l'estimation (deux parcours indépendants à deux instants).
+        """
+        root = tempdir(self)
+        cache = Path(root) / "cache"
+        write(cache / "produit.msi", 128)
+        other = Path(root) / "autre"
+        write(other / "b.bin", 64)
+        journal = self.journal()
+        with registry_of(
+            aggressive_module("package-cache", cache, 128),
+            aggressive_module("brutal", other, 64),
+        ), no_tty():
+            code, out, err = run_cli(
+                ["--root", str(root), "--level", "aggressive", "--apply", "--yes"],
+                history_path=journal,
+            )
+        self.assertEqual(code, 0, err)
+        self.assertIn("skipped-unconfirmed", out)
+        (record,) = records_of(journal)
+        self.assertEqual(record["status"], "completed")
+        modules = record["modules"]
+        self.assertIsNone(modules["package-cache"]["measured"])
+        self.assertIsNotNone(modules["brutal"]["measured"])
+        self.assertGreater(modules["brutal"]["measured"], 0)
+        self.assertTrue(cache.exists())
+        self.assertFalse(other.exists())
+
     def test_an_interrupted_run_that_already_wrote_is_recorded(self):
         root = tempdir(self)
         target = Path(root) / "target"
@@ -446,11 +505,14 @@ class TestWrittenOnlyByADestructiveRun(unittest.TestCase):
             clean_fn=_interrupt,
         )
         with registry_of(first, second):
-            code, _out, err = run_cli(
+            code, out, err = run_cli(
                 ["--root", str(root), "--apply", "--yes"], history_path=journal
             )
         self.assertEqual(code, clean.EXIT_INTERRUPTED)
         self.assertIn("Interruption", err)
+        # Le rapport partiel est imprimé malgré l'interruption : la ligne
+        # d'historique et le rapport sortent du même `finally`.
+        self.assertIn("Estimé vs mesuré", out)
         (record,) = records_of(journal)
         self.assertEqual(record["status"], "interrupted")
         self.assertEqual(record["freed_bytes"], 300)

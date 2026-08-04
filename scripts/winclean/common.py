@@ -50,6 +50,7 @@ __all__ = [
     "PROC_GUARDS",
     "SKIP_TOKENS",
     "RECYCLE_FOOTER_LINES",
+    "UNMEASURED_CELL",
     "DEFAULT_TRASH_DAYS",
     "estimate_path",
     "volume_of",
@@ -219,6 +220,16 @@ class CleanResult:
     qui déclenche le pied de page de récupération différée, jamais une
     comparaison sur `recycled` — cette colonne vaut `None` quand la mesure
     d'avant opération a échoué alors que la corbeille a bien reçu les octets.
+
+    `measured` est le **second avis** sur `estimated`, et pas une quatrième
+    colonne d'octets : c'est la somme, sur les candidats du module, de
+    `remove.measure_freed()` — donc d'une mesure prise juste avant l'opération et
+    relue juste après, jamais de `estimated_bytes`. Nourrie de l'estimation, la
+    comparaison que la Part 3 publie tiendrait deux fois le même nombre et son
+    écart serait toujours nul. `None` veut dire « aucun candidat de ce module n'a
+    produit de figure mesurable » — typiquement un module omis en entier — et ne
+    doit jamais être rendu `0` : « pas tenté » et « rien récupéré » sont deux
+    lectures différentes, et la seconde est la signature d'un verrou.
     """
 
     module: str
@@ -226,6 +237,7 @@ class CleanResult:
     freed: int | None = None
     recycled: int | None = None
     failed: int | None = None
+    measured: int | None = None
     skipped: list[SkippedEntry] = field(default_factory=list)
     locked_paths: list[str] = field(default_factory=list)
     recycle_failed_paths: list[str] = field(default_factory=list)
@@ -238,6 +250,7 @@ class CleanResult:
             "freed": self.freed,
             "recycled": self.recycled,
             "failed": self.failed,
+            "measured": self.measured,
             "skipped": [s.to_json_payload() for s in self.skipped],
             "locked_paths": list(self.locked_paths),
             "recycle_failed_paths": list(self.recycle_failed_paths),
@@ -642,6 +655,37 @@ def render_warning(warning: CleanWarning) -> str:
 _LABEL_WIDTH = 22
 _SIZE_WIDTH = 10
 
+#: Cellule de la comparaison estimé/mesuré quand il n'y a rien à montrer.
+#: Distincte du `unknown` de `human_size` : celui-ci dit « la mesure a échoué »
+#: sur une colonne d'octets, celle-ci dit « il n'y a pas de comparaison » sur une
+#: ligne dont un des deux termes manque. Jamais `0` — Part 3 Phase 4 tâche 1 :
+#: écrire `0` ferait lire « rien n'a été récupéré » là où le module n'a pas été
+#: tenté du tout.
+UNMEASURED_CELL = "—"
+
+
+def _compare_cell(value: int | None) -> str:
+    """Une case de la table de comparaison. `None` → `—`, jamais `0`."""
+    return UNMEASURED_CELL if value is None else human_size(value)
+
+
+def _delta_cell(estimated: int | None, measured: int | None) -> str:
+    """L'écart, **rendu et non dérivé** quand un des deux termes manque.
+
+    Le seul autre nombre à portée serait `estimated - 0`, qui imprime toute
+    l'estimation du module comme un manque : la table dirait « rien n'a été
+    récupéré » d'un module que le rapport déclare non tenté. Le signe est affiché
+    sans être jugé — un `measured` supérieur à l'estimation est légitime (l'arbre
+    a grossi entre le plan et l'application, ou le module a retiré des octets que
+    l'estimation ne cotait pas).
+    """
+    if estimated is None or measured is None:
+        return UNMEASURED_CELL
+    delta = measured - estimated
+    if delta == 0:
+        return human_size(0)
+    return f"{'+' if delta > 0 else '-'}{human_size(abs(delta))}"
+
 #: Pied de page de récupération différée (décision 18). Les trois sorties sont
 #: dans cet ordre, et le `--trash-days 0` de la troisième est **obligatoire** :
 #: `recycle-bin` applique un plancher d'âge de 7 jours, donc sans lui la commande
@@ -789,6 +833,19 @@ def format_result_report(
         f"en échec : {human_size(run.total_failed())}"
     )
     out.append(f"Estimé au plan : {human_size(run.estimated_total)}")
+
+    out.append("")
+    out.append("Estimé vs mesuré :")
+    out.append(
+        f"  {'module':<{_LABEL_WIDTH}} {'estimé':>{_SIZE_WIDTH}} "
+        f"{'mesuré':>{_SIZE_WIDTH}} {'écart':>{_SIZE_WIDTH}}"
+    )
+    for r in run.results:
+        out.append(
+            f"  {r.module:<{_LABEL_WIDTH}} {_compare_cell(r.estimated):>{_SIZE_WIDTH}} "
+            f"{_compare_cell(r.measured):>{_SIZE_WIDTH}} "
+            f"{_delta_cell(r.estimated, r.measured):>{_SIZE_WIDTH}}"
+        )
 
     skipped = [(r.module, s) for r in run.results for s in r.skipped]
     if skipped:

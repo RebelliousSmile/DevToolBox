@@ -16,9 +16,12 @@ restaurer (visible, minuscule, effaçable à la main) là où l'ordre inverse
 laisserait une charge utile orpheline, invisible de l'interface et qui garde
 ses octets pour toujours.
 
-Conséquence assumée : le `measured` de ce module dépasse **légitimement** son
+Conséquence assumée : le `freed` de ce module dépasse **légitimement** son
 `estimated`, des octets du sidecar. L'estimation tarife la charge utile, le run
-retire la charge utile et ses métadonnées.
+retire la charge utile et ses métadonnées. `measured` ne suit pas la même règle :
+la CLI le calcule candidat par candidat, sur le seul chemin porté par le candidat
+— le `$R`. Il reste donc aligné sur `estimated`, et c'est `freed` qui porte le
+surplus.
 
 Un `discover_*()` ne rend que des candidats. Le canal de ce module vers le texte
 du plan est donc `notes`, une liste de `CleanWarning` que le constructeur de plan

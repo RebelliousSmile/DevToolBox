@@ -104,6 +104,9 @@ class TestModel(unittest.TestCase):
                 "freed",
                 "recycled",
                 "failed",
+                # Part 3 phase 4 : le second avis sur `estimated`, nullable aux
+                # mêmes conditions que les colonnes d'octets.
+                "measured",
                 "skipped",
                 # Part 2 : les deux classes de défaillance derrière la colonne
                 # `failed`, séparées, et le compteur d'événements de corbeille.
@@ -112,8 +115,14 @@ class TestModel(unittest.TestCase):
                 "recycle_events",
             ),
         )
+        # `measured` est une **valeur** d'octets nullable, jamais un drapeau : ce
+        # test interdisait tout nom contenant `measur` tant que le champ n'existait
+        # pas, et l'interdiction visait en réalité les formes booléennes. Elle est
+        # donc resserrée sur elles plutôt que levée — `measurable` ou `is_measured`
+        # rouvriraient la porte que la doctrine « on interroge la valeur » ferme.
+        self.assertEqual([n for n in names if "measur" in n], ["measured"])
         for name in names:
-            self.assertNotIn("measur", name)
+            self.assertNotIn("measurable", name)
             self.assertNotIn("unknown", name)
 
     def test_empty_label_is_rejected_at_construction(self) -> None:

@@ -139,12 +139,12 @@ def utc_stamp(moment: datetime | None = None) -> str:
 def _measured(result: CleanResult) -> int | None:
     """Octets réellement récupérés pour ce module, `None` si non mesurable.
 
-    Accès indirect assumé : le champ `measured` de `CleanResult` arrive à la
-    phase 4 de cette part, et l'historique ne doit pas dépendre de l'ordre des
-    phases pour être écrit correctement. Le jour où le champ existe, cette
-    fonction devient un simple accesseur.
+    Le champ existe depuis la phase 4 de cette part : cette fonction est devenue
+    le simple accesseur qu'elle annonçait, gardée pour que le site de lecture reste
+    nommé — l'historique et le rapport publient la **même** paire, et un `getattr`
+    de contournement rendrait `null` pour toujours si le champ était renommé.
     """
-    return getattr(result, "measured", None)
+    return result.measured
 
 
 def build_record(
