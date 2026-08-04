@@ -23,6 +23,7 @@ from scripts.winclean.common import (
     DROP_PROTECTED,
     DROP_SANITY,
     DroppedEntry,
+    ExcludedEntry,
     human_size,
     sum_known,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "path_sanity",
     "screen_candidates",
     "absorb_nested",
+    "filter_needs_network",
     "enforce_ceiling",
 ]
 
@@ -255,6 +257,39 @@ def absorb_nested(
             )
         )
     return kept + pathless, absorbed
+
+
+# --------------------------------------------------------------------------- #
+# Contenu re-téléchargeable
+# --------------------------------------------------------------------------- #
+
+
+def filter_needs_network(
+    candidates: Sequence[CleanCandidate],
+) -> tuple[list[CleanCandidate], list[ExcludedEntry]]:
+    """Retire les candidats dont le contenu se re-télécharge (`--offline`).
+
+    Le filtre lit `needs_network` sur le **candidat**, où l'appelant de
+    découverte a estampillé la valeur déclarée par le module : c'est la seule
+    forme qui survit à un module dont la découverte serait déportée ailleurs.
+    Un candidat retiré est **rapporté** comme exclu, jamais effacé du compte
+    rendu - sinon `--offline` ferait mentir le total.
+    """
+    kept: list[CleanCandidate] = []
+    excluded: list[ExcludedEntry] = []
+    for candidate in candidates:
+        if not candidate.needs_network:
+            kept.append(candidate)
+            continue
+        excluded.append(
+            ExcludedEntry(
+                module=candidate.module,
+                label=candidate.label,
+                path=candidate.path,
+                estimated_bytes=candidate.estimated_bytes,
+            )
+        )
+    return kept, excluded
 
 
 # --------------------------------------------------------------------------- #

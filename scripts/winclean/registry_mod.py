@@ -1,0 +1,296 @@
+"""Registre des modules. Unique site de déclaration de leurs propriétés.
+
+Le CLI ne connaît aucun nom de module : il lit `discovery`, `proc_guard` et
+`needs_network` sur l'enregistrement et se comporte en conséquence. Ajouter un
+module ici suffit à le faire prendre en charge partout ; brancher sur son nom
+ailleurs ferait de chaque ajout une modification du CLI.
+
+`needs_network` est déclaré ici et estampillé sur les candidats par
+`discover_module()`. Aucun `discover_*()` ne le fixe lui-même : deux sites de
+vérité laisseraient le registre annoncer `True` pendant que la fonction émet
+`False`, et le test de correspondance resterait au vert.
+"""
+
+from __future__ import annotations
+
+import functools
+import shutil
+import sys
+from pathlib import Path
+from typing import Iterable, Mapping, Sequence
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts.winclean import mod_dev, procs  # noqa: E402
+from scripts.winclean.common import (  # noqa: E402
+    DISCOVERY_FIXED,
+    DISCOVERY_WALKING,
+    LEVEL_ORDER,
+    PROC_GUARD_WARN_AND_SKIP,
+    SKIP_RUNNING,
+    CleanCandidate,
+    CleanModule,
+    Level,
+    SkippedEntry,
+)
+
+__all__ = [
+    "ValidationError",
+    "MODULES",
+    "MODULE_ORDER",
+    "PROC_OWNERS",
+    "ownership_rank",
+    "modules_for_level",
+    "validate_names",
+    "validate_level",
+    "select_modules",
+    "requirements_met",
+    "discover_module",
+    "proc_owners",
+    "proc_guard_state",
+    "proc_guard_skip",
+]
+
+
+class ValidationError(Exception):
+    """Sélection invalide : le run s'arrête avant toute découverte."""
+
+
+def _cache_module(name: str, requires: tuple[str, ...] = ()) -> CleanModule:
+    """Module `fixed` d'un cache de gestionnaire de paquets.
+
+    Tous partagent la même forme : un chemin documenté, un candidat, et
+    `needs_network = True` puisque le contenu se re-télécharge.
+    """
+    return CleanModule(
+        name=name,
+        level=Level.SAFE,
+        requires=requires,
+        discover=functools.partial(mod_dev.discover_cache, name),
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=True,
+    )
+
+
+_REGISTERED: tuple[CleanModule, ...] = (
+    CleanModule(
+        name="cargo-target",
+        level=Level.SAFE,
+        requires=(),
+        discover=mod_dev.discover_cargo_target,
+        clean=None,
+        discovery=DISCOVERY_WALKING,
+        proc_guard=PROC_GUARD_WARN_AND_SKIP,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="pycache",
+        level=Level.SAFE,
+        requires=(),
+        discover=mod_dev.discover_pycache,
+        clean=None,
+        discovery=DISCOVERY_WALKING,
+        proc_guard=None,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="dotnet-binobj",
+        level=Level.SAFE,
+        requires=(),
+        discover=mod_dev.discover_dotnet_binobj,
+        clean=None,
+        discovery=DISCOVERY_WALKING,
+        proc_guard=PROC_GUARD_WARN_AND_SKIP,
+        needs_network=False,
+    ),
+    _cache_module("cargo-registry"),
+    _cache_module("npm-cache"),
+    # Seul module à exiger son binaire : le store pnpm vit où pnpm le dit (par
+    # volume), et le repli `%LOCALAPPDATA%` désigne souvent un dossier vide.
+    _cache_module("pnpm-store", requires=("pnpm",)),
+    _cache_module("yarn-cache"),
+    _cache_module("bun-cache"),
+    _cache_module("pip-cache"),
+    _cache_module("uv-cache"),
+    _cache_module("nuget-packages"),
+)
+
+MODULES: dict[str, CleanModule] = {m.name: m for m in _REGISTERED}
+
+#: Rang de possession. Ne tranche que l'égalité de chemin **exacte** dans
+#: `absorb_nested` : le module le plus spécifique d'un chemin est déclaré avant
+#: celui qui ne fait que le contenir.
+MODULE_ORDER: tuple[str, ...] = tuple(m.name for m in _REGISTERED)
+
+#: Processus dont l'activité rend un candidat instable, par module. Table lue à
+#: la fois par la découverte (pour l'avertissement) et par l'application (pour
+#: l'omission) : une seule déclaration, deux lecteurs.
+PROC_OWNERS: dict[str, tuple[str, ...]] = {
+    "cargo-target": mod_dev.CARGO_OWNERS,
+    "dotnet-binobj": mod_dev.DOTNET_OWNERS,
+}
+
+
+def _registry(registry: Mapping[str, CleanModule] | None) -> Mapping[str, CleanModule]:
+    return MODULES if registry is None else registry
+
+
+def ownership_rank(module: str, registry: Mapping[str, CleanModule] | None = None) -> int:
+    """Index du module dans l'ordre de possession ; inconnu = dernier."""
+    order = MODULE_ORDER if registry is None else tuple(registry)
+    try:
+        return order.index(module)
+    except ValueError:
+        return len(order)
+
+
+def modules_for_level(
+    level: Level, registry: Mapping[str, CleanModule] | None = None
+) -> list[CleanModule]:
+    """Modules dont le niveau est atteint par `level`, dans l'ordre déclaré."""
+    ceiling = LEVEL_ORDER.index(level)
+    return [m for m in _registry(registry).values() if LEVEL_ORDER.index(m.level) <= ceiling]
+
+
+def validate_names(
+    names: Iterable[str], registry: Mapping[str, CleanModule] | None = None
+) -> None:
+    """Refuse un nom inconnu **avant** la découverte, en listant les valides.
+
+    Une faute de frappe dans `--only` doit coûter une erreur, pas un run qui
+    parcourt des disques pour finir sur « rien à nettoyer » : l'utilisateur en
+    conclurait que sa machine est propre.
+    """
+    known = _registry(registry)
+    unknown = [n for n in names if n not in known]
+    if not unknown:
+        return
+    raise ValidationError(
+        "module inconnu : "
+        + ", ".join(sorted(unknown))
+        + " - noms valides : "
+        + ", ".join(known)
+    )
+
+
+def validate_level(
+    names: Iterable[str],
+    level: Level,
+    registry: Mapping[str, CleanModule] | None = None,
+) -> None:
+    """Refuse un module demandé au-dessus du niveau actif, en nommant le niveau.
+
+    Le silence serait pire que l'erreur : `--only <module moderate>` sans
+    `--level moderate` rendrait un plan vide, indiscernable d'un module qui n'a
+    rien trouvé. `validate_names()` passe d'abord, sinon un nom inconnu
+    ressortirait comme un problème de niveau.
+    """
+    validate_names(names, registry)
+    known = _registry(registry)
+    ceiling = LEVEL_ORDER.index(level)
+    too_high = [n for n in names if LEVEL_ORDER.index(known[n].level) > ceiling]
+    if not too_high:
+        return
+    required = max((known[n].level for n in too_high), key=LEVEL_ORDER.index)
+    raise ValidationError(
+        "module au-dessus du niveau actif ("
+        + str(level)
+        + ") : "
+        + ", ".join(sorted(too_high))
+        + f" - relancer avec --level {required}"
+    )
+
+
+def select_modules(
+    level: Level,
+    only: Sequence[str] = (),
+    skip: Sequence[str] = (),
+    registry: Mapping[str, CleanModule] | None = None,
+) -> list[CleanModule]:
+    """Sélection finale : `--only` d'abord, `--skip` ensuite.
+
+    L'ordre compte et il est celui-là : `--skip` retire de ce que `--only` a
+    retenu, si bien que `--only pycache --skip pycache` ne sélectionne rien -
+    sans erreur, l'utilisateur ayant dit les deux.
+    """
+    known = _registry(registry)
+    if only:
+        validate_level(only, level, registry)
+        chosen = [known[n] for n in only]
+    else:
+        chosen = modules_for_level(level, registry)
+    validate_names(skip, registry)
+    excluded = set(skip)
+    return [m for m in chosen if m.name not in excluded]
+
+
+def requirements_met(module: CleanModule) -> bool:
+    """Vrai si tous les binaires exigés par le module sont sur le `PATH`."""
+    return all(shutil.which(binary) is not None for binary in module.requires)
+
+
+def discover_module(module: CleanModule, **kwargs: object) -> list[CleanCandidate]:
+    """Découverte d'un module, avec estampillage de `needs_network`.
+
+    Unique appelant de `discover()` dans le programme : c'est ici que la valeur
+    déclarée devient la valeur portée. Un module dont un `requires` manque rend
+    zéro candidat, sans message : l'outil n'est pas installé, il n'y a pas
+    d'anomalie à signaler.
+    """
+    if not requirements_met(module):
+        return []
+    found = module.discover(**kwargs)
+    if not module.needs_network:
+        return found
+    for candidate in found:
+        candidate.needs_network = True
+    return found
+
+
+def proc_owners(module: str) -> tuple[str, ...]:
+    """Processus surveillés pour ce module, vide s'il n'en surveille aucun."""
+    return PROC_OWNERS.get(module, ())
+
+
+def proc_guard_state(module: str) -> tuple[set[str] | None, tuple[str, ...]]:
+    """État des propriétaires : `(correspondances, surveillés)`.
+
+    `set()` = interrogé, rien ne tourne. `None` = pas pu interroger. Sans
+    propriétaire déclaré, rien n'est lancé du tout.
+    """
+    owners = proc_owners(module)
+    if not owners:
+        return set(), ()
+    return procs.is_running(owners), owners
+
+
+def proc_guard_skip(
+    module: CleanModule,
+    candidate: CleanCandidate,
+    *,
+    yes: bool,
+    state: tuple[set[str] | None, tuple[str, ...]] | None = None,
+) -> SkippedEntry | None:
+    """Omission due à un propriétaire actif, ou `None` s'il faut agir.
+
+    Seul `warn-and-skip` omet. `warn-only` avertit et laisse agir : la
+    différence entre les deux forces tient entièrement ici, pas dans le texte de
+    l'avertissement, qui est le même. `--yes` lève l'omission - l'utilisateur a
+    répondu de son état de machine.
+    """
+    if module.proc_guard != PROC_GUARD_WARN_AND_SKIP or yes:
+        return None
+    matched, owners = proc_guard_state(module.name) if state is None else state
+    if not procs.unknown_is_running(matched):
+        return None
+    reason = procs.owner_reason(matched, owners)
+    return SkippedEntry(
+        label=candidate.label,
+        path=candidate.path,
+        status=SKIP_RUNNING,
+        reason=reason or "propriétaire actif",
+    )

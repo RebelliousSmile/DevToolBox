@@ -30,6 +30,7 @@ __all__ = [
     "parse_image_names",
     "is_running",
     "unknown_is_running",
+    "owner_reason",
 ]
 
 #: `/NH` retire l'en-tête, `/FO CSV` évite la colonne à largeur fixe que la
@@ -107,3 +108,18 @@ def unknown_is_running(matched: set[str] | None) -> bool:
     nomme l'état inconnu ou le processus trouvé, jamais les deux à la fois.
     """
     return matched is None or bool(matched)
+
+
+def owner_reason(matched: set[str] | None, owners: Iterable[str]) -> str | None:
+    """Phrase à joindre à la raison d'un candidat, ou `None` si rien ne tourne.
+
+    Une seule fonction pour les deux forces de garde : le texte ne dépend pas de
+    ce que l'appelant décidera d'en faire. Un module `warn-only` affiche la même
+    phrase et agit quand même ; c'est l'omission qui diffère, pas le constat.
+    """
+    if matched is None:
+        listed = ", ".join(sorted(name for name in owners if name))
+        return f"état des processus inconnu, propriétaires surveillés : {listed}"
+    if matched:
+        return f"processus propriétaire actif : {', '.join(sorted(matched))}"
+    return None
