@@ -207,7 +207,7 @@ flowchart TD
 
 #### Acceptance criteria
 
-- [ ] `test_procs.py`: parsing is verified against a captured `tasklist` CSV fixture; a successful query matching nothing yields an **empty set** while a failing subprocess yields **`None`**, both without raising — asserted as two distinct returns, since a test accepting "falsy" for either would let the two collapse back into one; the module contains no `taskkill` reference (source-level assertion).
+- [x] `test_procs.py`: parsing is verified against a captured `tasklist` CSV fixture; a successful query matching nothing yields an **empty set** while a failing subprocess yields **`None`**, both without raising — asserted as two distinct returns, since a test accepting "falsy" for either would let the two collapse back into one; the module contains no `taskkill` reference (source-level assertion).
 - [ ] `test_mod_dev.py`: with `is_running` patched to return `None`, a `warn-and-skip` candidate is skipped under `--apply` and its reported reason names the unknown state rather than a running process; the same candidate with `--yes` is deleted. This is the behavioural half of task 1's `None` — without it the sentinel exists and nothing consumes it.
 
 ### Phase 3: `safe` dev modules (`mod_dev.py`, `registry_mod.py`)
