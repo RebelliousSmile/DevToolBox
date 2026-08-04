@@ -1,0 +1,11 @@
+{
+  "TRASH_DAYS": 30,
+  "MAX_DELETE_BYTES": 10737418240,
+  "PROTECTED_PATHS": [
+    "D:\\archives",
+    "C:\\dev\\ne-pas-toucher"
+  ],
+  "DISABLED_MODULES": [
+    "browser-cache"
+  ]
+}

@@ -25,6 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.winclean import clean, guards, mod_apps, registry_mod  # noqa: E402
+from scripts.winclean import config as config_mod  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
     DISCOVERY_WALKING,
@@ -127,9 +128,18 @@ def registry_of(*modules: CleanModule):
 
 
 def run_cli(argv: list[str]) -> tuple[int, str, str]:
+    """Lance le CLI, sans jamais lire le fichier de configuration de la machine.
+
+    La recherche à l'emplacement par défaut est neutralisée ici, une fois pour
+    toute la suite : sinon un `%APPDATA%\\winclean\\winclean.json` présent chez un
+    développeur changerait le plafond, la liste protégée ou les modules
+    sélectionnés de chaque test. Un test qui *veut* une configuration la nomme
+    avec `--config`, ce que ce contournement laisse intact.
+    """
     out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = clean.main(argv)
+    with mock.patch.object(config_mod, "default_config_path", lambda env=None: None):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = clean.main(argv)
     return code, out.getvalue(), err.getvalue()
 
 

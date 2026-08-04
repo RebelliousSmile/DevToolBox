@@ -4,6 +4,7 @@ description: Part 3 - the aggressive cleanup level (Recycle Bin per volume, MSI 
 argument-hint: N/A
 objective: "winclean gains its operational layer: an aggressive level guarded by confirmation, a config file that can only restrict behaviour, a JSONL history of every run, and a report comparing what was estimated against what was actually reclaimed."
 success_condition: "python -m unittest discover -s scripts/winclean/tests -v exits 0 AND an --apply run that actually removed or recycled something appends exactly one well-formed JSONL line readable by --history 1 AND an unknown config key aborts the run before any discovery"
+status: in-progress
 iteration: 0
 created_at: "2026-08-04T00:00:00Z"
 ---
@@ -106,9 +107,9 @@ flowchart TD
 
 #### Acceptance criteria
 
-- [ ] `test_config.py`: an unknown key aborts non-zero; `TRASH_DAYS: -1` aborts; `DISABLED_MODULES: ["nmp"]` aborts; `PROTECTED_PATHS` adds to and never removes from `DEFAULT_PROTECTED`; a missing config file is not an error. The allowlist is asserted to contain **no key that widens the run** — none for `apply`, level or `yes`, and none naming roots or scope: `{"ROOTS": ["D:\\"]}` aborts as an unknown key. Stated as a property over the allowlist rather than as three named keys, because the next key someone adds is the one a fixed list would not have covered.
-- [ ] `test_config.py`: with `TRASH_DAYS: 30` in the file, `--trash-days 0` on the CLI resolves to `0` — otherwise the decision-18 closing command would silently become a no-op wherever such a config exists.
-- [ ] `test_config.py` (set-valued keys are not scalars): with `DISABLED_MODULES: ["recycle-bin"]`, `--only recycle-bin` aborts **non-zero** with a message naming the config file and the key, before any discovery runs (asserted on a spy over the registry); `--skip pycache` with the same config disables **both** modules rather than replacing the list; and a plain run silently omits the disabled module without an error. A silent empty selection exiting `0` would be indistinguishable from "nothing to clean" for a module the user named explicitly.
+- [x] `test_config.py`: an unknown key aborts non-zero; `TRASH_DAYS: -1` aborts; `DISABLED_MODULES: ["nmp"]` aborts; `PROTECTED_PATHS` adds to and never removes from `DEFAULT_PROTECTED`; a missing config file is not an error. The allowlist is asserted to contain **no key that widens the run** — none for `apply`, level or `yes`, and none naming roots or scope: `{"ROOTS": ["D:\\"]}` aborts as an unknown key. Stated as a property over the allowlist rather than as three named keys, because the next key someone adds is the one a fixed list would not have covered.
+- [x] `test_config.py`: with `TRASH_DAYS: 30` in the file, `--trash-days 0` on the CLI resolves to `0` — otherwise the decision-18 closing command would silently become a no-op wherever such a config exists.
+- [x] `test_config.py` (set-valued keys are not scalars): with `DISABLED_MODULES: ["recycle-bin"]`, `--only recycle-bin` aborts **non-zero** with a message naming the config file and the key, before any discovery runs (asserted on a spy over the registry); `--skip pycache` with the same config disables **both** modules rather than replacing the list; and a plain run silently omits the disabled module without an error. A silent empty selection exiting `0` would be indistinguishable from "nothing to clean" for a module the user named explicitly.
 
 ### Phase 2: History (`history.py`)
 

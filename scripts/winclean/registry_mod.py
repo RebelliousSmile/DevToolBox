@@ -222,23 +222,45 @@ def modules_for_level(
 
 
 def validate_names(
-    names: Iterable[str], registry: Mapping[str, CleanModule] | None = None
+    names: Iterable[str],
+    registry: Mapping[str, CleanModule] | None = None,
+    *,
+    disabled: Iterable[str] = (),
+    config_source: str | None = None,
 ) -> None:
     """Refuse un nom inconnu **avant** la découverte, en listant les valides.
 
     Une faute de frappe dans `--only` doit coûter une erreur, pas un run qui
     parcourt des disques pour finir sur « rien à nettoyer » : l'utilisateur en
     conclurait que sa machine est propre.
+
+    `disabled` porte les modules que la configuration a désactivés, et n'est
+    passé que depuis le chemin `--only` : dans `--skip` le même nom est une
+    redondance légitime, l'union des deux étant déjà la règle. Nommer un module
+    désactivé dans `--only` est en revanche une erreur non nulle qui **nomme le
+    fichier et la clé** — le laisser filer rendrait un plan vide, indiscernable
+    d'un « rien à nettoyer » pour un module que l'utilisateur a demandé
+    explicitement.
     """
     known = _registry(registry)
     unknown = [n for n in names if n not in known]
-    if not unknown:
+    if unknown:
+        raise ValidationError(
+            "module inconnu : "
+            + ", ".join(sorted(unknown))
+            + " - noms valides : "
+            + ", ".join(known)
+        )
+    blocked = set(disabled)
+    refused = [n for n in names if n in blocked]
+    if not refused:
         return
+    source = config_source or "le fichier de configuration"
     raise ValidationError(
-        "module inconnu : "
-        + ", ".join(sorted(unknown))
-        + " - noms valides : "
-        + ", ".join(known)
+        "module désactivé par la configuration : "
+        + ", ".join(sorted(refused))
+        + f" - retiré par DISABLED_MODULES dans {source}"
+        + " - retirer ce nom de la clé, ou ne pas le demander avec --only"
     )
 
 
@@ -246,6 +268,9 @@ def validate_level(
     names: Iterable[str],
     level: Level,
     registry: Mapping[str, CleanModule] | None = None,
+    *,
+    disabled: Iterable[str] = (),
+    config_source: str | None = None,
 ) -> None:
     """Refuse un module demandé au-dessus du niveau actif, en nommant le niveau.
 
@@ -254,7 +279,7 @@ def validate_level(
     rien trouvé. `validate_names()` passe d'abord, sinon un nom inconnu
     ressortirait comme un problème de niveau.
     """
-    validate_names(names, registry)
+    validate_names(names, registry, disabled=disabled, config_source=config_source)
     known = _registry(registry)
     ceiling = LEVEL_ORDER.index(level)
     too_high = [n for n in names if LEVEL_ORDER.index(known[n].level) > ceiling]
@@ -275,21 +300,32 @@ def select_modules(
     only: Sequence[str] = (),
     skip: Sequence[str] = (),
     registry: Mapping[str, CleanModule] | None = None,
+    *,
+    disabled: Sequence[str] = (),
+    config_source: str | None = None,
 ) -> list[CleanModule]:
     """Sélection finale : `--only` d'abord, `--skip` ensuite.
 
     L'ordre compte et il est celui-là : `--skip` retire de ce que `--only` a
     retenu, si bien que `--only pycache --skip pycache` ne sélectionne rien -
     sans erreur, l'utilisateur ayant dit les deux.
+
+    `disabled` (la clé `DISABLED_MODULES` du fichier) **s'unit** à `--skip` au
+    lieu d'être remplacé par lui : c'est une protection, et une protection que la
+    ligne de commande défait ne protège pas un run non surveillé. Un run ordinaire
+    omet donc le module en silence — c'est ce que le fichier demande — et seul
+    `--only` sur ce nom lève une erreur, parce que là l'utilisateur l'a réclamé.
     """
     known = _registry(registry)
     if only:
-        validate_level(only, level, registry)
+        validate_level(
+            only, level, registry, disabled=disabled, config_source=config_source
+        )
         chosen = [known[n] for n in only]
     else:
         chosen = modules_for_level(level, registry)
     validate_names(skip, registry)
-    excluded = set(skip)
+    excluded = set(skip) | set(disabled)
     return [m for m in chosen if m.name not in excluded]
 
 

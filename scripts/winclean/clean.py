@@ -34,6 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from scripts.winclean import config as config_mod  # noqa: E402
 from scripts.winclean import guards, registry_mod, remove  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DROP_SANITY,
@@ -69,11 +70,13 @@ __all__ = [
     "EXIT_PLATFORM",
     "DEFAULT_MAX_DEPTH",
     "DEFAULT_MAX_DELETE_BYTES",
+    "DEFAULT_TRASH_DAYS",
     "DISCOVERY_BUDGET_SECONDS",
     "PlatformError",
     "SanityAbort",
     "Output",
     "build_parser",
+    "explicit_flags",
     "parse_size",
     "default_root",
     "resolve_roots",
@@ -115,7 +118,11 @@ EXIT_PLATFORM = 7
 # --------------------------------------------------------------------------- #
 
 DEFAULT_MAX_DEPTH = 6
-DEFAULT_MAX_DELETE_BYTES = 50 * 1024**3
+#: Alias, pas une seconde déclaration : le plafond et le plancher d'âge sont
+#: résolus par `config.py` (CLI > fichier > défaut), donc leurs valeurs par défaut
+#: n'ont qu'un site de vérité, celui que la liste blanche valide.
+DEFAULT_MAX_DELETE_BYTES = config_mod.DEFAULT_MAX_DELETE_BYTES
+DEFAULT_TRASH_DAYS = config_mod.DEFAULT_TRASH_DAYS
 #: Au-delà, la découverte est signalée avec son détail par module. Ce n'est pas
 #: une limite qui avorte : c'est le seuil où le run nomme le responsable.
 DISCOVERY_BUDGET_SECONDS = 60.0
@@ -240,6 +247,41 @@ def _positive_top(text: str) -> int:
     return value
 
 
+class _TrackedStore(argparse.Action):
+    """`store` qui note, dans `args.explicit_flags`, que le drapeau a été tapé.
+
+    Nécessaire à la résolution *CLI > fichier > défaut* d'un drapeau qui porte
+    déjà un défaut : `args.max_delete_bytes` seul ne dit pas si les 50 Gio
+    viennent de l'utilisateur ou du parseur. Comparer la valeur à la constante ne
+    suffirait pas — taper exactement `50GiB` alors qu'un fichier abaisse le
+    plafond doit gagner, et une comparaison conclurait « non tapé ».
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+        setattr(namespace, self.dest, values)
+        seen = getattr(namespace, "explicit_flags", None)
+        if not isinstance(seen, set):
+            seen = set()
+            setattr(namespace, "explicit_flags", seen)
+        seen.add(self.dest)
+
+
+def explicit_flags(args: argparse.Namespace) -> frozenset[str]:
+    """Les `dest` que la ligne de commande a réellement fixés."""
+    seen = getattr(args, "explicit_flags", None)
+    return frozenset(seen) if isinstance(seen, set) else frozenset()
+
+
+def _positive_days(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--trash-days attend un entier, reçu {text!r}") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("--trash-days attend un entier positif ou nul")
+    return value
+
+
 def _positive_depth(text: str) -> int:
     try:
         value = int(text)
@@ -316,12 +358,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-delete-bytes",
+        action=_TrackedStore,
         type=parse_size,
         default=DEFAULT_MAX_DELETE_BYTES,
         metavar="TAILLE",
         help=(
             "Plafond du total du plan (défaut : "
-            f"{human_size(DEFAULT_MAX_DELETE_BYTES)}). Au-dessus, le run s'arrête."
+            f"{human_size(DEFAULT_MAX_DELETE_BYTES)}). Au-dessus, le run s'arrête. "
+            "Un fichier de configuration peut l'abaisser ; ce drapeau gagne sur lui."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="FICHIER",
+        help=(
+            "Fichier de configuration JSON (défaut : "
+            "%APPDATA%\\winclean\\winclean.json s'il existe). Il ne peut que "
+            "restreindre : désactiver des modules, ajouter des chemins protégés, "
+            "abaisser le plafond, relever le plancher d'âge de la corbeille."
+        ),
+    )
+    parser.add_argument(
+        "--trash-days",
+        type=_positive_days,
+        default=None,
+        metavar="N",
+        help=(
+            "Plancher d'âge des éléments de la corbeille au niveau aggressive "
+            f"(défaut : {DEFAULT_TRASH_DAYS} jours). 0 vide tout ce qui est éligible."
         ),
     )
     parser.add_argument(
@@ -573,17 +638,32 @@ def bin_allowance_warnings(
 def build_plan(
     args: argparse.Namespace,
     registry: Mapping[str, CleanModule] | None = None,
+    config: config_mod.Config | None = None,
 ) -> Plan:
     """Valider → découvrir → estampiller → garder → absorber → exclure → plafonner.
 
     L'ordre n'est pas négociable : la validation précède la découverte (une faute
     de frappe coûte une erreur, pas un parcours de disque suivi de « rien à
     nettoyer »), et le plafond passe en dernier, sur ce qui reste réellement.
+
+    La configuration n'entre que par trois portes, toutes restrictives : la
+    sélection (`DISABLED_MODULES`, uni à `--skip`), la protection
+    (`PROTECTED_PATHS`, uni à `DEFAULT_PROTECTED`) et le plafond
+    (`MAX_DELETE_BYTES`, que la ligne de commande peut relever). Aucune ne touche
+    aux racines : les choisir reste un acte par invocation.
     """
+    settings = config_mod.DEFAULT_CONFIG if config is None else config
     level = Level(args.level)
     only = _split_names(args.only)
     skip = _split_names(args.skip)
-    modules = registry_mod.select_modules(level, only, skip, registry)
+    modules = registry_mod.select_modules(
+        level,
+        only,
+        skip,
+        registry,
+        disabled=settings.disabled_modules,
+        config_source=settings.source,
+    )
 
     roots = resolve_roots(args.root)
     warnings: list[CleanWarning] = []
@@ -625,14 +705,20 @@ def build_plan(
             )
         )
 
-    kept, dropped = guards.screen_candidates(candidates)
+    kept, dropped = guards.screen_candidates(
+        candidates, protected=config_mod.protected_union(settings)
+    )
     kept, absorbed = guards.absorb_nested(kept)
     excluded = []
     if args.offline:
         kept, excluded = guards.filter_needs_network(kept)
 
+    cli_ceiling = (
+        args.max_delete_bytes if "max_delete_bytes" in explicit_flags(args) else None
+    )
+    ceiling = config_mod.resolve_max_delete_bytes(cli_ceiling, settings)
     # Peut lever `CeilingExceeded` : le run s'arrête avant la première suppression.
-    _total, ceiling_warnings = guards.enforce_ceiling(kept, args.max_delete_bytes)
+    _total, ceiling_warnings = guards.enforce_ceiling(kept, ceiling)
     warnings.extend(ceiling_warnings)
 
     # Décision 4, au plan : ce qui partira en corbeille et pèse lourd sur son
@@ -892,7 +978,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_PLATFORM
 
     try:
-        plan = build_plan(args)
+        settings = config_mod.load_config(args.config)
+    except config_mod.ConfigError as exc:
+        # Avant toute découverte : une configuration refusée ne doit pas coûter un
+        # parcours de disque, et surtout pas un run mené sur les défauts pendant
+        # que l'utilisateur croit ses restrictions appliquées.
+        print(str(exc), file=sys.stderr)
+        return EXIT_VALIDATION
+
+    try:
+        plan = build_plan(args, config=settings)
     except registry_mod.ValidationError as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_VALIDATION
