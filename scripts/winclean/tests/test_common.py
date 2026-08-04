@@ -97,7 +97,20 @@ class TestModel(unittest.TestCase):
         self.assertIn("unknown", text)
         names = field_names(CleanResult)
         self.assertEqual(
-            names, ("module", "estimated", "freed", "recycled", "failed", "skipped")
+            names,
+            (
+                "module",
+                "estimated",
+                "freed",
+                "recycled",
+                "failed",
+                "skipped",
+                # Part 2 : les deux classes de défaillance derrière la colonne
+                # `failed`, séparées, et le compteur d'événements de corbeille.
+                "locked_paths",
+                "recycle_failed_paths",
+                "recycle_events",
+            ),
         )
         for name in names:
             self.assertNotIn("measur", name)

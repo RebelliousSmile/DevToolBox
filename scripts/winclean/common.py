@@ -49,7 +49,9 @@ __all__ = [
     "DISCOVERY_MODES",
     "PROC_GUARDS",
     "SKIP_TOKENS",
+    "RECYCLE_FOOTER_LINES",
     "estimate_path",
+    "volume_of",
     "free_space_by_volume",
     "format_plan",
     "format_result_report",
@@ -196,6 +198,18 @@ class CleanResult:
     somme des contributions *connues*, et vaut `None` seulement quand aucune ne
     l'était. Il n'existe aucun champ booléen de non-mesurabilité — on interroge
     la valeur.
+
+    Les deux listes de chemins sont **séparées** et ne se recouvrent jamais : la
+    colonne `failed` compte deux classes de défaillance, et une seule liste ne
+    peut pas les porter sans mentir sur l'une des deux. `locked_paths` = entrées
+    qu'un verrou de partage a laissées en place pendant `delete_tree` ;
+    `recycle_failed_paths` = candidats dont la mise en corbeille a échoué, donc
+    intacts sur le disque (décision 14).
+
+    `recycle_events` compte les mises en corbeille réussies. C'est l'*événement*
+    qui déclenche le pied de page de récupération différée, jamais une
+    comparaison sur `recycled` — cette colonne vaut `None` quand la mesure
+    d'avant opération a échoué alors que la corbeille a bien reçu les octets.
     """
 
     module: str
@@ -204,6 +218,9 @@ class CleanResult:
     recycled: int | None = None
     failed: int | None = None
     skipped: list[SkippedEntry] = field(default_factory=list)
+    locked_paths: list[str] = field(default_factory=list)
+    recycle_failed_paths: list[str] = field(default_factory=list)
+    recycle_events: int = 0
 
     def to_json_payload(self) -> dict[str, Any]:
         return {
@@ -213,6 +230,9 @@ class CleanResult:
             "recycled": self.recycled,
             "failed": self.failed,
             "skipped": [s.to_json_payload() for s in self.skipped],
+            "locked_paths": list(self.locked_paths),
+            "recycle_failed_paths": list(self.recycle_failed_paths),
+            "recycle_events": self.recycle_events,
         }
 
 
@@ -467,6 +487,17 @@ class RunReport:
     def status(self) -> str:
         return "interrupted" if self.interrupted else "completed"
 
+    @property
+    def recycle_happened(self) -> bool:
+        """Au moins une mise en corbeille a réussi. L'événement, pas un total.
+
+        `total_recycled()` peut valoir `None` alors que la corbeille a reçu des
+        octets : la mesure d'avant opération avait échoué. Clé du pied de page de
+        décision 18 sur `recycled > 0`, ce run perdrait la seule sortie qu'on lui
+        propose.
+        """
+        return any(r.recycle_events for r in self.results)
+
     def total_freed(self) -> int | None:
         return sum_known(r.freed for r in self.results)
 
@@ -483,6 +514,7 @@ class RunReport:
             "estimated_total_bytes": self.estimated_total,
             "freed_total_bytes": self.total_freed(),
             "recycled_total_bytes": self.total_recycled(),
+            "recycle_happened": self.recycle_happened,
             "failed_total_bytes": self.total_failed(),
             "free_space_after": dict(self.free_space_after),
             "warnings": [w.to_json_payload() for w in self.warnings],
@@ -526,6 +558,19 @@ WARNING_TEMPLATES: dict[str, str] = {
         "--recycle est accepté mais sans effet au niveau {level} : la suppression y "
         "est directe."
     ),
+    # Décision 4. Les 10 % sont une **approximation** : le quota réel de la
+    # corbeille vit dans la configuration du shell et n'est pas lisible depuis la
+    # bibliothèque standard. D'où l'impératif au conditionnel — et d'où le fait
+    # que l'absence de cet avertissement ne prouve rien.
+    "recycle-bin-allowance": (
+        "{label} pèse {ratio:.0%} du volume {volume} : sa mise en corbeille peut "
+        "dépasser le quota de la corbeille, auquel cas le shell supprime "
+        "définitivement et sans le dire. L'annulation ne peut pas être garantie."
+    ),
+    "recycle-bin-allowance-unknown": (
+        "{label} n'a pas pu être mesuré sur le volume {volume} : on ignore donc si "
+        "la corbeille l'acceptera, et l'annulation ne peut pas être garantie."
+    ),
 }
 
 
@@ -537,7 +582,7 @@ def render_warning(warning: CleanWarning) -> str:
         return f"[{warning.code}] {details}" if details else f"[{warning.code}]"
     try:
         return template.format(**warning.fields)
-    except (KeyError, IndexError):  # pragma: no cover - filet de sécurité
+    except (KeyError, IndexError, ValueError, TypeError):  # pragma: no cover - filet
         details = ", ".join(f"{k}={v}" for k, v in sorted(warning.fields.items()))
         return f"[{warning.code}] {details}"
 
@@ -548,6 +593,21 @@ def render_warning(warning: CleanWarning) -> str:
 
 _LABEL_WIDTH = 22
 _SIZE_WIDTH = 10
+
+#: Pied de page de récupération différée (décision 18). Les trois sorties sont
+#: dans cet ordre, et le `--trash-days 0` de la troisième est **obligatoire** :
+#: `recycle-bin` applique un plancher d'âge de 7 jours, donc sans lui la commande
+#: imprimée ignore précisément les octets que le run vient de mettre en corbeille.
+#: winclean ne vide jamais la corbeille implicitement.
+RECYCLE_FOOTER_LINES: tuple[str, ...] = (
+    "Ces octets sont toujours sur le disque : la corbeille diffère la récupération, "
+    "elle ne la réalise pas, et elle ne garantit pas l'annulation.",
+    "Trois façons de les récupérer, dans l'ordre du moins au plus explicite :",
+    "  1. --no-recycle au prochain run : la suppression est alors immédiate.",
+    "  2. la corbeille de Windows, vidée depuis son interface.",
+    "  3. python scripts/winclean/clean.py --level aggressive --only recycle-bin "
+    "--apply --trash-days 0",
+)
 
 
 def _as_plan(plan: Plan | Sequence[CleanCandidate]) -> Plan:
@@ -689,12 +749,35 @@ def format_result_report(
         for module, s in skipped:
             out.append(f"  [{s.status}] {module} - {s.label} - {s.path or '-'} : {s.reason}")
 
-    if run.total_recycled():
+    locked = [(r.module, p) for r in run.results for p in r.locked_paths]
+    if locked:
+        out.append("")
+        out.append("Verrouillés (fichier en cours d'utilisation, laissé en place) :")
+        for module, path in locked:
+            out.append(f"  {module} - {path}")
+
+    refused = [(r.module, p) for r in run.results for p in r.recycle_failed_paths]
+    if refused:
         out.append("")
         out.append(
-            "Les octets mis en corbeille sont toujours sur le disque : la corbeille "
-            "diffère la récupération."
+            "Mise en corbeille refusée - le chemin est laissé en place, rien n'a été "
+            "supprimé :"
         )
+        for module, path in refused:
+            out.append(f"  {module} - {path}")
+
+    if run.recycle_happened:
+        # Décision 18 : déclenché par l'événement, pas par `recycled > 0`.
+        total = run.total_recycled()
+        out.append("")
+        if total is None:
+            out.append(
+                "Des octets sont partis en corbeille, en quantité inconnue : la mesure "
+                "d'avant opération a échoué."
+            )
+        else:
+            out.append(f"Mis en corbeille : {human_size(total)}.")
+        out.extend(RECYCLE_FOOTER_LINES)
 
     for warning in run.warnings:
         out.append(f"Avertissement : {render_warning(warning)}")

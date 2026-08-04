@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -40,6 +41,7 @@ from scripts.winclean.common import (  # noqa: E402
     PROC_GUARD_WARN_AND_SKIP,
     SKIP_CHANGED,
     SKIP_GONE,
+    SKIP_NO_UNDO,
     CleanCandidate,
     CleanModule,
     CleanResult,
@@ -48,11 +50,13 @@ from scripts.winclean.common import (  # noqa: E402
     Plan,
     RunReport,
     SkippedEntry,
+    estimate_path,
     format_plan,
     format_result_report,
     free_space_by_volume,
     human_size,
     sum_known,
+    volume_of,
 )
 
 __all__ = [
@@ -74,6 +78,9 @@ __all__ = [
     "default_root",
     "resolve_roots",
     "is_sync_root",
+    "recycling_enabled",
+    "confirm_level",
+    "bin_allowance_warnings",
     "build_plan",
     "apply_plan",
     "ensure_windows",
@@ -112,6 +119,12 @@ DEFAULT_MAX_DELETE_BYTES = 50 * 1024**3
 #: Au-delà, la découverte est signalée avec son détail par module. Ce n'est pas
 #: une limite qui avorte : c'est le seuil où le run nomme le responsable.
 DISCOVERY_BUDGET_SECONDS = 60.0
+
+#: Décision 4 : part du volume au-delà de laquelle un candidat destiné à la
+#: corbeille est signalé. **Approximation assumée** — le quota réel vit dans la
+#: configuration du shell et n'est pas lisible depuis la bibliothèque standard,
+#: donc le message dit « peut dépasser » et son silence ne prouve rien.
+BIN_ALLOWANCE_RATIO = 0.10
 
 #: Composants de chemin qui trahissent un arbre synchronisé. La règle, pas la
 #: liste, est ce qui compte : l'avertissement est informatif et ne bloque rien,
@@ -252,7 +265,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Niveaux : safe = artefacts de build et caches de gestionnaires de paquets, "
-            "tous reconstructibles. Voir README.md."
+            "tous reconstructibles. moderate ajoute les caches d'applications "
+            "(navigateurs, éditeurs), %TEMP%, les vidages mémoire et le nettoyage léger "
+            "de Docker ; il passe par la corbeille par défaut et exige une confirmation "
+            "sous --apply. Voir README.md."
         ),
     )
     parser.add_argument(
@@ -318,23 +334,28 @@ def build_parser() -> argparse.ArgumentParser:
         dest="recycle",
         action="store_true",
         help=(
-            "Passer par la corbeille quand le niveau le permet. Accepté et sans effet "
-            "au niveau safe, où la suppression est directe."
+            "Passer par la corbeille. C'est déjà le défaut au niveau moderate ; "
+            "accepté et sans effet aux niveaux safe et aggressive, où la suppression "
+            "est directe."
         ),
     )
     parser.add_argument(
         "--no-recycle",
         dest="recycle",
         action="store_false",
-        help="Suppression directe (défaut).",
+        help="Suppression directe, même au niveau moderate où la corbeille est le défaut.",
     )
-    parser.set_defaults(recycle=False)
+    # Tri-état volontaire : `None` = « non exprimé », donc la corbeille par défaut
+    # au niveau moderate. Un défaut `False` rendrait `--no-recycle` indiscernable
+    # de son absence, et la corbeille cesserait d'être le défaut de ce niveau.
+    parser.set_defaults(recycle=None)
     parser.add_argument(
         "--yes",
         action="store_true",
         help=(
-            "Passer outre l'avertissement d'un processus propriétaire actif. "
-            "N'implique jamais --apply et ne relève jamais le niveau."
+            "Passer outre l'avertissement d'un processus propriétaire actif, et "
+            "répondre d'avance à la confirmation exigée par --apply à partir du "
+            "niveau moderate. N'implique jamais --apply et ne relève jamais le niveau."
         ),
     )
     parser.add_argument(
@@ -439,6 +460,112 @@ def is_sync_root(path: str | os.PathLike[str], env: Mapping[str, str] | None = N
 
 
 # --------------------------------------------------------------------------- #
+# Corbeille et confirmation
+# --------------------------------------------------------------------------- #
+
+
+def recycling_enabled(level: Level, recycle: bool | None) -> bool:
+    """Vrai si ce run passe par la corbeille. `moderate` est le seul niveau concerné.
+
+    `safe` et `aggressive` suppriment en direct (décision 4) : à `moderate` la
+    corbeille est le **défaut**, et seul un `--no-recycle` explicite — donc
+    `recycle is False`, pas simplement absent — la désarme.
+    """
+    if Level(level) is not Level.MODERATE:
+        return False
+    return recycle is not False
+
+
+def confirm_level(level: Level, *, yes: bool, stream: Any = None) -> bool:
+    """Confirmation exigée par `--apply` à partir de `moderate` (décision 12).
+
+    `--yes` répond d'avance. Sinon la question est posée sur un terminal, et
+    **sans terminal, sans `--yes`, la réponse est non** : un run planifié ou
+    branché sur un tube ne peut pas répondre, et le considérer comme consentant
+    ferait du silence un accord au niveau qui touche les données applicatives.
+    """
+    if Level(level) is Level.SAFE:
+        return True
+    if yes:
+        return True
+    source = sys.stdin if stream is None else stream
+    isatty = getattr(source, "isatty", None)
+    if isatty is None or not isatty():
+        return False
+    print(
+        f"Niveau {Level(level).value} avec --apply : confirmer la suppression ? "
+        "[oui/non] ",
+        end="",
+    )
+    try:
+        answer = source.readline()
+    except (OSError, ValueError):  # pragma: no cover - stdin refermé
+        return False
+    return answer.strip().lower() in ("o", "oui", "y", "yes")
+
+
+def bin_allowance_warnings(
+    candidates: Iterable[CleanCandidate],
+    level: Level,
+    recycle: bool | None,
+) -> list[CleanWarning]:
+    """Avertit pour chaque candidat destiné à la corbeille et lourd sur son volume.
+
+    Informatif : ne bloque rien, ne change ni le mode de suppression ni le code de
+    sortie. Fire sur le chemin `moderate` **par défaut**, pas seulement sous un
+    `--recycle` explicite — le défaut est justement là où l'utilisateur suppose
+    que l'annulation existe.
+
+    Deux exclusions, chacune pour une raison différente. Un candidat **sans
+    chemin** n'a pas de volume : `splitdrive(None)` planterait, et cette étape
+    tourne *avant* la répartition de `apply_plan`, donc rien ne le rattraperait.
+    Un candidat **sans taille** n'a pas de rapport à calculer : il n'est pas
+    comparé, il est signalé sous son propre code — traiter l'inconnu comme `0`
+    produirait un « pas d'avertissement » rassurant sur le seul candidat que
+    personne n'a su mesurer.
+    """
+    if not recycling_enabled(level, recycle):
+        return []
+    warnings: list[CleanWarning] = []
+    for candidate in candidates:
+        if candidate.path is None:
+            continue
+        volume = volume_of(candidate.path)
+        if candidate.estimated_bytes is None:
+            warnings.append(
+                CleanWarning(
+                    code="recycle-bin-allowance-unknown",
+                    fields={
+                        "label": candidate.label,
+                        "path": candidate.path,
+                        "volume": volume,
+                    },
+                )
+            )
+            continue
+        try:
+            total = shutil.disk_usage(volume).total
+        except OSError:  # pragma: no cover - volume illisible
+            continue
+        if total <= 0:  # pragma: no cover - volume dégénéré
+            continue
+        ratio = candidate.estimated_bytes / total
+        if ratio > BIN_ALLOWANCE_RATIO:
+            warnings.append(
+                CleanWarning(
+                    code="recycle-bin-allowance",
+                    fields={
+                        "label": candidate.label,
+                        "path": candidate.path,
+                        "volume": volume,
+                        "ratio": ratio,
+                    },
+                )
+            )
+    return warnings
+
+
+# --------------------------------------------------------------------------- #
 # Construction du plan
 # --------------------------------------------------------------------------- #
 
@@ -463,7 +590,10 @@ def build_plan(
     for root in roots:
         if is_sync_root(root):
             warnings.append(CleanWarning(code="sync-root", fields={"root": str(root)}))
-    if args.recycle and level is Level.SAFE:
+    if args.recycle and level is not Level.MODERATE:
+        # `moderate` est le seul niveau qui met en corbeille : ailleurs le drapeau
+        # est accepté et inerte, et le dire vaut mieux qu'un run qui supprime en
+        # direct pendant que l'appelant croit avoir armé une annulation.
         warnings.append(CleanWarning(code="recycle-inert", fields={"level": level.value}))
 
     candidates: list[CleanCandidate] = []
@@ -504,6 +634,10 @@ def build_plan(
     # Peut lever `CeilingExceeded` : le run s'arrête avant la première suppression.
     _total, ceiling_warnings = guards.enforce_ceiling(kept, args.max_delete_bytes)
     warnings.extend(ceiling_warnings)
+
+    # Décision 4, au plan : ce qui partira en corbeille et pèse lourd sur son
+    # volume est signalé avant toute suppression, y compris sans `--apply`.
+    warnings.extend(bin_allowance_warnings(kept, level, args.recycle))
 
     touched: list[str] = [str(root) for root in roots]
     touched.extend(c.path for c in kept if c.path)
@@ -553,6 +687,25 @@ def _merge_result(target: CleanResult, other: CleanResult | None) -> None:
         if value is not None:
             setattr(target, column, _add(getattr(target, column), value))
     target.skipped.extend(other.skipped)
+    target.locked_paths.extend(other.locked_paths)
+    target.recycle_failed_paths.extend(other.recycle_failed_paths)
+    target.recycle_events += other.recycle_events
+
+
+def _record(result: CleanResult, column: str, value: int | None) -> None:
+    """Verse une contribution *mesurée* dans une colonne d'octets.
+
+    `value is None` veut dire « la mesure a échoué », pas « zéro » : la colonne
+    passe alors à `None` tant qu'aucune contribution connue n'y figure, ce qui est
+    la doctrine de `sum_known` appliquée à une colonne. Coercer l'inconnu en `0`
+    afficherait « rien mis en corbeille » sur un run qui vient d'en remplir une.
+    """
+    current = getattr(result, column)
+    if value is None:
+        if not current:
+            setattr(result, column, None)
+        return
+    setattr(result, column, _add(current, value))
 
 
 def _remove_candidate(
@@ -561,23 +714,48 @@ def _remove_candidate(
     *,
     use_recycle: bool,
     failures: list[remove.RemovalError],
-) -> None:
-    """Retire un candidat porteur de chemin. La corbeille n'a **aucun** repli."""
+) -> SkippedEntry | None:
+    """Retire un candidat porteur de chemin. La corbeille n'a **aucun** repli.
+
+    Rend l'omission à enregistrer, ou `None` si le candidat a été traité. Les
+    octets viennent d'une mesure prise **juste avant** l'opération, jamais de
+    `estimated_bytes` : entre le plan et l'application l'arbre a pu grossir, et
+    rapporter l'estimation ferait passer une mesure pour une prédiction.
+    """
     assert candidate.path is not None  # garanti par l'appelant
-    if use_recycle and remove.can_recycle(candidate.path):
+    if use_recycle:
+        if not remove.can_recycle(candidate.path):
+            return SkippedEntry(
+                label=candidate.label,
+                path=candidate.path,
+                status=SKIP_NO_UNDO,
+                reason=(
+                    "la corbeille ne peut pas recevoir ce chemin (volume non fixe, "
+                    "chemin trop long) ; --no-recycle pour supprimer en direct"
+                ),
+            )
+        before = estimate_path(candidate.path)
         outcome = remove.recycle(candidate.path)
         if outcome.ok:
-            result.recycled = _add(result.recycled, candidate.estimated_bytes or 0)
-            return
-        # Décision 14 : un échec de corbeille est terminal, pas un repli.
-        result.failed = _add(result.failed, candidate.estimated_bytes or 0)
+            result.recycle_events += 1
+            _record(result, "recycled", before)
+            return None
+        # Décision 14 : un échec de corbeille est terminal, pas un repli. Le
+        # chemin est intact, et il est nommé dans sa propre section — le confondre
+        # avec un verrou enverrait l'utilisateur fermer une application innocente.
+        _record(result, "failed", before)
+        result.recycle_failed_paths.append(candidate.path)
         failures.extend(outcome.errors)
-        return
+        return None
     freed, failed, errors = remove.delete_tree(candidate.path)
     result.freed = _add(result.freed, freed)
     if failed:
         result.failed = _add(result.failed, failed)
+    for error in errors:
+        if remove.is_lock_error(error):
+            result.locked_paths.append(error.path)
     failures.extend(error for error in errors if not remove.is_partial_error(error))
+    return None
 
 
 def apply_plan(
@@ -601,7 +779,7 @@ def apply_plan(
     for candidate in plan.candidates:
         grouped.setdefault(candidate.module, []).append(candidate)
 
-    use_recycle = bool(args.recycle) and Level(plan.level) is not Level.SAFE
+    use_recycle = recycling_enabled(Level(plan.level), args.recycle)
 
     for name, group in grouped.items():
         module = known.get(name)
@@ -663,9 +841,11 @@ def apply_plan(
                     )
                 )
                 continue
-            _remove_candidate(
+            no_undo = _remove_candidate(
                 candidate, result, use_recycle=use_recycle, failures=failures
             )
+            if no_undo is not None:
+                result.skipped.append(no_undo)
 
         if pathless and module.clean is not None:
             _merge_result(
@@ -740,6 +920,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.as_json:
             out.write(_dump(plan_payload))
         return EXIT_OK
+
+    # Portail de confirmation (décision 12) : après le plan — il a été imprimé,
+    # donc la question porte sur quelque chose de lisible — et avant la première
+    # suppression. `--only <module moderate>` sans `--level moderate` n'arrive
+    # jamais ici : `build_plan` a déjà refusé en nommant le niveau requis.
+    if not confirm_level(Level(plan.level), yes=bool(args.yes)):
+        if args.as_json:
+            out.write(_dump(plan_payload))
+        print(
+            f"Confirmation absente pour le niveau {Level(plan.level).value} : rien n'a "
+            "été supprimé. Répondre « oui » sur un terminal, ou passer --yes.",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
 
     report = RunReport(estimated_total=plan.total_estimated())
     failures: list[remove.RemovalError] = []

@@ -38,11 +38,16 @@ Un niveau est cumulatif : `--level moderate` sélectionne les modules `safe`
 
 `--recycle` est **accepté et sans effet** à `safe` et à `aggressive` ; le run le
 dit en une ligne au lieu d'échouer. `moderate` est le seul niveau dont le mode de
-suppression peut en dépendre.
+suppression peut en dépendre — et à ce niveau la corbeille est **le défaut** :
+seul `--no-recycle` la désarme.
 
-> Les modules `moderate` et `aggressive` arrivent avec les parties 2 et 3 du
-> plan. Les niveaux existent déjà dans le CLI ; aujourd'hui ils ne sélectionnent
-> rien de plus que `safe`.
+`--level` est le seul portail du niveau. `--only <module moderate>` sans
+`--level moderate` **échoue** en nommant le niveau à passer : sélectionner un
+module ne monte jamais le niveau à votre place, et la confirmation n'est même pas
+posée.
+
+> Les modules `aggressive` arrivent avec la partie 3 du plan. Le niveau existe
+> déjà dans le CLI ; aujourd'hui il ne sélectionne rien de plus que `moderate`.
 
 ## Modules livrés
 
@@ -59,6 +64,23 @@ suppression peut en dépendre.
 | `pip-cache` | chemin par utilisateur | **oui** | le cache pip |
 | `uv-cache` | chemin par utilisateur | **oui** | le cache uv |
 | `nuget-packages` | chemin par utilisateur | **oui** | le dossier de paquets NuGet |
+
+Niveau `moderate` (n'apparaissent qu'avec `--level moderate`) :
+
+| Module | Découverte | Réseau | Ce qu'il propose |
+| --- | --- | --- | --- |
+| `browser-cache` | chemin par utilisateur | non | les caches Chrome / Edge / Vivaldi / Firefox, par profil |
+| `vscode-cache` | chemin par utilisateur | non | les caches de VS Code (`Cache`, `CachedData`, `GPUCache`…) |
+| `user-temp` | chemin par utilisateur | non | les entrées de **premier niveau** de `%TEMP%`, fichiers compris |
+| `crashdumps` | chemin par utilisateur | non | `%LOCALAPPDATA%\CrashDumps` |
+| `docker-light` | commande | non | `docker system prune -f` — **sans chemin, sans taille, sans retour arrière** |
+
+`docker-light` est le seul module qui n'émet **aucun chemin** : il délègue à
+`docker system prune -f`. Conséquences assumées : la corbeille ne s'y applique
+pas, aucune colonne d'octets n'est renseignée (`unknown` partout, jamais `0 B`),
+et la ligne `Total reclaimed space:` que Docker imprime n'est **pas** relue — ce
+serait une mesure inventée à partir du texte d'un tiers. Les volumes Docker ne
+sont jamais touchés.
 
 `--only` et `--skip` prennent ces noms, répétables ou séparés par des virgules.
 Un nom inconnu arrête le run avant toute découverte, en listant les noms valides.
@@ -102,14 +124,43 @@ jamais silencieusement retiré :
    leur estimation, dans une section dédiée (voir plus bas).
 5. **Plafond d'octets** — au-delà de `--max-delete-bytes` (50 Gio par défaut), le
    run s'arrête en nommant le total, la limite et l'option à lever.
-6. **Processus propriétaire** — sous `--apply`, si un module déclare des
-   processus propriétaires et que l'un tourne (ou que la liste des processus est
-   illisible), le candidat est omis en `skipped-running`. `--yes` vaut
-   acquittement de cet avertissement, et ne veut jamais dire « applique » ni
-   « monte le niveau ».
-7. **Contrôle juste avant suppression** — la date de modification relevée au plan
+6. **Processus propriétaire**, en **deux forces** déclarées par module :
+   - `warn-and-skip` (builds : `cargo-target`, `dotnet-binobj`) — sous `--apply`,
+     si un propriétaire tourne (ou que la liste des processus est illisible), le
+     candidat est omis en `skipped-running` ;
+   - `warn-only` (caches d'applications : `browser-cache`, `vscode-cache`) — le
+     propriétaire actif est **signalé mais la suppression est tentée**. Un
+     navigateur ouvert garde des fichiers de cache ouverts, il ne réécrit pas
+     l'arbre : le résultat attendu est un fichier verrouillé rapporté nommément,
+     pas l'omission silencieuse de tout le module. Fermer le navigateur reste la
+     façon d'aller au bout.
+
+   `--yes` vaut acquittement de cet avertissement, et ne veut jamais dire
+   « applique » ni « monte le niveau ».
+7. **Confirmation de niveau** — sous `--apply`, tout niveau autre que `safe`
+   demande une confirmation (`oui`/`non`) sur le terminal. Sans terminal et sans
+   `--yes`, la réponse est **non** : le run sort en code `2` sans avoir rien
+   supprimé, plutôt que de supposer un consentement.
+8. **Contrôle juste avant suppression** — la date de modification relevée au plan
    est revérifiée : différente, le candidat est omis en `skipped-changed` ;
    disparu, en `skipped-gone`.
+
+## Verrous : deux classes de défaillance, deux sections
+
+La colonne `failed` agrège deux choses très différentes, que le rapport sépare
+nommément — dans le texte **et** sous sa propre clé du `--json` :
+
+- **`locked_paths`** — le fichier était en cours d'utilisation
+  (`ERROR_SHARING_VIOLATION`, `ERROR_LOCK_VIOLATION`). C'est un fait sur l'état
+  de la machine, pas une panne : le chemin est laissé en place, listé sous
+  « Verrouillés », et **le code de sortie reste `0`**. Un répertoire non vide
+  parce qu'une de ses entrées était verrouillée relève du même cas.
+- **`recycle_failed_paths`** — la corbeille a refusé le déplacement. C'est
+  **terminal** : aucun repli sur une suppression directe, le candidat est laissé
+  intact, et le run sort en code `5`.
+
+Toute autre `OSError` (accès refusé, chemin illisible…) reste un échec de
+suppression : code `5`, chemin nommé sur la sortie d'erreur.
 
 Une omission n'est pas une erreur : elle est comptée et affichée, elle ne change
 pas le code de sortie.
@@ -129,6 +180,17 @@ n'en est qu'une approximation :
   définitivement, sans prévenir ;
 - un candidat **non signalé** n'est pas pour autant garanti récupérable : le seuil
   n'est pas la quota.
+
+Dès qu'un run a mis quelque chose en corbeille, il **ferme la boucle** au lieu de
+laisser l'utilisateur avec un `freed: 0` inexpliqué : le rapport imprime les trois
+façons de récupérer réellement les octets, du moins au plus explicite —
+`--no-recycle` au prochain run, la corbeille de Windows vidée depuis son
+interface, ou le module `recycle-bin` du niveau `aggressive`. Cette troisième
+commande porte **obligatoirement** `--trash-days 0` : `recycle-bin` applique
+sinon un plancher d'âge de 7 jours et ignorerait précisément les octets que le run
+vient de déplacer. Le pied de page se déclenche sur l'**événement** de mise en
+corbeille, pas sur un total non nul : recycler une quantité non mesurable le doit
+tout autant.
 
 De plus, la corbeille refuse les chemins longs (au-delà de `MAX_PATH`, elle
 n'accepte pas le préfixe `\\?\`) et tout volume que Windows ne rapporte pas comme
@@ -159,7 +221,7 @@ comme dans la sortie `--json`. Ils sont exclus, pas escamotés.
 | `--max-delete-bytes` | plafond du plan, `50GiB` par défaut (`500m`, `1024`, `2TiB`…) |
 | `--offline` | exclut les candidats qui exigent le réseau |
 | `--recycle` / `--no-recycle` | force / interdit la corbeille (inerte hors `moderate`) |
-| `--yes` | acquitte l'avertissement de processus propriétaire (et, dès la partie 2, la confirmation de niveau) |
+| `--yes` | acquitte l'avertissement de processus propriétaire **et** la confirmation de niveau |
 | `--out <chemin>` | écrit le rapport dans un fichier, dans le format de stdout ; parent créé, fichier écrasé, stdout conservé |
 | `--json` | sortie machine, un seul document JSON |
 | `--top N` | tronque **l'affichage** aux N plus gros candidats ; le total, le plafond et l'ensemble supprimé restent le plan complet, et le pied de tableau dit combien de lignes sont masquées |
@@ -172,7 +234,7 @@ booléenne comme dans `deps_audit`, un plan vide est un résultat normal.
 | Code | Sens |
 | --- | --- |
 | `0` | plan affiché, ou application terminée (omissions comprises) |
-| `2` | argument ou nom de module invalide |
+| `2` | argument ou nom de module invalide, niveau non confirmé, ou module `moderate` demandé sans `--level moderate` |
 | `3` | plafond `--max-delete-bytes` dépassé |
 | `4` | candidat au chemin invraisemblable — module défectueux |
 | `5` | au moins une suppression a échoué |
@@ -185,10 +247,20 @@ disparu, un rapport vide serait un mensonge.
 ## Limites connues
 
 - **Le garde anti-TOCTOU est secondaire, pas une garantie.** La date de
-  modification d'un répertoire ne suit que ses entrées directes : une écriture
-  profonde entre le plan et l'application ne la change pas et n'est donc pas
-  détectée. Le garde primaire reste la détection de processus propriétaire. Ne
-  pas lancer `--apply` pendant un build.
+  modification d'un répertoire ne suit que ses entrées directes : réécrire le
+  contenu d'un fichier existant, ou créer un fichier deux niveaux plus bas, la
+  laisse intacte — l'écriture n'est donc pas détectée. Ne pas lancer `--apply`
+  pendant un build ; c'est la seule vraie protection pour `cargo-target` et
+  `dotnet-binobj`, où le garde primaire est la détection de processus.
+- **`%TEMP%` porte le même risque résiduel, sans garde primaire.** `user-temp`
+  n'a **aucun** processus propriétaire à surveiller : `%TEMP%` n'appartient à
+  personne en particulier, tout le monde y écrit. Un installateur ou un test en
+  cours qui remplit un sous-dossier de `%TEMP%` pendant le run n'est repéré que
+  si l'entrée de premier niveau change de date. Les candidats sont d'ailleurs les
+  entrées de **premier niveau**, fichiers compris, pas les seuls répertoires.
+- **Les octets rapportés sont mesurés à l'application, jamais l'estimation du
+  plan.** Un arbre qui a grossi entre les deux est rapporté à sa taille réelle :
+  l'écart entre `estimated` et `freed`/`recycled` est normal et voulu.
 - **Aucune élévation.** winclean tourne avec les droits de la session. Ce qui
   exige un administrateur (caches système, `%WINDIR%\Temp` d'autres comptes) est
   hors de portée et n'est pas proposé.
