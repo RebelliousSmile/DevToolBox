@@ -37,6 +37,7 @@ __all__ = [
     "DRIVE_FIXED",
     "ERROR_SHARING_VIOLATION",
     "ERROR_LOCK_VIOLATION",
+    "ERROR_DIR_NOT_EMPTY",
     "RECYCLE_FAILED",
     "RemovalError",
     "RecycleOutcome",
@@ -46,6 +47,7 @@ __all__ = [
     "recycle",
     "measure_freed",
     "is_lock_error",
+    "is_partial_error",
 ]
 
 MAX_PATH = 260
@@ -56,6 +58,7 @@ FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 ERROR_SHARING_VIOLATION = 32
 ERROR_LOCK_VIOLATION = 33
+ERROR_DIR_NOT_EMPTY = 145
 
 #: Raison d'échec d'une mise en corbeille (décision 14 : pas de repli).
 RECYCLE_FAILED = "recycle-failed"
@@ -101,6 +104,18 @@ class RecycleOutcome:
 def is_lock_error(error: RemovalError) -> bool:
     """Vrai pour un verrou de partage : la seule défaillance qui n'est pas une erreur."""
     return error.winerror in (ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION)
+
+
+def is_partial_error(error: RemovalError) -> bool:
+    """Vrai pour une défaillance qui rend la suppression *partielle*, pas fatale.
+
+    Un verrou de partage, et « le répertoire n'est pas vide » : ce dernier n'est
+    **jamais** une cause première. Il ne survient que parce qu'une entrée fille
+    a résisté, et cette entrée a déjà produit sa propre erreur ; le compter à
+    part transformerait un fichier verrouillé en échec du run alors que le
+    contrat est d'être partiel, pas fatal.
+    """
+    return is_lock_error(error) or error.winerror == ERROR_DIR_NOT_EMPTY
 
 
 # --------------------------------------------------------------------------- #

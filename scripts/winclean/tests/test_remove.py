@@ -141,6 +141,20 @@ class TestDeleteTree(unittest.TestCase):
         self.assertEqual(locks[0].size, 64)
         self.assertTrue(locked.exists())
 
+    def test_dir_not_empty_is_partial_never_a_first_cause(self) -> None:
+        """145 ne survient que parce qu'une fille a résisté, et elle est déjà signalée."""
+        from scripts.winclean.remove import (
+            ERROR_DIR_NOT_EMPTY,
+            RemovalError,
+            is_partial_error,
+        )
+
+        consequence = RemovalError(path="x", winerror=ERROR_DIR_NOT_EMPTY, message="pas vide")
+        self.assertFalse(is_lock_error(consequence))
+        self.assertTrue(is_partial_error(consequence))
+        self.assertTrue(is_partial_error(RemovalError(path="y", winerror=32, message="verrou")))
+        self.assertFalse(is_partial_error(RemovalError(path="z", winerror=5, message="refus")))
+
     def test_missing_root_is_a_result_not_an_error(self) -> None:
         root = make_tempdir(self)
         deleted, failed, errors = delete_tree(root / "jamais-cree")

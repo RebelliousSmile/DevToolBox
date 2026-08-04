@@ -357,14 +357,22 @@ def volume_of(path: str | os.PathLike[str]) -> str:
 
 
 def free_space_by_volume(paths: Iterable[str | os.PathLike[str]]) -> dict[str, int]:
-    """Espace libre par volume touché, en octets. Les volumes illisibles sont omis."""
+    """Espace libre par volume touché, en octets. Les volumes illisibles sont omis.
+
+    Le dédoublonnage est insensible à la casse : les chemins arrivent tels que
+    les modules les ont produits, et `c:\\` et `C:\\` sont le même volume — sans
+    quoi le même espace libre est annoncé deux fois.
+    """
     out: dict[str, int] = {}
+    seen: set[str] = set()
     for p in paths:
         if p is None:
             continue
         vol = volume_of(p)
-        if vol in out:
+        key = os.path.normcase(vol)
+        if key in seen:
             continue
+        seen.add(key)
         try:
             out[vol] = shutil.disk_usage(vol).free
         except OSError:
@@ -411,6 +419,15 @@ class Plan:
         return sort_candidates(self.candidates)
 
     def total_estimated(self) -> int | None:
+        """Total annoncé, `None` si aucun candidat n'a pu être mesuré.
+
+        Un plan **vide** vaut `0` et non `unknown` : il n'y a rien
+        d'inmesurable, il n'y a rien du tout. Sans ce cas, un run qui ne trouve
+        aucun candidat affiche « Total estimé : unknown », ce qui se lit comme
+        un échec de mesure.
+        """
+        if not self.candidates:
+            return 0
         return sum_known(c.estimated_bytes for c in self.candidates)
 
     def unpriced_modules(self) -> list[str]:
