@@ -206,7 +206,7 @@ mod tests {
     fn decode_file_matches_in_memory_result() {
         let png = make_in_memory_png(32, 32);
         let dir = std::env::temp_dir();
-        let path = dir.join("winfxstart_decode_test.png");
+        let path = dir.join("devtoolbox_decode_test.png");
         std::fs::write(&path, &png).expect("write temp png");
 
         let from_file = decode_resize_file(&path, 16).expect("decode file");

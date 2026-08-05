@@ -1,6 +1,6 @@
 # Forms
 
-WinFXStart is a native WinUI 3 desktop app — there are no web forms. The only form-like surface is the **command/alias editor** (Phase 2, planned), used to create and edit commands.
+DevToolBox is a native WinUI 3 desktop app — there are no web forms. The only form-like surface is the **command/alias editor** (Phase 2, planned), used to create and edit commands.
 
 ## State Management
 

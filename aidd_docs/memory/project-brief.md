@@ -1,10 +1,10 @@
 # PROJECT_BRIEF.md
 
-WinFXStart is a minimalist Rust application to launch Windows CLI commands from a native WinUI 3 graphical interface.
+DevToolBox is a minimalist Rust application to launch Windows CLI commands from a native WinUI 3 graphical interface.
 
 ## Executive Summary
 
-- **Project Name**: WinFXStart — Windows 11 Command Launcher
+- **Project Name**: DevToolBox — Windows 11 Command Launcher
 - **Vision**: Launch any Windows CLI command in one click from a fast, native, bloat-free launcher.
 - **Mission**: Give power users a lightweight (no WebView) GUI to organize, customize, and run their frequent commands, with optional launch at Windows startup.
 
@@ -59,4 +59,4 @@ journey
 
 #### Main journey
 
-Opens WinFXStart (optionally auto-launched at login) → locates a command via the favorites grid or search → clicks to execute → gets immediate visual feedback. Occasionally edits commands, icons, categories, and shortcuts.
+Opens DevToolBox (optionally auto-launched at login) → locates a command via the favorites grid or search → clicks to execute → gets immediate visual feedback. Occasionally edits commands, icons, categories, and shortcuts.

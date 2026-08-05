@@ -1,7 +1,7 @@
 # Versioning Control System (VCS) Guidelines
 
 - Main Branch: `main`
-- Platform: `github` (repo: `RebelliousSmile/WinFXStart`)
+- Platform: `github` (repo: `RebelliousSmile/DevToolBox`)
 - CLI: `gh`
 
 ## Branch Naming Convention

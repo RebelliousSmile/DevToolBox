@@ -1,6 +1,6 @@
 # Database
 
-WinFXStart has no database engine. Persistence is local JSON files handled with `serde` / `serde_json`. The seed/default file is `config/default.json`.
+DevToolBox has no database engine. Persistence is local JSON files handled with `serde` / `serde_json`. The seed/default file is `config/default.json`.
 
 ```json
 @config/default.json

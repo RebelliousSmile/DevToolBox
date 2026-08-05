@@ -1,12 +1,12 @@
 //! Startup registration via the Windows Registry Run key.
 //!
-//! Controls whether WinFXStart launches at Windows login by writing/removing a
+//! Controls whether DevToolBox launches at Windows login by writing/removing a
 //! value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 //!
 //! # Design
 //! All Win32 registry operations are path-injectable (they accept `sub_key` and
 //! `value_name` parameters) so unit tests operate on a throwaway subkey
-//! `HKCU\Software\WinFXStart\Test` and never touch the real Run key.
+//! `HKCU\Software\DevToolBox\Test` and never touch the real Run key.
 //!
 //! The public API (`enable_startup`, `disable_startup`, `is_startup_enabled`,
 //! `sync_startup`) binds the injectable core to the real `RUN_KEY_PATH` /
@@ -14,7 +14,7 @@
 //!
 //! # Idempotency
 //! Registry values are keyed by name; `RegSetValueExW` on the same
-//! `WinFXStart` name overwrites in place — no dedup code is needed and no
+//! `DevToolBox` name overwrites in place — no dedup code is needed and no
 //! duplicate can be created (see Decision D4 in the plan).
 
 // Read-side helpers (`open_key_read`, `query_value`, `is_startup_enabled`) are
@@ -38,7 +38,7 @@ use windows::Win32::System::Registry::{
 pub const RUN_KEY_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 /// The value name used to identify this application's startup entry.
-pub const APP_VALUE_NAME: &str = "WinFXStart";
+pub const APP_VALUE_NAME: &str = "DevToolBox";
 
 // HRESULT value that corresponds to ERROR_FILE_NOT_FOUND (Win32 code 2).
 // HRESULT::from_win32(x) = (x & 0xFFFF) | (7 << 16) | 0x80000000 for x > 0.
@@ -310,9 +310,9 @@ pub fn delete_value(sub_key: &str, value_name: &str) -> Result<(), RegistryError
 // Public startup API
 // ---------------------------------------------------------------------------
 
-/// Register WinFXStart to launch at login (idempotent upsert).
+/// Register DevToolBox to launch at login (idempotent upsert).
 ///
-/// Writes the value `WinFXStart = "<current_exe>"` under
+/// Writes the value `DevToolBox = "<current_exe>"` under
 /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 /// Writing the same value name twice overwrites in place — no duplicate can
 /// be created.
@@ -325,9 +325,9 @@ pub fn enable_startup() -> Result<(), RegistryError> {
     set_value(RUN_KEY_PATH, APP_VALUE_NAME, &data)
 }
 
-/// Remove the WinFXStart startup entry (idempotent delete).
+/// Remove the DevToolBox startup entry (idempotent delete).
 ///
-/// Deletes the `WinFXStart` value from
+/// Deletes the `DevToolBox` value from
 /// `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 /// Returns `Ok(())` if the value is already absent — no error.
 ///
@@ -337,7 +337,7 @@ pub fn disable_startup() -> Result<(), RegistryError> {
     delete_value(RUN_KEY_PATH, APP_VALUE_NAME)
 }
 
-/// Return `true` iff the `WinFXStart` startup entry exists in the Run key.
+/// Return `true` iff the `DevToolBox` startup entry exists in the Run key.
 ///
 /// Returns `false` on any error (non-fatal, no panic).
 pub fn is_startup_enabled() -> bool {
@@ -375,9 +375,9 @@ mod tests {
     use windows::Win32::System::Registry::RegDeleteKeyW;
 
     /// Throwaway subkey — never the real Run key.
-    const TEST_SUBKEY: &str = "Software\\WinFXStart\\Test";
+    const TEST_SUBKEY: &str = "Software\\DevToolBox\\Test";
     /// Throwaway value name used by all registry tests.
-    const TEST_VALUE: &str = "test_value_winfxstart";
+    const TEST_VALUE: &str = "test_value_devtoolbox";
 
     /// Process-wide mutex to serialise registry-touching tests so that one
     /// test's teardown cannot delete the key while another is using it.
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn app_value_name_constant() {
-        assert_eq!(APP_VALUE_NAME, "WinFXStart");
+        assert_eq!(APP_VALUE_NAME, "DevToolBox");
     }
 
     // --- Registry core (throwaway subkey, never the real Run key) ---

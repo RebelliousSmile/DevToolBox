@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! WinFXStart - Windows 11 Command Launcher
+//! DevToolBox - Windows 11 Command Launcher
 //!
 //! Native Rust application using tao for windowing and Win32 child controls
 //! for the command-grid UI.
@@ -32,9 +32,9 @@ fn init_logging() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let directory = base.join("WinFXStart");
+    let directory = base.join("DevToolBox");
     std::fs::create_dir_all(&directory).ok()?;
-    let path = directory.join("winfxstart.log");
+    let path = directory.join("devtoolbox.log");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -43,7 +43,7 @@ fn init_logging() -> Option<std::path::PathBuf> {
     use std::io::Write as _;
     let _ = writeln!(
         file,
-        "\n--- WinFXStart bootstrap pid={} ---",
+        "\n--- DevToolBox bootstrap pid={} ---",
         std::process::id()
     );
     let _ = file.flush();
@@ -67,7 +67,7 @@ fn main() {
     }));
 
     log::info!(
-        "WinFXStart v0.1.0 starting; pid={}; log={:?}",
+        "DevToolBox v0.1.0 starting; pid={}; log={:?}",
         std::process::id(),
         log_path
     );
@@ -88,7 +88,7 @@ fn main() {
     let event_loop = EventLoop::new();
 
     let window = WindowBuilder::new()
-        .with_title("WinFXStart - Actions Windows")
+        .with_title("DevToolBox - Actions Windows")
         .with_inner_size(tao::dpi::LogicalSize::new(800u32, 600u32))
         .with_min_inner_size(tao::dpi::LogicalSize::new(400u32, 300u32))
         .build(&event_loop)

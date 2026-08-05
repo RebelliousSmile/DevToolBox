@@ -1,4 +1,4 @@
-# WinFXStart - Lanceur d'actions personnalisées Windows
+# DevToolBox - Lanceur d'actions personnalisées Windows
 
 Une application Rust minimaliste pour centraliser et lancer des commandes, scripts et
 actions personnalisées Windows avec une interface graphique native.
@@ -6,14 +6,14 @@ actions personnalisées Windows avec une interface graphique native.
 ## Actions de script
 
 Les commandes classiques restent acceptées telles quelles. Une action Python utilise
-le préfixe `@python` et un chemin relatif à la racine WinFXStart :
+le préfixe `@python` et un chemin relatif à la racine DevToolBox :
 
 ```text
 @python scripts/sftp_fetch/sftp_fetch.py config.yaml --only pro
 ```
 
-WinFXStart utilise en priorité `.venv/Scripts/python.exe` à côté du script, puis la
-variable `WINFXSTART_PYTHON`, et enfin `python3` disponible dans le système. Le script
+DevToolBox utilise en priorité `.venv/Scripts/python.exe` à côté du script, puis la
+variable `DEVTOOLBOX_PYTHON`, et enfin `python3` disponible dans le système. Le script
 est exécuté depuis son propre dossier, ce qui rend ses fichiers de configuration
 relatifs portables.
 
@@ -62,7 +62,7 @@ relatifs portables.
 ## 📁 Structure du projet
 
 ```
-WinFXStart/
+DevToolBox/
 ├── src/
 │   ├── main.rs              # Entry point
 │   ├── windows/             # Windows integration

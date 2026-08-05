@@ -1,4 +1,4 @@
-//! Pure, GDI-free category core for WinFXStart.
+//! Pure, GDI-free category core for DevToolBox.
 //!
 //! ## Public surface
 //!
@@ -484,7 +484,7 @@ mod tests {
     fn temp_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir()
             .join(format!(
-                "winfxstart_cat_{}_{tag}",
+                "devtoolbox_cat_{}_{tag}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

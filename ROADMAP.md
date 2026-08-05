@@ -1,6 +1,6 @@
-# 🗺️ Roadmap WinFXStart v0.1.0
+# 🗺️ Roadmap DevToolBox v0.1.0
 
-Cette roadmap détaille le développement de WinFXStart, un launcher de commandes CLI pour Windows 11 avec interface native WinUI 3.
+Cette roadmap détaille le développement de DevToolBox, un launcher de commandes CLI pour Windows 11 avec interface native WinUI 3.
 
 ## 📋 Objectifs principaux
 

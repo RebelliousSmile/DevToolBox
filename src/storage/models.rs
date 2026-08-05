@@ -1,4 +1,4 @@
-//! Typed models for WinFXStart configuration.
+//! Typed models for DevToolBox configuration.
 //!
 //! Each struct maps field-for-field to `config/default.json`.  The JSON key
 //! `default_settings` is used verbatim so (de)serialization does not silently

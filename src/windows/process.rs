@@ -276,13 +276,13 @@ pub fn launch_captured(command: &str, sender: Sender<ActionEvent>) -> Result<u32
     Ok(pid)
 }
 
-/// Locate the WinFXStart root used to resolve bundled scripts.
+/// Locate the DevToolBox root used to resolve bundled scripts.
 ///
-/// `WINFXSTART_HOME` has priority. Otherwise, ancestors of the current working
+/// `DEVTOOLBOX_HOME` has priority. Otherwise, ancestors of the current working
 /// directory and executable are searched for a `scripts` directory. This works
 /// both from the repository and from `target/debug` / `target/release`.
 fn action_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("WINFXSTART_HOME") {
+    if let Some(root) = std::env::var_os("DEVTOOLBOX_HOME") {
         return PathBuf::from(root);
     }
 
@@ -350,7 +350,7 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, LaunchError>
         .filter(|candidate| candidate.is_file());
     let python = local_python
         .map(|path| path.display().to_string())
-        .or_else(|| std::env::var("WINFXSTART_PYTHON").ok())
+        .or_else(|| std::env::var("DEVTOOLBOX_PYTHON").ok())
         .unwrap_or_else(|| "python3".to_string());
     let mut resolved_args = vec![script_path.display().to_string()];
     resolved_args.extend(script_args.iter().cloned());
@@ -450,10 +450,10 @@ mod tests {
     #[test]
     fn launch_not_found_returns_typed_error() {
         // Use a name that is guaranteed to not exist on any system.
-        let result = launch("__winfxstart_definitely_missing_exe_9z8y7x__");
+        let result = launch("__devtoolbox_definitely_missing_exe_9z8y7x__");
         match result {
             Err(LaunchError::NotFound { program }) => {
-                assert_eq!(program, "__winfxstart_definitely_missing_exe_9z8y7x__");
+                assert_eq!(program, "__devtoolbox_definitely_missing_exe_9z8y7x__");
             }
             other => panic!("expected LaunchError::NotFound, got {:?}", other),
         }
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn python_action_resolves_script_and_working_directory() {
-        let temp = std::env::temp_dir().join(format!("winfxstart_action_{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("devtoolbox_action_{}", std::process::id()));
         let script_dir = temp.join("scripts").join("sample");
         std::fs::create_dir_all(&script_dir).unwrap();
         let script = script_dir.join("sample.py");

@@ -41,7 +41,7 @@ Standard Rust conventions:
 ## Bundled `@python` actions (`src/windows/process.rs`)
 
 A config action whose command starts with `@python` is resolved to a bundled
-script under the WinFXStart root (`WINFXSTART_HOME`, else the nearest ancestor
+script under the DevToolBox root (`DEVTOOLBOX_HOME`, else the nearest ancestor
 holding a `scripts/` directory). Four consequences bind any script exposed that
 way:
 
@@ -54,7 +54,7 @@ way:
   package source tree** — overwritten every run, and visible in `git status`.
   Same fact forbids `Path.cwd()` as a default root in these scripts.
 - **Interpreter resolution**: a `.venv\Scripts\python.exe` beside the script
-  wins, then `WINFXSTART_PYTHON`, then `python3`.
+  wins, then `DEVTOOLBOX_PYTHON`, then `python3`.
 - `bundled_python_actions_reference_existing_scripts` asserts an **exact count**
   of `@python` actions; adding one requires updating that assertion in the same
   change.
@@ -65,9 +65,9 @@ The application is a self-contained native binary. A user action (button / icon)
 
 ```mermaid
 C4Context
-    title WinFXStart - command launch
+    title DevToolBox - command launch
     Person(user, "User", "Launches CLI commands via the GUI")
-    System(app, "WinFXStart", "Native Rust + WinUI 3 launcher")
+    System(app, "DevToolBox", "Native Rust + WinUI 3 launcher")
     System_Ext(win, "Windows 11", "Process API, Registry, Task Scheduler")
     Rel(user, app, "Clicks a command / favorite")
     Rel(app, win, "Spawns process, registers startup")

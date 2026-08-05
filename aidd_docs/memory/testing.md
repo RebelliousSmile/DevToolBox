@@ -1,6 +1,6 @@
 # Testing Guidelines
 
-This document outlines the testing strategy for WinFXStart.
+This document outlines the testing strategy for DevToolBox.
 
 > Current state: automated Rust unit tests cover the application modules. The standalone
 > SFTP script has its own isolated Python unit-test suite.

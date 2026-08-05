@@ -1,6 +1,6 @@
 # API Documentation
 
-WinFXStart exposes **no network/HTTP API**. It is a standalone desktop app. Its "external interface" is the set of Windows OS APIs it calls and the CLI commands it spawns.
+DevToolBox exposes **no network/HTTP API**. It is a standalone desktop app. Its "external interface" is the set of Windows OS APIs it calls and the CLI commands it spawns.
 
 ## Windows API surface (consumed, not exposed)
 

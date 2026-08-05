@@ -1,4 +1,4 @@
-//! Storage module — typed JSON persistence for WinFXStart configuration.
+//! Storage module — typed JSON persistence for DevToolBox configuration.
 //!
 //! Public surface:
 //! - [`models`]: serde structs aligned with `config/default.json`.

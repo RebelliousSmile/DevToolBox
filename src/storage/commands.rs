@@ -1,4 +1,4 @@
-//! Pure, GDI-free favorite command operations for WinFXStart.
+//! Pure, GDI-free favorite command operations for DevToolBox.
 //!
 //! ## Public surface
 //!
@@ -131,7 +131,7 @@ mod tests {
     fn temp_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir()
             .join(format!(
-                "winfxstart_fav_{}_{tag}",
+                "devtoolbox_fav_{}_{tag}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

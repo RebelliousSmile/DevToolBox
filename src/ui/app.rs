@@ -81,7 +81,7 @@ use crate::ui::xaml_gen::{
 // Subclass identifier
 // ---------------------------------------------------------------------------
 
-/// Unique subclass id for WinFXStart's WM_COMMAND handler.
+/// Unique subclass id for DevToolBox's WM_COMMAND handler.
 ///
 /// Must be unique per (HWND, proc) pair.  We use 1 as our private id since
 /// tao does not install its own subclass under this id.
@@ -1578,7 +1578,7 @@ fn install_menu_bar(hwnd: HWND) {
 
 fn show_about(owner: HWND) {
     unsafe {
-        MessageBoxW(owner, w!("WinFXStart\nLanceur de scripts et d'outils Windows."), w!("À propos de WinFXStart"), MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(owner, w!("DevToolBox\nLanceur de scripts et d'outils Windows."), w!("À propos de DevToolBox"), MB_OK | MB_ICONINFORMATION);
     }
 }
 

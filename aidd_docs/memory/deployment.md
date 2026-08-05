@@ -2,7 +2,7 @@
 
 ## Deployment Process
 
-WinFXStart is a standalone native Windows binary. There is no server deployment; the app is built locally and run on the end-user machine.
+DevToolBox is a standalone native Windows binary. There is no server deployment; the app is built locally and run on the end-user machine.
 
 - **Build**: `cargo build --release` (profile: `lto = true`, `opt-level = 3`)
 - **Artifact**: single `.exe` under `target/release/`

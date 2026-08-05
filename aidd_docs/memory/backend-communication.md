@@ -1,6 +1,6 @@
 # Communicating with the backend
 
-WinFXStart has no client/server backend. This file documents the equivalent internal "backend" boundary: how the UI layer drives command execution and OS integration inside the single binary.
+DevToolBox has no client/server backend. This file documents the equivalent internal "backend" boundary: how the UI layer drives command execution and OS integration inside the single binary.
 
 ## Overview
 

@@ -25,7 +25,7 @@ Options :
 ```powershell
 python scripts/deps_audit/audit.py --json      # sortie JSON
 python scripts/deps_audit/audit.py --check     # code de sortie 1 si des candidats existent
-python scripts/deps_audit/audit.py --project-root C:\chemin\WinFXStart
+python scripts/deps_audit/audit.py --project-root C:\chemin\DevToolBox
 ```
 
 `--check` est destiné à une intégration continue : le script échoue (code `1`) dès qu'une

@@ -73,7 +73,7 @@ pub fn resolve_icon(icon: &str, dirs: &[PathBuf]) -> IconResolution {
 /// Build the ordered list of candidate icon search directories.
 ///
 /// Order (Decision D4):
-/// 1. `%APPDATA%\WinFXStart\icons\`  — user-editable; overrides bundled icons.
+/// 1. `%APPDATA%\DevToolBox\icons\`  — user-editable; overrides bundled icons.
 /// 2. `<exe_dir>\assets\`            — bundled default icons shipped with the binary.
 /// 3. `.\assets\`                    — dev/repo fallback (useful during development).
 ///
@@ -81,9 +81,9 @@ pub fn resolve_icon(icon: &str, dirs: &[PathBuf]) -> IconResolution {
 pub fn icons_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(3);
 
-    // 1. %APPDATA%\WinFXStart\icons\
+    // 1. %APPDATA%\DevToolBox\icons\
     if let Ok(appdata) = std::env::var("APPDATA") {
-        dirs.push(PathBuf::from(appdata).join("WinFXStart").join("icons"));
+        dirs.push(PathBuf::from(appdata).join("DevToolBox").join("icons"));
     }
 
     // 2. <exe_dir>\assets\
@@ -244,7 +244,7 @@ mod tempfile_dir {
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0);
             // Use thread id for uniqueness when tests run in parallel.
-            let id = format!("winfxstart_test_{ts}_{:?}", std::thread::current().id());
+            let id = format!("devtoolbox_test_{ts}_{:?}", std::thread::current().id());
             let dir = std::env::temp_dir().join(id);
             std::fs::create_dir_all(&dir).expect("create temp dir");
             TempDir(dir)

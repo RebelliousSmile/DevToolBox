@@ -1,9 +1,9 @@
-//! JSON persistence for WinFXStart configuration.
+//! JSON persistence for DevToolBox configuration.
 //!
-//! - `load()`: reads `%APPDATA%\WinFXStart\config.json`; falls back to the
+//! - `load()`: reads `%APPDATA%\DevToolBox\config.json`; falls back to the
 //!   bundled `config/default.json` (cwd then exe-dir) when the user file is
 //!   absent.
-//! - `save()`: writes the typed [`Config`] to `%APPDATA%\WinFXStart\config.json`,
+//! - `save()`: writes the typed [`Config`] to `%APPDATA%\DevToolBox\config.json`,
 //!   creating the directory if needed.  The `version` field is preserved as-is.
 //!
 //! Neither function panics.  Path-injectable variants (`load_from` / `save_to`)
@@ -84,11 +84,11 @@ impl From<serde_json::Error> for StorageError {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `%APPDATA%\WinFXStart\config.json`, or `None` if `APPDATA` is unset.
+/// Returns `%APPDATA%\DevToolBox\config.json`, or `None` if `APPDATA` is unset.
 pub fn user_config_path() -> Option<PathBuf> {
     std::env::var("APPDATA").ok().map(|appdata| {
         PathBuf::from(appdata)
-            .join("WinFXStart")
+            .join("DevToolBox")
             .join("config.json")
     })
 }
@@ -130,7 +130,7 @@ fn bundled_config_path(filename: &str) -> Option<PathBuf> {
 /// Load configuration.
 ///
 /// Priority:
-/// 1. `%APPDATA%\WinFXStart\config.json` (user file).
+/// 1. `%APPDATA%\DevToolBox\config.json` (user file).
 /// 2. Bundled `config/default.json` (cwd or exe-dir).
 ///
 /// Returns [`StorageError::NoConfigFound`] if neither is present.
@@ -194,7 +194,7 @@ pub fn load_from(path: &Path) -> Result<Config, StorageError> {
     Ok(config)
 }
 
-/// Save configuration to `%APPDATA%\WinFXStart\config.json`.
+/// Save configuration to `%APPDATA%\DevToolBox\config.json`.
 ///
 /// Creates the directory if it does not exist.
 /// Returns [`StorageError`] (never panics) when `APPDATA` is unset or an I/O
@@ -280,7 +280,7 @@ mod tests {
     fn round_trip_lossless_with_version_preserved() {
         let original = sample_config();
         let temp_dir = std::env::temp_dir().join(format!(
-            "winfxstart_test_{}",
+            "devtoolbox_test_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -302,7 +302,7 @@ mod tests {
     fn shortcut_none_absent_after_roundtrip() {
         let original = sample_config();
         let temp_dir = std::env::temp_dir().join(format!(
-            "winfxstart_shortcut_test_{}",
+            "devtoolbox_shortcut_test_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn fallback_when_user_file_absent() {
         // A path that definitely does not exist — no user file present.
-        let nonexistent = std::env::temp_dir().join("winfxstart_absent_99999999/config.json");
+        let nonexistent = std::env::temp_dir().join("devtoolbox_absent_99999999/config.json");
         assert!(!nonexistent.exists(), "precondition: file must not exist");
 
         // load_from on a missing path returns an Io error, not a panic.
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn parse_error_on_malformed_json() {
         let temp_dir = std::env::temp_dir().join(format!(
-            "winfxstart_malformed_{}",
+            "devtoolbox_malformed_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn save_creates_parent_directory() {
         let temp_base = std::env::temp_dir().join(format!(
-            "winfxstart_mkdirs_{}",
+            "devtoolbox_mkdirs_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -390,13 +390,13 @@ mod tests {
     }
 
     #[test]
-    fn user_config_path_contains_winfxstart() {
+    fn user_config_path_contains_devtoolbox() {
         // Only verify shape when APPDATA is set; skip if absent.
         if let Some(path) = user_config_path() {
             let display = path.display().to_string();
             assert!(
-                display.contains("WinFXStart"),
-                "user config path must contain WinFXStart, got: {display}"
+                display.contains("DevToolBox"),
+                "user config path must contain DevToolBox, got: {display}"
             );
             assert!(
                 display.ends_with("config.json"),

@@ -141,8 +141,8 @@ class TestModel(unittest.TestCase):
 class TestSkipReporting(unittest.TestCase):
     def setUp(self) -> None:
         self.entry = SkippedEntry(
-            label="target de winfxstart",
-            path="C:\\dev\\winfxstart\\target",
+            label="target de devtoolbox",
+            path="C:\\dev\\devtoolbox\\target",
             status=SKIP_RUNNING,
             reason="cargo.exe actif",
         )
