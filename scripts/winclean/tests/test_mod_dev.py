@@ -29,6 +29,8 @@ from scripts.winclean.common import (  # noqa: E402
     format_plan,
 )
 
+IS_WINDOWS = sys.platform == "win32"
+
 
 def tempdir(case: unittest.TestCase) -> Path:
     root = Path(tempfile.mkdtemp(prefix="winclean-mod-"))
@@ -290,6 +292,7 @@ class TestOwnerProcessWarning(unittest.TestCase):
         self.assertIsNone(registry_mod.proc_guard_skip(weak, candidate, yes=False, state=state))
 
 
+@unittest.skipUnless(IS_WINDOWS, "résolution des caches Windows")
 class TestCacheModules(unittest.TestCase):
     def test_the_tool_reported_path_wins_over_the_fallback(self) -> None:
         spec = mod_dev.CACHE_SPECS["npm-cache"]

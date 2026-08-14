@@ -49,6 +49,8 @@ from scripts.winclean.common import (  # noqa: E402
 from scripts.winclean.tests.test_mod_dev import tempdir as _tempdir  # noqa: E402
 from scripts.winclean.tests.test_mod_dev import write  # noqa: E402
 
+IS_WINDOWS = sys.platform == "win32"
+
 
 # --------------------------------------------------------------------------- #
 # Outillage
@@ -351,6 +353,7 @@ class TestRoots(unittest.TestCase):
             roots = clean.resolve_roots([str(tmp), str(tmp) + os.sep, str(tmp / "." )])
             self.assertEqual(roots, [Path(tmp).resolve()])
 
+    @unittest.skipUnless(IS_WINDOWS, "composants de chemins Windows")
     def test_sync_rule_matches_components_not_a_fixed_list(self):
         self.assertTrue(clean.is_sync_root(Path(r"C:\Users\x\OneDrive - Acme\p"), env={}))
         self.assertTrue(clean.is_sync_root(Path(r"C:\Users\x\Dropbox\p"), env={}))
@@ -390,6 +393,7 @@ class TestChainScreensCandidatesNotRoots(unittest.TestCase):
         self.assertEqual(code, clean.EXIT_OK, err)
         self.assertIn(r"C:\dev", out)
 
+    @unittest.skipUnless(IS_WINDOWS, "profil utilisateur Windows")
     def test_a_profile_root_candidate_is_rejected(self):
         profile = os.environ["USERPROFILE"]
         module = fake_module("factice", candidates=(candidate("factice", profile, 0, mtime=None),))
@@ -538,6 +542,7 @@ class TestGuardSections(unittest.TestCase):
             dropped = json.loads(json_out)["dropped"]
             self.assertEqual([d["reason_class"] for d in dropped], [DROP_PROTECTED])
 
+    @unittest.skipUnless(IS_WINDOWS, "racine de lecteur Windows")
     def test_sanity_candidate_aborts_before_any_deletion(self):
         module = fake_module("defectueux", candidates=(candidate("defectueux", "C:\\", 0, mtime=None),))
         with registry_of(module), deletion_spy() as calls:
@@ -649,6 +654,7 @@ class TestApplyToctou(unittest.TestCase):
 
 
 class TestFreedCountsUnlinkedBytes(unittest.TestCase):
+    @unittest.skipUnless(IS_WINDOWS, "verrouillage de fichier Windows")
     def test_a_locked_file_is_failed_and_not_counted_as_freed(self):
         """`freed` = octets réellement déliés, pas un avant/après du répertoire.
 
@@ -682,7 +688,6 @@ class TestFreedCountsUnlinkedBytes(unittest.TestCase):
 class TestPathlessApply(unittest.TestCase):
     def test_pathless_candidate_goes_to_the_module_clean(self):
         calls: list[dict] = []
-        stats: list[object] = []
 
         def _clean(**kwargs):
             calls.append(kwargs)
@@ -693,17 +698,13 @@ class TestPathlessApply(unittest.TestCase):
             candidates=(candidate("sans-chemin", None, 1000, label="volumes docker"),),
             clean_fn=_clean,
         )
-        real_stat = os.stat
-
-        def _spy(path, *args, **kwargs):
-            stats.append(path)
-            return real_stat(path, *args, **kwargs)
-
-        with registry_of(module), mock.patch.object(clean.os, "stat", _spy), deletion_spy() as deletions:
+        with registry_of(module), mock.patch.object(
+            clean, "_current_mtime", wraps=clean._current_mtime
+        ) as current_mtime, deletion_spy() as deletions:
             code, out, err = run_cli(["--apply", "--yes"])
         self.assertEqual(code, clean.EXIT_OK, err)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(stats, [])
+        current_mtime.assert_not_called()
         self.assertEqual(deletions, [])
         self.assertNotIn(SKIP_GONE, out)
         self.assertNotIn(SKIP_CHANGED, out)
@@ -1349,6 +1350,7 @@ class TestFailureClasses(unittest.TestCase):
         self.assertFalse(run["recycle_happened"])
 
 
+@unittest.skipUnless(IS_WINDOWS, "verrouillage de fichier Windows")
 class TestModerateAttemptsWarnOnlyCandidates(unittest.TestCase):
     """Critère 171, sans navigateur réel : un fichier verrouillé et un `warn-only`.
 

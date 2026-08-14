@@ -20,6 +20,7 @@ from scripts.winclean import guards, mod_apps, mod_dev, procs  # noqa: E402
 from scripts.winclean.common import CleanCandidate, Level  # noqa: E402
 
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
+IS_WINDOWS = sys.platform == "win32"
 
 
 def tempdir(case: unittest.TestCase) -> Path:
@@ -96,6 +97,7 @@ class SingleProcessQueryTest(unittest.TestCase):
             self.assertIsNone(mod_apps._owner_reason(mod_apps.BROWSER_OWNERS))
 
 
+@unittest.skipUnless(IS_WINDOWS, "caches navigateurs Windows")
 class BrowserCacheTest(unittest.TestCase):
     def setUp(self) -> None:
         patcher = mock.patch.object(procs, "is_running", return_value=set())

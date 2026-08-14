@@ -149,14 +149,12 @@ class ScanRegistryLinuxDispatchLiveSmokeTest(unittest.TestCase):
     (Part 4 Phase 2) rather than raise ``WinregUnavailableError``.
 
     Guarded to Linux only, mirroring ``ScanRegistryLiveSmokeTest`` above for
-    Windows. A systemd-based Linux dev machine always has at least one
-    service unit loaded (systemd itself registers plenty).
+    Windows. Containers and WSL hosts may legitimately return no units.
     """
 
     def test_dispatches_to_systemd_without_raising(self):
         items = scan_registry()
 
-        self.assertGreater(len(items), 0)
         for item in items:
             self.assertEqual(item.source, "systemd")
             self.assertTrue(item.name)

@@ -57,6 +57,7 @@ def make_junction(link: Path, target: Path) -> bool:
     return completed.returncode == 0 and link.exists()
 
 
+@unittest.skipUnless(IS_WINDOWS, "chemins longs Windows")
 class TestLongPath(unittest.TestCase):
     def test_relative_input_raises(self) -> None:
         with self.assertRaises(ValueError):

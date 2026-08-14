@@ -27,6 +27,7 @@ from scripts.winclean.guards import (  # noqa: E402
 )
 
 MIB = 1024 * 1024
+IS_WINDOWS = sys.platform == "win32"
 
 
 def candidate(
@@ -59,6 +60,7 @@ def make_junction(link: Path, target: Path) -> bool:
     return completed.returncode == 0 and link.exists()
 
 
+@unittest.skipUnless(IS_WINDOWS, "sémantique des chemins Windows")
 class TestNormalise(unittest.TestCase):
     def test_is_idempotent_and_case_folded(self) -> None:
         once = normalise("C:\\Users\\X\\.cargo")
@@ -72,6 +74,7 @@ class TestNormalise(unittest.TestCase):
             path_sanity("C:\\Users\\X\\Documents")
 
 
+@unittest.skipUnless(IS_WINDOWS, "sémantique des chemins Windows")
 class TestProtection(unittest.TestCase):
     def test_mixed_case_protection_holds(self) -> None:
         protected = (normalise("C:\\Users\\X\\.cargo"),)
@@ -91,6 +94,7 @@ class TestProtection(unittest.TestCase):
             self.assertTrue(is_protected(normalise(link), protected))
 
 
+@unittest.skipUnless(IS_WINDOWS, "sémantique des chemins Windows")
 class TestPathSanity(unittest.TestCase):
     def test_short_path_is_refused(self) -> None:
         self.assertEqual(path_sanity(normalise("C:\\a\\b")), "too-short")
@@ -113,6 +117,7 @@ class TestPathSanity(unittest.TestCase):
         self.assertIsNone(path_sanity(normalise("C:\\dev\\projet\\target")))
 
 
+@unittest.skipUnless(IS_WINDOWS, "sémantique des chemins Windows")
 class TestScreenCandidates(unittest.TestCase):
     def test_returns_what_it_removed_with_a_reason_class(self) -> None:
         protected = (normalise("C:\\Users\\X\\Documents"),)
@@ -203,6 +208,7 @@ class TestCeiling(unittest.TestCase):
         self.assertEqual(plan.unpriced_modules(), ["docker-light"])
 
 
+@unittest.skipUnless(IS_WINDOWS, "profil utilisateur Windows")
 class TestDefaultProtected(unittest.TestCase):
     def test_a_path_inside_a_user_data_root_is_protected(self) -> None:
         protected = default_protected(env={"USERPROFILE": "C:\\Users\\X"})
@@ -249,6 +255,7 @@ class TestDefaultProtected(unittest.TestCase):
                 )
 
 
+@unittest.skipUnless(IS_WINDOWS, "sémantique des chemins Windows")
 class TestAbsorbNested(unittest.TestCase):
     RANK = {"cargo-target": 0, "pycache": 1}
 

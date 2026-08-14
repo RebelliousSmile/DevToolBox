@@ -105,6 +105,7 @@ class BuildPathItemsTests(unittest.TestCase):
 
             self.assertEqual(len(items), 1)
 
+    @unittest.skipUnless(platform.system() == "Windows", "séparateur Windows")
     def test_dedupe_normalizes_trailing_separator_variants(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

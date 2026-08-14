@@ -73,7 +73,8 @@ def have(binary: str) -> bool:
 
 def _is_reparse(entry: os.DirEntry[str]) -> bool:
     try:
-        return bool(entry.stat(follow_symlinks=False).st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+        return bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT)
     except OSError:
         return False
 

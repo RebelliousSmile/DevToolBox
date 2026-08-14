@@ -32,6 +32,8 @@ from scripts.winclean.tests.test_clean import (  # noqa: E402
 )
 from scripts.winclean.tests.test_mod_dev import tempdir, write  # noqa: E402
 
+IS_WINDOWS = sys.platform == "win32"
+
 
 def config_file(root: Path, payload: object, name: str = "winclean.json") -> Path:
     """Écrit un fichier de configuration et renvoie son chemin."""
@@ -201,6 +203,7 @@ class TestLoadConfig(unittest.TestCase):
             config_mod.load_config(root / "absent.json")
         self.assertIn("introuvable", str(caught.exception))
 
+    @unittest.skipUnless(IS_WINDOWS, "exemple de configuration Windows")
     def test_example_file_is_valid_strict_json_and_loads(self) -> None:
         """L'exemple livré est du JSON strict, sans commentaire, et validé."""
         example = Path(config_mod.__file__).with_name("winclean.json.example")
