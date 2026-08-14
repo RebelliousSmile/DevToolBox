@@ -31,6 +31,15 @@
   icon *resolution* additionally consults the freedesktop icon theme on Linux
   (`src/linux/icon_theme.rs`)
 - **Logging**: `log` + `env_logger`
+- **Application recommendations**: a stdlib-only Python domain package
+  (`scripts/app_recommendations`) owns OS collectors, evidence, protections and
+  scoring. Rust launches its versioned JSON CLI asynchronously through
+  `src/python_runtime.rs`; `src/ui/applications_view.rs` renders the result but
+  contains no scoring or uninstall execution path.
+- **Usage history**: `src/applications/usage.rs` samples local processes only after
+  the first report supplies unambiguous executable targets. It stores per-app
+  `tracked_since`/`last_seen` plus daily successful-sample counts at the OS-local
+  state path. It does not store a process timeline.
 
 ```mermaid
 flowchart LR
@@ -40,6 +49,9 @@ flowchart LR
     EXEC -->|Linux| STDPROC[std::process, cfg target_os linux]
     UI --> STORE[JSON storage - serde_json]
     UI --> ICONS[icons - image decode + egui texture upload]
+    UI -->|async JSON schema v1| PYREC[Python recommendation package]
+    PYREC --> LOCAL[Local package metadata only]
+    UI --> USAGE[Privacy-limited usage history]
     WINAPI --> REG[Registry Run Keys - startup]
     STDPROC --> XDG[XDG autostart .desktop - startup]
 ```
@@ -58,7 +70,8 @@ Standard Rust conventions:
 
 A config action whose command starts with `@python` is resolved to a bundled
 script under the DevToolBox root (`DEVTOOLBOX_HOME`, else the nearest ancestor
-holding a `scripts/` directory). The resolution cascade exists in two places:
+holding a `scripts/` directory). `src/python_runtime.rs` centralizes the root and
+interpreter cascade for both launch paths:
 
 - `src/windows/process.rs` — `#[cfg(windows)]`-gated, backs the direct
   card-click launch path (`build_command()`/`build_action_command()`, using
@@ -80,7 +93,7 @@ Four consequences bind any script exposed either way:
   **inside the script's own package source tree** — overwritten every run, and
   visible in `git status`. Same fact forbids `Path.cwd()` as a default root in
   these scripts.
-- **Interpreter resolution** (both implementations, same order): a venv
+- **Interpreter resolution** (shared implementation, same order): a venv
   interpreter beside the script wins (`.venv\Scripts\python.exe` on Windows,
   `.venv/bin/python` on Linux), then `DEVTOOLBOX_PYTHON`, then `python3`.
 - `bundled_python_actions_reference_existing_scripts` asserts an **exact count**

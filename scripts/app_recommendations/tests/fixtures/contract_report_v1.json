@@ -1,0 +1,46 @@
+{
+  "candidates": [
+    {
+      "app_id": "fixture:editor",
+      "command": {
+        "origin": "manager_verified",
+        "value": "fixture-manager uninstall editor"
+      },
+      "confidence": "medium",
+      "executable_hints": [
+        "/opt/fixture/editor"
+      ],
+      "metadata": {},
+      "name": "Fixture Editor",
+      "protection": {
+        "protected": false,
+        "reasons": []
+      },
+      "reasons": [
+        "Empreinte disque : +25",
+        "Non observé pendant le suivi (90 jours couverts) : +25"
+      ],
+      "score": 50,
+      "size": {
+        "confidence": "high",
+        "installed_bytes": 2147483648,
+        "method": "fixture_directory",
+        "reclaimable_bytes": null,
+        "scope": "fixture hors données utilisateur"
+      },
+      "source": "fixture",
+      "usage": {
+        "confidence": "medium",
+        "covered_days": 90,
+        "kind": "not_observed",
+        "last_seen": null,
+        "tracked_since": "2026-01-01T00:00:00+00:00"
+      }
+    }
+  ],
+  "generated_at": "2026-04-02T00:00:00+00:00",
+  "platform": "contract-fixture",
+  "schema_version": 1,
+  "source_errors": [],
+  "warnings": []
+}

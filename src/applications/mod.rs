@@ -226,4 +226,16 @@ mod report_tests {
             .unwrap_err()
             .contains("version de rapport incompatible"));
     }
+
+    #[test]
+    fn python_generated_contract_fixture_deserializes() {
+        let fixture = include_bytes!(
+            "../../scripts/app_recommendations/tests/fixtures/contract_report_v1.json"
+        );
+        let report = parse_report(fixture).unwrap();
+        assert_eq!(report.platform, "contract-fixture");
+        assert_eq!(report.candidates[0].app_id, "fixture:editor");
+        assert_eq!(report.candidates[0].score, 50);
+        assert_eq!(report.candidates[0].usage.covered_days, 90);
+    }
 }

@@ -30,6 +30,7 @@ pub enum DialogKind {
     /// OK-only informational box (former `MB_OK | MB_ICONINFORMATION`).
     Info { title: String, message: String },
     /// OK-only warning box (former `MB_OK | MB_ICONWARNING`).
+    #[allow(dead_code)]
     Warn { title: String, message: String },
     /// Yes/No confirmation box (former `MB_YESNO | MB_ICONWARNING`).
     Confirm { title: String, message: String },
@@ -44,6 +45,7 @@ pub fn info(title: impl Into<String>, message: impl Into<String>) -> DialogKind 
 }
 
 /// Build an OK-only warning dialog — former `show_message(warning=true)`.
+#[allow(dead_code)]
 pub fn warn(title: impl Into<String>, message: impl Into<String>) -> DialogKind {
     DialogKind::Warn {
         title: title.into(),

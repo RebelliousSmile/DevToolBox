@@ -114,7 +114,9 @@ fn build_row(entry: TimerEntry) -> AutomationRow {
     let next_run = match entry.next {
         Some(next) if next > 0 => format_timestamp(Some(next)),
         _ => match entry.last {
-            Some(last) if last > 0 => format!("(dernière exécution: {})", format_timestamp(Some(last))),
+            Some(last) if last > 0 => {
+                format!("(dernière exécution: {})", format_timestamp(Some(last)))
+            }
             _ => "n/a".to_string(),
         },
     };
@@ -261,8 +263,7 @@ mod tests {
     fn format_timestamp_negative_does_not_panic() {
         // Defensive: a malformed/future systemd JSON value should never
         // panic this formatter, even if it's nonsensical.
-        let outcome =
-            std::panic::catch_unwind(|| format_timestamp(Some(-1)));
+        let outcome = std::panic::catch_unwind(|| format_timestamp(Some(-1)));
         assert!(outcome.is_ok());
     }
 
@@ -384,7 +385,10 @@ mod tests {
             });
 
         assert_ne!(apt_daily.next_run, "", "next_run must be populated");
-        assert_ne!(apt_daily.next_run, "n/a", "apt-daily.timer has a real next run");
+        assert_ne!(
+            apt_daily.next_run, "n/a",
+            "apt-daily.timer has a real next run"
+        );
         assert!(
             apt_daily.state.contains("active"),
             "expected an active/waiting state, got {:?}",

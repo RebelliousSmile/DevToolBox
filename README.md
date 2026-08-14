@@ -34,6 +34,20 @@ ses fichiers de configuration relatifs portables.
 - [x] Lancement au démarrage (Windows Registry / Linux XDG autostart)
 - [x] Vue Automations (Tâches planifiées Windows / unités `systemd --user` sous Linux)
 - [x] Vue Terminal intégrée
+- [x] Vue Applications : rapport consultatif multi-OS classé par empreinte et
+  usage local couvert, avec explications, protections et copie manuelle de commande
+
+La vue Applications collecte uniquement des métadonnées locales. Sous Linux, elle
+couvre APT/dpkg, Snap et Flatpak ; sous Windows, Uninstall Registry, MSIX/AppX,
+Scoop et Chocolatey. Le score indique une priorité d'examen et la confiance reste
+affichée séparément. L'empreinte installée n'est pas une promesse de gain :
+l'estimation récupérable est présentée à part lorsqu'elle existe. Le suivi d'usage
+commence à partir de l'activation de la fonctionnalité et compte seulement les jours
+où au moins un échantillon a réussi, pas tous les jours calendaires écoulés.
+
+DevToolBox ne désinstalle aucune application. Une suggestion peut uniquement être
+copiée dans le presse-papiers pour relecture et exécution manuelle. Voir le
+[contrat et les limites du rapport](scripts/app_recommendations/README.md).
 
 ## 🛠️ Stack Technique
 
@@ -63,10 +77,14 @@ DevToolBox/
 │   │   ├── automations.rs      # Unités systemd --user
 │   │   └── icon_theme.rs       # Résolution icônes via le thème freedesktop
 │   ├── icons/                  # Décodage/rendu d'icônes (backend egui)
-│   ├── ui/                     # UI egui (grille de cartes, dialogs, terminal)
-│   │   └── egui_app.rs
+│   ├── applications/           # Suivi local d'usage et collecte de processus
+│   ├── python_runtime.rs       # Résolution partagée des modules Python livrés
+│   ├── ui/                     # UI egui (grille, terminal, applications)
+│   │   ├── egui_app.rs
+│   │   └── applications_view.rs
 │   └── storage/                 # Persistance données (Command, Category, Settings)
 │       └── json.rs
+├── scripts/app_recommendations/ # Collecte/scoring Python multi-OS en lecture seule
 ├── Cargo.toml
 ├── README.md
 └── config/

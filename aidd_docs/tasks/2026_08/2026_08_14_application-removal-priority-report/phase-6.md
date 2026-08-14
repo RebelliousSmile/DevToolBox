@@ -1,6 +1,6 @@
 ---
 objective: Valider le parcours complet, documenter le modèle de confiance et rendre explicites les limites de portabilité et de récupération d’espace.
-status: pending
+status: done
 ---
 
 # Instruction
@@ -69,3 +69,21 @@ journey
 - Le contrôle source ne trouve aucun chemin d’exécution d’une commande de désinstallation ni aucune collecte réseau.
 - Le contrôle de distribution confirme la présence du module Python et sa résolution depuis un lancement hors du dépôt.
 - La validation Windows est soit réussie et consignée, soit explicitement maintenue comme condition de livraison non satisfaite ; elle ne peut pas être déduite des seuls tests Linux.
+
+## Validation record — 2026-08-14
+
+- Linux : rapport réel réussi ; APT disponible, Flatpak rendu comme erreur partielle
+  (`Read-only file system`) et Snap rendu comme timeout sans invalider les candidats.
+- Python : 31 tests `app_recommendations` et 171 tests `system_inventory` réussis
+  (6 ignorés car dépendants de l'hôte).
+- Rust : `cargo fmt --all --check`, `cargo check`, Clippy strict et 175 tests
+  réussis (173 passés, 2 tests autostart destructifs volontairement ignorés).
+- Contrat/distribution : fixture schéma v1 généré par Python et désérialisé par
+  Rust ; absence de `app_recommendations` ou `system_inventory` signalée ; priorité
+  de `DEVTOOLBOX_HOME` testée hors d'un chemin de dépôt.
+- Sécurité : aucune API réseau ; les sous-processus Python exécutent uniquement les
+  commandes locales de collecte ; les suggestions de désinstallation ne sont
+  utilisées que comme données affichées/copier-coller.
+- Windows réel : **condition de livraison portable non satisfaite sur cet hôte
+  Linux**. La checklist registre/MSIX/Scoop/Chocolatey/LocalAppData/processus/UI
+  doit être rejouée sur Windows avant de qualifier un artefact Windows.

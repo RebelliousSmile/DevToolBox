@@ -81,7 +81,9 @@ fn home_dir(env: &EnvLookup) -> PathBuf {
     // No sensible fallback exists if HOME is unset; `/` keeps path-joining
     // well-defined rather than panicking. HOME is always set in practice on
     // Linux user sessions.
-    env("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    env("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn config_path_with_env(env: &EnvLookup) -> PathBuf {
@@ -302,7 +304,10 @@ mod tests {
 
     #[test]
     fn application_usage_path_is_machine_local_xdg_state() {
-        let env = env_map(&[("XDG_STATE_HOME", "/custom/state"), ("HOME", "/home/someone")]);
+        let env = env_map(&[
+            ("XDG_STATE_HOME", "/custom/state"),
+            ("HOME", "/home/someone"),
+        ]);
         assert_eq!(
             application_usage_path_with_env(&env),
             PathBuf::from("/custom/state/devtoolbox/application-usage.json")

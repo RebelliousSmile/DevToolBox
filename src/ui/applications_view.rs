@@ -109,14 +109,29 @@ pub fn render(
         .iter()
         .filter_map(|candidate| candidate.size.installed_bytes)
         .sum();
+    let reclaimable_bytes: u64 = report
+        .candidates
+        .iter()
+        .filter_map(|candidate| candidate.size.reclaimable_bytes)
+        .sum();
+    let reclaimable_label = if report
+        .candidates
+        .iter()
+        .any(|candidate| candidate.size.reclaimable_bytes.is_some())
+    {
+        human_size(Some(reclaimable_bytes))
+    } else {
+        "inconnu".to_string()
+    };
     let usage_signals = report
         .candidates
         .iter()
         .filter(|candidate| candidate.usage.kind != "unknown")
         .count();
     ui.label(format!(
-        "{} · {} candidats · {} signaux d’usage · relevé {}",
+        "Empreinte connue : {} · gain récupérable estimé : {} · {} candidats · {} signaux d’usage · relevé {}",
         human_size(Some(known_bytes)),
+        reclaimable_label,
         report
             .candidates
             .iter()
@@ -218,8 +233,9 @@ pub fn render(
         ui.separator();
         ui.strong(format!("{} — justification", candidate.name));
         ui.label(format!(
-            "Empreinte : {} · méthode : {} · périmètre : {} · confiance taille : {}",
+            "Empreinte : {} · gain récupérable estimé : {} · méthode : {} · périmètre : {} · confiance taille : {}",
             human_size(candidate.size.installed_bytes),
+            human_size(candidate.size.reclaimable_bytes),
             candidate.size.method,
             candidate.size.scope,
             candidate.size.confidence

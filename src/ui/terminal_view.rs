@@ -31,9 +31,15 @@ const TRIMMED_LINES: usize = 3_500;
 /// `AutomationsLoaded` which isn't relevant here).
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
-    Started { command: String, pid: u32 },
+    #[allow(dead_code)]
+    Started {
+        command: String,
+        pid: u32,
+    },
     Output(String),
-    Finished { code: Option<i32> },
+    Finished {
+        code: Option<i32>,
+    },
     Failed(String),
 }
 
@@ -245,6 +251,7 @@ pub fn launch_captured(command: &str, sender: Sender<TerminalEvent>) -> Result<u
 /// trailing partial line in `partial`. Same rules as
 /// `app.rs::feed_terminal_text`: `\r` is dropped, `\n` flushes the pending
 /// line.
+#[allow(dead_code)]
 pub fn feed_text(lines: &mut VecDeque<String>, partial: &mut String, text: &str) {
     for ch in text.chars() {
         match ch {

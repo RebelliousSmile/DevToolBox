@@ -6,8 +6,8 @@
 //! of the multi-OS transformation). Phase 1 wires up a minimal `eframe::App`
 //! bootstrap; the full card grid lands in Phase 2.
 
-mod icons;
 mod applications;
+mod icons;
 mod linux;
 mod platform;
 mod python_runtime;

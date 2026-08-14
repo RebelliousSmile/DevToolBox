@@ -749,8 +749,7 @@ mod tests {
         // theme on this machine or in any candidate dir — proves the "no
         // panic, generic fallback" half of the acceptance criterion using
         // the real, unmodified base-dir/theme discovery path.
-        let result =
-            resolve_icon_with_theme("totally-unknown-icon-name-xyz-987", &[], 48);
+        let result = resolve_icon_with_theme("totally-unknown-icon-name-xyz-987", &[], 48);
         assert_eq!(
             result,
             IconResolution::EmojiFallback("totally-unknown-icon-name-xyz-987".to_string())
@@ -805,7 +804,10 @@ mod tests {
     #[test]
     fn real_system_unknown_icon_name_falls_back_without_panicking() {
         let outcome = std::panic::catch_unwind(|| {
-            find_icon("this-icon-name-almost-certainly-does-not-exist-anywhere-42", 48)
+            find_icon(
+                "this-icon-name-almost-certainly-does-not-exist-anywhere-42",
+                48,
+            )
         });
         assert!(outcome.is_ok(), "an unknown icon name must never panic");
         assert_eq!(outcome.unwrap(), None);

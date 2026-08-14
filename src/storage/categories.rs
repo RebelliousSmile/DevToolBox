@@ -237,10 +237,10 @@ mod tests {
             icon: String::new(),
             is_favorite,
             shortcut: None,
-                variant_group: None,
-                group_name: None,
-                variant_label: None,
-                machine_specific: false,
+            variant_group: None,
+            group_name: None,
+            variant_label: None,
+            machine_specific: false,
         }
     }
 

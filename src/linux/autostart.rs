@@ -44,7 +44,9 @@ fn home_dir(env: &EnvLookup) -> PathBuf {
     // No sensible fallback exists if HOME is unset; `/` keeps path-joining
     // well-defined rather than panicking, mirroring `platform::linux`'s
     // `home_dir`. HOME is always set in practice on Linux user sessions.
-    env("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    env("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Directory holding autostart `.desktop` files:
@@ -314,9 +316,8 @@ mod tests {
 
         // The important assertion is simply that this call returns instead
         // of panicking; std::panic::catch_unwind makes that explicit.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            register_with_env(&env)
-        }));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| register_with_env(&env)));
         assert!(
             outcome.is_ok(),
             "register_with_env must not panic on a write failure"

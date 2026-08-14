@@ -1,6 +1,7 @@
 # Codebase Structure
 
-Current state (MVP, Phase 1): a single binary crate with one entry point. The modular layout below is the intended target documented in `README.md`; only `src/main.rs` exists today.
+Current state: one native Rust binary split into platform, UI, storage, icon and
+application-usage modules, plus isolated Python utility packages.
 
 ```mermaid
 flowchart TD
@@ -11,21 +12,30 @@ flowchart TD
     MAIN -.reads.-> CFG
     CARGO --> MAIN
 
-    subgraph Planned["Planned modules (not yet created)"]
+    subgraph Native["Native modules"]
         WINMOD["src/windows/ - registry, task_scheduler, process"]
-        UIMOD["src/ui/ - app state, xaml_gen"]
+        UIMOD["src/ui/ - egui app, terminal, applications view"]
         STOREMOD["src/storage/ - models, json"]
         ASSETS["src/assets/ - custom icons"]
+        APPMOD["src/applications/ - process matching and usage history"]
+        PYRUN["src/python_runtime.rs - bundled Python resolution"]
     end
 
-    MAIN -.will use.-> WINMOD
-    MAIN -.will use.-> UIMOD
-    MAIN -.will use.-> STOREMOD
+    MAIN --> WINMOD
+    MAIN --> UIMOD
+    MAIN --> STOREMOD
+    UIMOD --> APPMOD
+    UIMOD --> PYRUN
 ```
 
 ## Standalone scripts (`scripts/`)
 
 Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx), `winclean/` (dry-run-first disk cleaner; imports `system_inventory` as its **read-only** discovery layer and must never modify it — see `memory/internal/decisions/winclean-separate-package.md`).
+
+`app_recommendations/` is the read-only multi-OS application report: stable models
+and score in `models.py`/`scoring.py`, aggregation in `report.py`, APT/Snap/Flatpak
+and Registry/AppX/Scoop/Chocolatey adapters in `collectors/`, and the schema-v1 CLI
+in `__main__.py`. Its tests include a JSON fixture consumed directly by Rust.
 
 ### Gotchas shared by these scripts
 

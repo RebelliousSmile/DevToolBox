@@ -11,9 +11,6 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn action_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("DEVTOOLBOX_HOME") {
-        return PathBuf::from(root);
-    }
     let mut candidates = Vec::new();
     if let Ok(current) = std::env::current_dir() {
         candidates.push(current);
@@ -22,6 +19,13 @@ pub fn action_root() -> PathBuf {
         if let Some(parent) = executable.parent() {
             candidates.push(parent.to_path_buf());
         }
+    }
+    discover_action_root(std::env::var_os("DEVTOOLBOX_HOME"), candidates)
+}
+
+fn discover_action_root(configured: Option<OsString>, candidates: Vec<PathBuf>) -> PathBuf {
+    if let Some(root) = configured {
+        return PathBuf::from(root);
     }
     for candidate in &candidates {
         for ancestor in candidate.ancestors() {
@@ -90,6 +94,16 @@ fn recommendation_command_from_root(root: PathBuf, history_path: &Path) -> Resul
             root.display()
         ));
     }
+    let inventory_entry = root
+        .join("scripts")
+        .join("system_inventory")
+        .join("__init__.py");
+    if !inventory_entry.is_file() {
+        return Err(format!(
+            "dépendance Python system_inventory introuvable sous {}",
+            root.display()
+        ));
+    }
     let interpreter = python_for_script(&module_entry);
     let mut command = Command::new(&interpreter);
     command
@@ -127,6 +141,21 @@ mod tests {
             .unwrap()
             .join("scripts/app_recommendations/__main__.py")
             .is_file());
+        assert!(command
+            .get_current_dir()
+            .unwrap()
+            .join("scripts/system_inventory/__init__.py")
+            .is_file());
+    }
+
+    #[test]
+    fn configured_distribution_root_wins_outside_repository() {
+        let root = PathBuf::from("/opt/devtoolbox-package");
+        let resolved = discover_action_root(
+            Some(root.clone().into_os_string()),
+            vec![PathBuf::from("/tmp/unrelated-launch-directory")],
+        );
+        assert_eq!(resolved, root);
     }
 
     #[test]
