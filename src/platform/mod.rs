@@ -173,3 +173,15 @@ pub fn machine_commands_path() -> PathBuf {
 pub fn machine_commands_path() -> PathBuf {
     linux::machine_commands_path()
 }
+
+/// Machine-local, non-roaming prospective application usage history.
+#[cfg(windows)]
+pub fn application_usage_path() -> PathBuf {
+    windows::application_usage_path()
+}
+
+/// See [`application_usage_path`] (Windows variant); this is the Linux variant.
+#[cfg(target_os = "linux")]
+pub fn application_usage_path() -> PathBuf {
+    linux::application_usage_path()
+}

@@ -1,6 +1,6 @@
 ---
 objective: Constituer un historique local et prospectif du dernier usage en observant les exécutables actifs sous Linux et Windows.
-status: pending
+status: done
 ---
 
 # Instruction

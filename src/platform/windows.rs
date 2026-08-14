@@ -32,6 +32,7 @@ const APP_DIR_NAME: &str = "DevToolBox";
 const CONFIG_FILE_NAME: &str = "config.json";
 const LOG_FILE_NAME: &str = "devtoolbox.log";
 const MACHINE_COMMANDS_FILE_NAME: &str = "machine-commands.json";
+const APPLICATION_USAGE_FILE_NAME: &str = "application-usage.json";
 const MACHINE_ID_ENV_VAR: &str = "DEVTOOLBOX_MACHINE_ID";
 const UNKNOWN_MACHINE_ID: &str = "unknown";
 
@@ -85,6 +86,11 @@ pub fn machine_id() -> String {
 /// [`config_path`]'s roaming `%APPDATA%`.
 pub fn machine_commands_path() -> PathBuf {
     localappdata_dir().join(MACHINE_COMMANDS_FILE_NAME)
+}
+
+/// `%LOCALAPPDATA%\DevToolBox\application-usage.json`.
+pub fn application_usage_path() -> PathBuf {
+    localappdata_dir().join(APPLICATION_USAGE_FILE_NAME)
 }
 
 fn appdata_dir() -> PathBuf {

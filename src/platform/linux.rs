@@ -24,6 +24,7 @@ const APP_DIR_NAME: &str = "devtoolbox";
 const CONFIG_FILE_NAME: &str = "config.json";
 const LOG_FILE_NAME: &str = "devtoolbox.log";
 const MACHINE_COMMANDS_FILE_NAME: &str = "machine-commands.json";
+const APPLICATION_USAGE_FILE_NAME: &str = "application-usage.json";
 const MACHINE_ID_ENV_VAR: &str = "DEVTOOLBOX_MACHINE_ID";
 const UNKNOWN_MACHINE_ID: &str = "unknown";
 
@@ -45,6 +46,10 @@ pub fn machine_id() -> String {
 /// [`state_log_path`]'s directory, deliberately not [`config_path`]'s.
 pub fn machine_commands_path() -> PathBuf {
     machine_commands_path_with_env(&std_env_lookup)
+}
+
+pub fn application_usage_path() -> PathBuf {
+    application_usage_path_with_env(&std_env_lookup)
 }
 
 /// Base directory for application data: `$XDG_DATA_HOME/devtoolbox`,
@@ -99,6 +104,12 @@ fn machine_commands_path_with_env(env: &EnvLookup) -> PathBuf {
     xdg_base_dir(env, "XDG_STATE_HOME", ".local/state")
         .join(APP_DIR_NAME)
         .join(MACHINE_COMMANDS_FILE_NAME)
+}
+
+fn application_usage_path_with_env(env: &EnvLookup) -> PathBuf {
+    xdg_base_dir(env, "XDG_STATE_HOME", ".local/state")
+        .join(APP_DIR_NAME)
+        .join(APPLICATION_USAGE_FILE_NAME)
 }
 
 /// `/etc/hostname` reader, injectable for testing. `EnvLookup`'s
@@ -290,6 +301,15 @@ mod tests {
     }
 
     #[test]
+    fn application_usage_path_is_machine_local_xdg_state() {
+        let env = env_map(&[("XDG_STATE_HOME", "/custom/state"), ("HOME", "/home/someone")]);
+        assert_eq!(
+            application_usage_path_with_env(&env),
+            PathBuf::from("/custom/state/devtoolbox/application-usage.json")
+        );
+    }
+
+    #[test]
     fn machine_id_returns_env_override_when_set() {
         let env = env_map(&[("DEVTOOLBOX_MACHINE_ID", "test-machine")]);
         let hostname_reader = || -> Option<String> {
@@ -356,5 +376,6 @@ mod tests {
         let _ = state_log_path();
         let _ = machine_id();
         let _ = machine_commands_path();
+        let _ = application_usage_path();
     }
 }
