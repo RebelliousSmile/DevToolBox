@@ -6,6 +6,7 @@ import json
 import platform as platform_module
 import queue
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ def _collect_with_timeouts(
 ) -> tuple[list[Candidate], list[SourceError]]:
     outcomes: dict[str, queue.Queue[tuple[str, Any]]] = {}
     threads: dict[str, threading.Thread] = {}
+    started_at: dict[str, float] = {}
 
     def run(source: str, collector: Collector) -> None:
         try:
@@ -56,13 +58,15 @@ def _collect_with_timeouts(
         outcomes[source] = queue.Queue(maxsize=1)
         thread = threading.Thread(target=run, args=(source, collector), daemon=True)
         threads[source] = thread
+        started_at[source] = time.monotonic()
         thread.start()
 
     candidates: list[Candidate] = []
     errors: list[SourceError] = []
     for source in sorted(collectors):
         thread = threads[source]
-        thread.join(timeout_seconds)
+        remaining = max(0.0, started_at[source] + timeout_seconds - time.monotonic())
+        thread.join(remaining)
         if thread.is_alive():
             errors.append(SourceError(source, "timeout", f"Délai de {timeout_seconds:g}s dépassé"))
             continue
@@ -121,3 +125,10 @@ def to_json(report: RecommendationReport) -> str:
 def empty_candidate(source: str, app_id: str, name: str) -> Candidate:
     """Small public fixture helper used by collector tests."""
     return Candidate(app_id=f"{source}:{app_id}", source=source, name=name, size=SizeEvidence())
+
+
+def default_collectors() -> dict[str, Collector]:
+    """Resolve platform collectors lazily to keep the domain model OS-neutral."""
+    from .collectors import available_collectors
+
+    return available_collectors()

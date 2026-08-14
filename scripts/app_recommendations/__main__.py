@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from .history import load_history
-from .report import build_report, to_json
+from .report import build_report, default_collectors, to_json
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.json:
         print("Le format --json est requis.", file=sys.stderr)
         return 2
-    report = build_report({}, load_history(args.history))
+    report = build_report(default_collectors(), load_history(args.history))
     print(to_json(report))
     return 0
 

@@ -1,0 +1,4 @@
+[
+  {"name": "Editor", "exec": "/usr/bin/editor %F", "package": "editor"},
+  {"name": "Hidden helper", "exec": "/usr/bin/helper", "hidden": true}
+]

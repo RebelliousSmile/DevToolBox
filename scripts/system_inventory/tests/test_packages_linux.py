@@ -116,6 +116,13 @@ class ParseDpkgQueryTests(unittest.TestCase):
         items = packages_linux._parse_dpkg_query(output)
         self.assertEqual([item.name for item in items], ["kept-pkg"])
 
+    def test_public_size_query_reuses_read_only_dpkg_parser(self):
+        output = "desktop-app\t2048\tinstall ok installed\n"
+        with mock.patch.object(packages_linux.shutil, "which", return_value="/usr/bin/dpkg-query"):
+            with mock.patch.object(packages_linux, "_run", return_value=_completed(0, output)):
+                sizes = packages_linux.query_dpkg_installed_sizes()
+        self.assertEqual(sizes, {"desktop-app": 2048 * 1024})
+
 
 class ParsePacmanQueryTests(unittest.TestCase):
     def test_multiple_blocks_separated_by_blank_lines(self):

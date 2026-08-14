@@ -1,6 +1,6 @@
 ---
 objective: Collecter sous Linux les applications utilisateur installées via APT/dpkg, Snap et Flatpak avec des tailles, commandes et protections fiables.
-status: pending
+status: done
 ---
 
 # Instruction

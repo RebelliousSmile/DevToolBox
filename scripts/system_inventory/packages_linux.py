@@ -221,3 +221,18 @@ def scan_packages_linux() -> list[InventoryItem]:
             return _parse_pacman_query(completed.stdout)
         return []
     return []
+
+
+def query_dpkg_installed_sizes() -> dict[str, int | None]:
+    """Return installed dpkg package sizes without exposing scanner internals.
+
+    This read-only primitive is shared with the application recommendation
+    report, which starts from desktop launchers and then looks up only their
+    owning packages instead of presenting every installed library.
+    """
+    if shutil.which("dpkg-query") is None:
+        return {}
+    completed = _run(_DPKG_QUERY_COMMAND)
+    if completed is None or completed.returncode != 0:
+        return {}
+    return {item.name: item.size_bytes for item in _parse_dpkg_query(completed.stdout)}
