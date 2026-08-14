@@ -1,6 +1,6 @@
 ---
 objective: "winclean can safely plan and remove explicitly named local Ollama models through Ollama itself without ever deleting the blob store directly."
-status: in-progress
+status: implemented
 ---
 
 # Plan: Safe Ollama model cleanup
