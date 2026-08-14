@@ -38,6 +38,9 @@ __all__ = [
     "LEVEL_ORDER",
     "CleanCandidate",
     "CleanResult",
+    "CompletedResource",
+    "OperationFailure",
+    "ModuleDiscoveryError",
     "CleanModule",
     "SkippedEntry",
     "DroppedEntry",
@@ -49,6 +52,7 @@ __all__ = [
     "DISCOVERY_MODES",
     "PROC_GUARDS",
     "SKIP_TOKENS",
+    "SKIP_UNATTEMPTED",
     "RECYCLE_FOOTER_LINES",
     "UNMEASURED_CELL",
     "DEFAULT_TRASH_DAYS",
@@ -111,12 +115,14 @@ SKIP_GONE = "skipped-gone"
 SKIP_CHANGED = "skipped-changed"
 SKIP_UNCONFIRMED = "skipped-unconfirmed"
 SKIP_NO_UNDO = "no-undo"
+SKIP_UNATTEMPTED = "skipped-unattempted"
 SKIP_TOKENS: tuple[str, ...] = (
     SKIP_RUNNING,
     SKIP_GONE,
     SKIP_CHANGED,
     SKIP_UNCONFIRMED,
     SKIP_NO_UNDO,
+    SKIP_UNATTEMPTED,
 )
 
 #: Classes de raison du rejet par la chaîne de gardes. `protected` laisse le run
@@ -131,6 +137,14 @@ EXCLUDE_NEEDS_NETWORK = "needs-network"
 # --------------------------------------------------------------------------- #
 # Modèle
 # --------------------------------------------------------------------------- #
+
+
+class ModuleDiscoveryError(Exception):
+    """Erreur de frontière d'un module, avec identifiant machine stable."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -155,6 +169,7 @@ class CleanCandidate:
     no_undo: bool = False
     needs_network: bool = False
     stat_mtime: float | None = None
+    resource_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, str) or not self.label.strip():
@@ -174,6 +189,7 @@ class CleanCandidate:
             "no_undo": self.no_undo,
             "needs_network": self.needs_network,
             "stat_mtime": self.stat_mtime,
+            "resource_id": self.resource_id,
         }
 
 
@@ -196,6 +212,32 @@ class SkippedEntry:
             "label": self.label,
             "path": self.path,
             "status": self.status,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class CompletedResource:
+    """Ressource externe dont l'opération déléguée a réussi."""
+
+    resource_id: str
+
+    def to_json_payload(self) -> dict[str, str]:
+        return {"resource_id": self.resource_id}
+
+
+@dataclass(frozen=True)
+class OperationFailure:
+    """Échec d'une opération externe, sans inventer un nombre d'octets."""
+
+    resource_id: str
+    code: str
+    reason: str
+
+    def to_json_payload(self) -> dict[str, str]:
+        return {
+            "resource_id": self.resource_id,
+            "code": self.code,
             "reason": self.reason,
         }
 
@@ -242,6 +284,8 @@ class CleanResult:
     locked_paths: list[str] = field(default_factory=list)
     recycle_failed_paths: list[str] = field(default_factory=list)
     recycle_events: int = 0
+    completed_resources: list[CompletedResource] = field(default_factory=list)
+    operation_failures: list[OperationFailure] = field(default_factory=list)
 
     def to_json_payload(self) -> dict[str, Any]:
         return {
@@ -255,6 +299,8 @@ class CleanResult:
             "locked_paths": list(self.locked_paths),
             "recycle_failed_paths": list(self.recycle_failed_paths),
             "recycle_events": self.recycle_events,
+            "completed_resources": [r.to_json_payload() for r in self.completed_resources],
+            "operation_failures": [f.to_json_payload() for f in self.operation_failures],
         }
 
 
@@ -870,6 +916,24 @@ def format_result_report(
         )
         for module, path in refused:
             out.append(f"  {module} - {path}")
+
+    completed = [(r.module, item) for r in run.results for item in r.completed_resources]
+    if completed:
+        out.append("")
+        out.append("Ressources externes supprimées :")
+        for module, item in completed:
+            out.append(f"  {module} - {item.resource_id}")
+
+    operation_failures = [
+        (r.module, failure) for r in run.results for failure in r.operation_failures
+    ]
+    if operation_failures:
+        out.append("")
+        out.append("Opérations externes en échec :")
+        for module, failure in operation_failures:
+            out.append(
+                f"  [{failure.code}] {module} - {failure.resource_id} : {failure.reason}"
+            )
 
     if run.recycle_happened:
         # Décision 18 : déclenché par l'événement, pas par `recycled > 0`.

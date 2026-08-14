@@ -14,12 +14,15 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.winclean.common import (  # noqa: E402
     CleanCandidate,
+    CompletedResource,
     CleanModule,
     CleanResult,
     CleanWarning,
     Level,
     Plan,
     RunReport,
+    ModuleDiscoveryError,
+    OperationFailure,
     SkippedEntry,
     SKIP_RUNNING,
     estimate_path,
@@ -82,6 +85,7 @@ class TestModel(unittest.TestCase):
         c = candidate("x", 1)
         self.assertFalse(c.needs_network)
         self.assertIsNone(c.stat_mtime)
+        self.assertIsNone(c.resource_id)
         # Sur le module, l'omission est un TypeError à l'import (décision 11).
         with self.assertRaises(TypeError):
             CleanModule(  # type: ignore[call-arg]
@@ -113,6 +117,8 @@ class TestModel(unittest.TestCase):
                 "locked_paths",
                 "recycle_failed_paths",
                 "recycle_events",
+                "completed_resources",
+                "operation_failures",
             ),
         )
         # `measured` est une **valeur** d'octets nullable, jamais un drapeau : ce
@@ -124,6 +130,25 @@ class TestModel(unittest.TestCase):
         for name in names:
             self.assertNotIn("measurable", name)
             self.assertNotIn("unknown", name)
+
+    def test_discovery_error_carries_a_stable_code(self) -> None:
+        error = ModuleDiscoveryError("adapter-unavailable", "service indisponible")
+        self.assertEqual(error.code, "adapter-unavailable")
+        self.assertEqual(str(error), "service indisponible")
+
+    def test_external_resource_outcomes_are_serialized_without_fake_bytes(self) -> None:
+        result = CleanResult(
+            module="external",
+            completed_resources=[CompletedResource("one")],
+            operation_failures=[OperationFailure("two", "api-error", "refusé")],
+        )
+        payload = result.to_json_payload()
+        self.assertEqual(payload["completed_resources"], [{"resource_id": "one"}])
+        self.assertEqual(
+            payload["operation_failures"],
+            [{"resource_id": "two", "code": "api-error", "reason": "refusé"}],
+        )
+        self.assertIsNone(payload["freed"])
 
     def test_empty_label_is_rejected_at_construction(self) -> None:
         for bad in ("", "   "):
