@@ -10,6 +10,7 @@ mod icons;
 mod applications;
 mod linux;
 mod platform;
+mod python_runtime;
 mod storage;
 mod ui;
 mod windows;

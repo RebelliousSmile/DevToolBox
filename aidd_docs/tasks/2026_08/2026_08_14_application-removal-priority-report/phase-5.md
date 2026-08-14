@@ -1,6 +1,6 @@
 ---
 objective: Afficher le rapport dans une vue egui native réactive avec rafraîchissement, filtres, explications et copie de commande.
-status: pending
+status: done
 ---
 
 # Instruction

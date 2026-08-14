@@ -77,16 +77,21 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 use eframe::egui;
 
+use crate::applications::{
+    self, RecommendationReport, ReportEvent, SystemProcessProvider, UsageService,
+};
 use crate::icons::backend::IconBackend;
 use crate::icons::egui_backend::EguiIconBackend;
 #[cfg(not(target_os = "linux"))]
 use crate::icons::resolve_icon;
 use crate::icons::{decode_resize_file, icons_dirs, IconResolution};
 use crate::storage::{self, CommandResolution, Config, MachineCommands, StorageError};
+use crate::ui::applications_view::{self, ApplicationFilters};
 use crate::ui::automations_view::{self, AutomationRow};
 use crate::ui::dialogs::{self, DialogKind, DialogOutcome};
 use crate::ui::terminal_view::{self, TerminalEvent};
@@ -133,7 +138,11 @@ struct DisplayGroup {
 /// Non-machine-specific commands always resolve to `Resolved`, so this is
 /// unconditionally `(true, None)` for them — the existing-card no-regression
 /// guarantee this lot's acceptance criteria call for.
-fn resolution_fields(command: &storage::Command, overrides: &MachineCommands, machine_id: &str) -> (bool, Option<String>) {
+fn resolution_fields(
+    command: &storage::Command,
+    overrides: &MachineCommands,
+    machine_id: &str,
+) -> (bool, Option<String>) {
     match storage::resolve_command(command, overrides, machine_id) {
         CommandResolution::Resolved(_) => (true, None),
         CommandResolution::Unconfigured {
@@ -159,7 +168,11 @@ fn resolution_fields(command: &storage::Command, overrides: &MachineCommands, ma
 /// callers never hold a borrow of `config` while later mutating it. Each
 /// card's `is_configured`/`disabled_message` is computed via
 /// `storage::resolve_command` against `overrides`/`machine_id` (Part 3).
-fn build_display_groups(config: &Config, overrides: &MachineCommands, machine_id: &str) -> Vec<DisplayGroup> {
+fn build_display_groups(
+    config: &Config,
+    overrides: &MachineCommands,
+    machine_id: &str,
+) -> Vec<DisplayGroup> {
     if config.default_settings.show_categories {
         storage::group_commands_by_category(config)
             .into_iter()
@@ -306,6 +319,7 @@ enum ActiveView {
     Actions,
     Terminal,
     Automations,
+    Applications,
 }
 
 /// An action deferred behind a confirm dialog — applied by
@@ -345,6 +359,16 @@ pub struct EguiApp {
     terminal_running: bool,
     /// `None` until the Automations view has fetched at least once.
     automations: Option<Result<Vec<AutomationRow>, String>>,
+    application_report: Option<RecommendationReport>,
+    application_error: Option<String>,
+    application_loading: bool,
+    application_generation: u64,
+    application_tx: Sender<ReportEvent>,
+    application_rx: Receiver<ReportEvent>,
+    application_filters: ApplicationFilters,
+    application_selected: Option<String>,
+    usage_service: Option<UsageService>,
+    report_spawning_enabled: bool,
     /// Per-machine command overrides, loaded once at startup (Part 3) via
     /// `storage::load_machine_commands_from(platform::machine_commands_path())`.
     /// A missing file or load error both fall back to an empty map — this
@@ -373,13 +397,21 @@ impl EguiApp {
                     MachineCommands::default()
                 });
         let machine_id = crate::platform::machine_id();
-        Self::from_parts(
+        let usage_service = UsageService::start(
+            crate::platform::application_usage_path(),
+            Arc::new(SystemProcessProvider),
+        );
+        let mut app = Self::from_parts(
             config,
             None,
             EguiIconBackend::new(cc.egui_ctx.clone()),
             machine_commands,
             machine_id,
-        )
+            Some(usage_service),
+            true,
+        );
+        app.refresh_applications();
+        app
     }
 
     /// Test-only constructor: builds an `EguiApp` from an explicit `Config`
@@ -401,6 +433,8 @@ impl EguiApp {
             EguiIconBackend::new(egui::Context::default()),
             MachineCommands::default(),
             "test-machine".to_string(),
+            None,
+            false,
         )
     }
 
@@ -410,7 +444,10 @@ impl EguiApp {
         icon_backend: EguiIconBackend,
         machine_commands: MachineCommands,
         machine_id: String,
+        usage_service: Option<UsageService>,
+        report_spawning_enabled: bool,
     ) -> Self {
+        let (application_tx, application_rx) = std::sync::mpsc::channel();
         Self {
             config,
             config_path,
@@ -426,6 +463,16 @@ impl EguiApp {
             terminal_rx: None,
             terminal_running: false,
             automations: None,
+            application_report: None,
+            application_error: None,
+            application_loading: false,
+            application_generation: 0,
+            application_tx,
+            application_rx,
+            application_filters: ApplicationFilters::default(),
+            application_selected: None,
+            usage_service,
+            report_spawning_enabled,
             machine_commands,
             machine_id,
         }
@@ -436,6 +483,55 @@ impl EguiApp {
             text: text.into(),
             is_error,
         });
+    }
+
+    fn refresh_applications(&mut self) {
+        self.application_generation = self.application_generation.saturating_add(1);
+        self.application_loading = true;
+        if self.report_spawning_enabled {
+            applications::spawn_report(
+                self.application_generation,
+                crate::platform::application_usage_path(),
+                self.application_tx.clone(),
+            );
+        }
+    }
+
+    fn drain_application_events(&mut self) {
+        let mut events = Vec::new();
+        while let Ok(event) = self.application_rx.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            if event.generation != self.application_generation {
+                continue;
+            }
+            self.application_loading = false;
+            match event.result {
+                Ok(report) => {
+                    if let Some(service) = &self.usage_service {
+                        if let Err(error) = service.replace_targets(report.usage_targets()) {
+                            log::warn!("application usage targets unavailable: {error}");
+                        }
+                    }
+                    if self.application_selected.as_ref().is_none_or(|selected| {
+                        !report
+                            .candidates
+                            .iter()
+                            .any(|candidate| &candidate.app_id == selected)
+                    }) {
+                        self.application_selected = report
+                            .candidates
+                            .iter()
+                            .find(|candidate| !candidate.protection.protected)
+                            .map(|candidate| candidate.app_id.clone());
+                    }
+                    self.application_error = None;
+                    self.application_report = Some(report);
+                }
+                Err(error) => self.application_error = Some(error),
+            }
+        }
     }
 
     fn persist(&mut self) -> Result<(), StorageError> {
@@ -544,7 +640,11 @@ impl EguiApp {
             match storage::toggle_favorite(&mut self.config, &command_id) {
                 Ok(new_state) => match self.persist() {
                     Ok(()) => {
-                        let word = if new_state { "ajouté aux" } else { "retiré des" };
+                        let word = if new_state {
+                            "ajouté aux"
+                        } else {
+                            "retiré des"
+                        };
                         self.set_status(format!("'{command_id}' {word} favoris."), false);
                     }
                     Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
@@ -616,13 +716,15 @@ impl EguiApp {
     /// picked "Oui" — see [`ActiveDialog::on_confirm`].
     fn resolve_pending_action(&mut self, action: PendingAction) {
         match action {
-            PendingAction::RemoveCategory(id) => match storage::remove_category(&mut self.config, &id) {
-                Ok(()) => match self.persist() {
-                    Ok(()) => self.set_status("Catégorie supprimée.", false),
-                    Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
-                },
-                Err(err) => self.set_status(err.to_string(), true),
-            },
+            PendingAction::RemoveCategory(id) => {
+                match storage::remove_category(&mut self.config, &id) {
+                    Ok(()) => match self.persist() {
+                        Ok(()) => self.set_status("Catégorie supprimée.", false),
+                        Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+                    },
+                    Err(err) => self.set_status(err.to_string(), true),
+                }
+            }
         }
     }
 
@@ -715,10 +817,15 @@ impl EguiApp {
         }
 
         self.drain_terminal_events();
+        self.drain_application_events();
         if self.terminal_running {
             // Keep polling for output while a command is in flight, even if
             // the user has switched away from the Terminal view.
             ui.ctx().request_repaint();
+        }
+        if self.application_loading {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         ui.horizontal(|ui| {
@@ -728,6 +835,11 @@ impl EguiApp {
                 &mut self.active_view,
                 ActiveView::Automations,
                 "Automatisations",
+            );
+            ui.selectable_value(
+                &mut self.active_view,
+                ActiveView::Applications,
+                "Applications",
             );
             if ui.button("À propos").clicked() {
                 self.active_dialog = Some(ActiveDialog {
@@ -745,6 +857,7 @@ impl EguiApp {
             ActiveView::Actions => self.render_actions_view(ui),
             ActiveView::Terminal => self.render_terminal_view(ui),
             ActiveView::Automations => self.render_automations_view(ui),
+            ActiveView::Applications => self.render_applications_view(ui),
         }
     }
 
@@ -945,6 +1058,20 @@ impl EguiApp {
             }
         }
     }
+
+    fn render_applications_view(&mut self, ui: &mut egui::Ui) {
+        let refresh = applications_view::render(
+            ui,
+            self.application_report.as_ref(),
+            self.application_error.as_deref(),
+            self.application_loading,
+            &mut self.application_filters,
+            &mut self.application_selected,
+        );
+        if refresh {
+            self.refresh_applications();
+        }
+    }
 }
 
 /// Empty-state message for the Automations view. Both Windows
@@ -1018,6 +1145,24 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn sample_application_report() -> RecommendationReport {
+        serde_json::from_str(
+            r#"{
+              "schema_version":1,"generated_at":"2026-08-14T12:00:00Z","platform":"linux",
+              "candidates":[{
+                "app_id":"apt:editor","source":"apt","name":"Editor",
+                "size":{"installed_bytes":1073741824,"reclaimable_bytes":null,"method":"dpkg","scope":"paquet","confidence":"high"},
+                "executable_hints":["/usr/bin/editor"],
+                "usage":{"kind":"not_observed","last_seen":null,"tracked_since":"2026-01-01T00:00:00Z","covered_days":90,"confidence":"medium"},
+                "protection":{"protected":false,"reasons":[]},
+                "command":{"value":"sudo apt-get remove -- editor","origin":"manager_verified"},
+                "score":50,"confidence":"medium","reasons":["Empreinte disque : +25"],"metadata":{}
+              }],"source_errors":[],"warnings":[]
+            }"#,
+        )
+        .unwrap()
     }
 
     // -- Pure build_display_groups tests -------------------------------------
@@ -1201,17 +1346,24 @@ mod tests {
 
         let config = sample_config();
         assert!(
-            !config.commands.iter().find(|c| c.id == "cmd").unwrap().is_favorite,
+            !config
+                .commands
+                .iter()
+                .find(|c| c.id == "cmd")
+                .unwrap()
+                .is_favorite,
             "precondition: 'cmd' starts as not-favorite"
         );
 
         let app = EguiApp::new_for_test(config, config_path.clone());
-        let mut harness = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-            |ui, app: &mut EguiApp| {
-                app.ui_content(ui);
-            },
-            app,
-        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
 
         // First pass lays out the grid; the "cmd" card's favorite toggle is
         // rendered with label "☆ Favori" (not yet a favorite).
@@ -1246,12 +1398,14 @@ mod tests {
 
         let config = sample_config();
         let app = EguiApp::new_for_test(config, config_path.clone());
-        let mut harness = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-            |ui, app: &mut EguiApp| {
-                app.ui_content(ui);
-            },
-            app,
-        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
 
         harness.run();
         // Open the collapsed "Catégories" panel first.
@@ -1281,7 +1435,10 @@ mod tests {
 
         let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
         assert!(
-            reloaded.categories.iter().any(|c| c.id == "net" && c.name == "Réseau"),
+            reloaded
+                .categories
+                .iter()
+                .any(|c| c.id == "net" && c.name == "Réseau"),
             "category added via simulated UI did not persist to disk; categories={:?}",
             reloaded.categories
         );
@@ -1310,12 +1467,14 @@ mod tests {
 
         let config = sample_config();
         let app = EguiApp::new_for_test(config, config_path.clone());
-        let mut harness = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-            |ui, app: &mut EguiApp| {
-                app.ui_content(ui);
-            },
-            app,
-        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
 
         harness.run();
         harness.get_by_label("Catégories").click();
@@ -1376,12 +1535,14 @@ mod tests {
 
         let config = sample_config();
         let app = EguiApp::new_for_test(config, config_path.clone());
-        let mut harness = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-            |ui, app: &mut EguiApp| {
-                app.ui_content(ui);
-            },
-            app,
-        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
 
         harness.run();
         harness.get_by_label("Catégories").click();
@@ -1433,12 +1594,14 @@ mod tests {
 
         let config = sample_config();
         let app = EguiApp::new_for_test(config, config_path.clone());
-        let mut harness = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-            |ui, app: &mut EguiApp| {
-                app.ui_content(ui);
-            },
-            app,
-        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
 
         harness.run();
         harness.get_by_label("Terminal").click();
@@ -1520,12 +1683,14 @@ mod tests {
 
         let config = sample_config();
         let app = EguiApp::new_for_test(config, config_path.clone());
-        let mut harness = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-            |ui, app: &mut EguiApp| {
-                app.ui_content(ui);
-            },
-            app,
-        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
 
         harness.run();
         harness.get_by_label("Automatisations").click();
@@ -1554,5 +1719,107 @@ mod tests {
         harness.run();
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_application_generation_is_ignored_and_current_one_settles() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-applications-generation",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = EguiApp::new_for_test(sample_config(), dir.join("config.json"));
+        app.application_generation = 2;
+        app.application_loading = true;
+        app.application_tx
+            .send(ReportEvent {
+                generation: 1,
+                result: Ok(sample_application_report()),
+            })
+            .unwrap();
+        app.drain_application_events();
+        assert!(app.application_report.is_none());
+        assert!(app.application_loading);
+
+        app.application_tx
+            .send(ReportEvent {
+                generation: 2,
+                result: Ok(sample_application_report()),
+            })
+            .unwrap();
+        app.drain_application_events();
+        assert_eq!(app.application_report.as_ref().unwrap().candidates.len(), 1);
+        assert!(!app.application_loading);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_refresh_keeps_the_last_application_report() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-applications-error",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = EguiApp::new_for_test(sample_config(), dir.join("config.json"));
+        app.application_report = Some(sample_application_report());
+        app.application_generation = 3;
+        app.application_loading = true;
+        app.application_tx
+            .send(ReportEvent {
+                generation: 3,
+                result: Err("Python indisponible".to_string()),
+            })
+            .unwrap();
+
+        app.drain_application_events();
+
+        assert_eq!(app.application_report.as_ref().unwrap().candidates.len(), 1);
+        assert_eq!(
+            app.application_error.as_deref(),
+            Some("Python indisponible")
+        );
+        assert!(!app.application_loading);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn applications_view_filters_selects_copies_and_refreshes() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-applications-view",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = EguiApp::new_for_test(sample_config(), dir.join("config.json"));
+        app.application_report = Some(sample_application_report());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Applications").click();
+        harness.run();
+        assert!(harness.query_by_label_contains("Editor").is_some());
+
+        harness.get_by_label("Recherche").focus();
+        harness.run();
+        harness.get_by_label("Recherche").type_text("absente");
+        harness.run();
+        assert!(harness.query_by_label_contains("Editor").is_none());
+
+        harness.state_mut().application_filters.search.clear();
+        harness.run();
+        harness.get_by_label("Editor").click();
+        harness.run();
+        harness.get_by_label("Copier la commande").click();
+        harness.run_steps(1);
+        assert!(harness.output().platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::CopyText(text) if text == "sudo apt-get remove -- editor")
+        }));
+
+        harness.get_by_label("Rafraîchir").click();
+        harness.run_steps(1);
+        assert_eq!(harness.state().application_generation, 1);
+        assert!(harness.state().application_loading);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

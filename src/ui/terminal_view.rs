@@ -68,7 +68,9 @@ pub fn tokenize(command: &str) -> Result<(String, Vec<String>), String> {
 
     let mut iter = tokens.into_iter();
     // `command` was already checked non-empty above, so at least one token exists.
-    let program = iter.next().expect("non-empty command yields at least one token");
+    let program = iter
+        .next()
+        .expect("non-empty command yields at least one token");
     Ok((program, iter.collect()))
 }
 
@@ -86,40 +88,16 @@ struct ActionSpec {
 /// takes priority; otherwise ancestors of the current working directory and
 /// executable are searched for a `scripts` directory.
 fn action_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("DEVTOOLBOX_HOME") {
-        return PathBuf::from(root);
-    }
-
-    let mut candidates = Vec::new();
-    if let Ok(current) = std::env::current_dir() {
-        candidates.push(current);
-    }
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(parent) = executable.parent() {
-            candidates.push(parent.to_path_buf());
-        }
-    }
-    for candidate in &candidates {
-        for ancestor in candidate.ancestors() {
-            if ancestor.join("scripts").is_dir() {
-                return ancestor.to_path_buf();
-            }
-        }
-    }
-    candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::python_runtime::action_root()
 }
 
 /// `true` if an executable named `name` exists somewhere on `PATH` —
 /// used only to pick between the `python3`/`python` fallbacks below (no
 /// need for this on Windows, where `python3` is not the norm, hence no
 /// equivalent in `crate::windows::process::resolve_action`).
+#[cfg(test)]
 fn exists_on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
-        .unwrap_or(false)
+    crate::python_runtime::exists_on_path(name)
 }
 
 /// Resolve `@python <script> [args...]` into a real program/args/cwd,
@@ -155,23 +133,13 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, String> {
         root.join(script)
     };
     if !script_path.is_file() {
-        return Err(format!("Python script not found: {}", script_path.display()));
+        return Err(format!(
+            "Python script not found: {}",
+            script_path.display()
+        ));
     }
     let working_directory = script_path.parent().map(Path::to_path_buf);
-    let local_python = working_directory
-        .as_ref()
-        .map(|directory| directory.join(".venv").join("bin").join("python"))
-        .filter(|candidate| candidate.is_file());
-    let python = local_python
-        .map(|path| path.display().to_string())
-        .or_else(|| std::env::var("DEVTOOLBOX_PYTHON").ok())
-        .unwrap_or_else(|| {
-            if exists_on_path("python3") {
-                "python3".to_string()
-            } else {
-                "python".to_string()
-            }
-        });
+    let python = crate::python_runtime::python_for_script(&script_path);
     let mut resolved_args = vec![script_path.display().to_string()];
     resolved_args.extend(script_args.iter().cloned());
     Ok(ActionSpec {
@@ -223,7 +191,10 @@ pub fn launch_captured(command: &str, sender: Sender<TerminalEvent>) -> Result<u
     let spec = resolve_action(command, &action_root())?;
 
     let mut process = std::process::Command::new(&spec.program);
-    process.args(&spec.args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    process
+        .args(&spec.args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(directory) = &spec.working_directory {
         process.current_dir(directory);
     }
@@ -380,7 +351,10 @@ mod tests {
     fn launch_captured_reports_failure_for_a_nonexistent_program() {
         let (tx, rx) = channel();
         let result = launch_captured("devtoolbox-definitely-not-a-real-binary --x", tx);
-        assert!(result.is_err(), "spawning a nonexistent program must fail, not panic");
+        assert!(
+            result.is_err(),
+            "spawning a nonexistent program must fail, not panic"
+        );
         drop(rx);
     }
 
@@ -399,7 +373,8 @@ mod tests {
 
     #[test]
     fn python_action_resolves_script_and_working_directory() {
-        let temp = std::env::temp_dir().join(format!("devtoolbox_terminal_view_{}", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("devtoolbox_terminal_view_{}", std::process::id()));
         let script_dir = temp.join("scripts").join("sample");
         std::fs::create_dir_all(&script_dir).unwrap();
         let script = script_dir.join("sample.py");
@@ -424,7 +399,10 @@ mod tests {
 
     #[test]
     fn python_action_prefers_local_venv_interpreter() {
-        let temp = std::env::temp_dir().join(format!("devtoolbox_terminal_view_venv_{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!(
+            "devtoolbox_terminal_view_venv_{}",
+            std::process::id()
+        ));
         let script_dir = temp.join("scripts").join("sample");
         std::fs::create_dir_all(&script_dir).unwrap();
         std::fs::write(script_dir.join("sample.py"), "print('ok')").unwrap();
@@ -468,7 +446,10 @@ mod tests {
             eprintln!("skipping: no python3/python interpreter on PATH");
             return;
         }
-        let temp = std::env::temp_dir().join(format!("devtoolbox_terminal_view_e2e_{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!(
+            "devtoolbox_terminal_view_e2e_{}",
+            std::process::id()
+        ));
         let script_dir = temp.join("scripts");
         std::fs::create_dir_all(&script_dir).unwrap();
         std::fs::write(
@@ -477,10 +458,7 @@ mod tests {
         )
         .unwrap();
 
-        let command = format!(
-            "@python {}",
-            script_dir.join("hello.py").display()
-        );
+        let command = format!("@python {}", script_dir.join("hello.py").display());
         let (tx, rx) = channel();
         launch_captured(&command, tx).expect("spawn @python action");
 
@@ -502,7 +480,10 @@ mod tests {
                 TerminalEvent::Started { .. } => {}
             }
         }
-        assert!(saw_output, "expected the real python script's stdout to be captured");
+        assert!(
+            saw_output,
+            "expected the real python script's stdout to be captured"
+        );
         assert!(finished, "expected a Finished event");
 
         let _ = std::fs::remove_dir_all(temp);

@@ -18,6 +18,7 @@
 //! remaining consumer once `app.rs` was gone, so it was deleted too rather
 //! than left as dead code.
 
+pub mod applications_view;
 pub mod automations_view;
 pub mod dialogs;
 pub mod egui_app;
