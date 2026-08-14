@@ -32,6 +32,29 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _Opener = Callable[..., Any]
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Interdit qu'une origine loopback redirige la requête hors de la machine."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "Redirection Ollama interdite.", headers, fp
+        )
+
+
+def _build_local_opener():
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _RejectRedirects(),
+    )
+
+
+_LOCAL_OPENER = _build_local_opener()
+
+
+def _local_urlopen(request, *, timeout):
+    return _LOCAL_OPENER.open(request, timeout=timeout)
+
+
 @dataclass(frozen=True)
 class ModelInfo:
     name: str
@@ -86,7 +109,7 @@ def _request_json(
     path: str,
     *,
     payload: Mapping[str, str] | None = None,
-    opener: _Opener = urllib.request.urlopen,
+    opener: _Opener | None = None,
 ) -> Any:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -96,7 +119,8 @@ def _request_json(
         headers={"Content-Type": "application/json"} if body is not None else {},
     )
     try:
-        with opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        transport = _local_urlopen if opener is None else opener
+        with transport(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", None)
             if status is None:
                 status = response.getcode()
@@ -143,6 +167,10 @@ def _model_rows(payload: Any, *, require_size: bool) -> dict[str, ModelInfo]:
             raise ModuleDiscoveryError(
                 "ollama-payload-duplicate", f"Ollama a renvoyé deux fois le modèle {name}."
             )
+        if require_size and "size" not in row:
+            raise ModuleDiscoveryError(
+                "ollama-payload-invalid", f"La taille du modèle {name} est absente."
+            )
         size = row.get("size", 0)
         if require_size and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
             raise ModuleDiscoveryError(
@@ -152,7 +180,7 @@ def _model_rows(payload: Any, *, require_size: bool) -> dict[str, ModelInfo]:
     return models
 
 
-def _state(endpoint: str, opener: _Opener) -> tuple[dict[str, ModelInfo], set[str]]:
+def _state(endpoint: str, opener: _Opener | None) -> tuple[dict[str, ModelInfo], set[str]]:
     installed = _model_rows(
         _request_json(endpoint, "GET", "/api/tags", opener=opener), require_size=True
     )
@@ -168,7 +196,7 @@ def discover_ollama_models(
     *,
     requested_models: Sequence[str],
     env: Mapping[str, str] | None = None,
-    opener: _Opener = urllib.request.urlopen,
+    opener: _Opener | None = None,
     **_kwargs: Any,
 ) -> list[CleanCandidate]:
     """Découvre uniquement les noms exacts explicitement demandés."""
@@ -206,7 +234,7 @@ def clean_ollama_models(
     *,
     candidates: Sequence[CleanCandidate],
     env: Mapping[str, str] | None = None,
-    opener: _Opener = urllib.request.urlopen,
+    opener: _Opener | None = None,
     **_kwargs: Any,
 ) -> CleanResult:
     """Revalide puis supprime chaque modèle, en s'arrêtant au premier échec API."""

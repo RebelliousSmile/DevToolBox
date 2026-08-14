@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.request
 import unittest
+from unittest import mock
 
 from scripts.winclean import mod_ollama
 from scripts.winclean.common import (
@@ -97,6 +99,34 @@ class EndpointTest(unittest.TestCase):
                     )
                 self.assertEqual(opener.requests, [])
 
+    def test_production_opener_ignores_environment_proxies(self) -> None:
+        with mock.patch.object(
+            urllib.request,
+            "getproxies",
+            return_value={"http": "http://remote.invalid:9999"},
+        ) as getproxies:
+            opener = mod_ollama._build_local_opener()
+        getproxies.assert_not_called()
+        proxy_handlers = [
+            handler
+            for handler in opener.handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        self.assertEqual(proxy_handlers, [])
+
+    def test_production_opener_rejects_redirects(self) -> None:
+        handler = mod_ollama._RejectRedirects()
+        request = urllib.request.Request("http://127.0.0.1:11434/api/tags")
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "http://remote.invalid/api/tags",
+            )
+
 
 class DiscoveryTest(unittest.TestCase):
     def test_exact_unique_stopped_models_become_pathless_candidates(self) -> None:
@@ -129,6 +159,7 @@ class DiscoveryTest(unittest.TestCase):
             (urllib.error.URLError("down"), "ollama-transport-error"),
             (Response({}), "ollama-payload-invalid"),
             (RawResponse(b"not-json"), "ollama-payload-invalid"),
+            (Response({"models": [{"name": "a"}]}), "ollama-payload-invalid"),
             (Response({"models": [{"name": "a", "size": -1}]}), "ollama-payload-invalid"),
             (Response(tags(("a", 1), ("a", 2))), "ollama-payload-duplicate"),
         )
@@ -140,15 +171,17 @@ class DiscoveryTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, code)
 
     def test_running_model_payload_also_requires_valid_sizes(self) -> None:
-        opener = QueueOpener(
-            Response(tags(("a", 1))),
-            Response({"models": [{"name": "a", "size": "large"}]}),
-        )
-        with self.assertRaises(ModuleDiscoveryError) as caught:
-            mod_ollama.discover_ollama_models(
-                requested_models=("a",), env={}, opener=opener
-            )
-        self.assertEqual(caught.exception.code, "ollama-payload-invalid")
+        for row in ({"name": "a"}, {"name": "a", "size": "large"}):
+            with self.subTest(row=row):
+                opener = QueueOpener(
+                    Response(tags(("a", 1))),
+                    Response({"models": [row]}),
+                )
+                with self.assertRaises(ModuleDiscoveryError) as caught:
+                    mod_ollama.discover_ollama_models(
+                        requested_models=("a",), env={}, opener=opener
+                    )
+                self.assertEqual(caught.exception.code, "ollama-payload-invalid")
 
 
 class CleanTest(unittest.TestCase):

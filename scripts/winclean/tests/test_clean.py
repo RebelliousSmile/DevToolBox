@@ -1775,7 +1775,7 @@ class TestBinAllowanceWarning(unittest.TestCase):
     def test_an_unmeasurable_candidate_gets_its_own_code_in_the_payload(self):
         code, out, err, path = self._plan(None)
         self.assertEqual(code, clean.EXIT_OK, err)
-        codes = [warning["code"] for warning in json.loads(out)["warnings"]]
+        codes = self._codes(out)
         self.assertIn("recycle-bin-allowance-unknown", codes)
         self.assertNotIn("recycle-bin-allowance", codes)
         warning = next(
@@ -1797,6 +1797,47 @@ class TestBinAllowanceWarning(unittest.TestCase):
             code, out, err = run_cli(["--root", str(tmp), "--level", "moderate"])
         self.assertEqual(code, clean.EXIT_OK, err)
         self.assertIn("peut dépasser", out)
+
+    def test_a_pathless_candidate_is_never_sized_against_a_volume(self):
+        """`splitdrive(None)` planterait, et cette étape court avant la répartition."""
+        tmp = _tempdir(self)
+        with docker_stub(), mock.patch.object(
+            clean, "volume_of", side_effect=clean.volume_of
+        ) as volumes:
+            code, out, err = run_cli(
+                [
+                    "--root",
+                    str(tmp),
+                    "--level",
+                    "moderate",
+                    "--only",
+                    "docker-light",
+                    "--json",
+                ]
+            )
+        self.assertEqual(code, clean.EXIT_OK, err)
+        volumes.assert_not_called()
+        codes = self._codes(out)
+        # `ceiling-total-partial` reste dû : un candidat sans prix rend le total
+        # partiel. Seul le quota de la corbeille est hors sujet ici.
+        self.assertNotIn("recycle-bin-allowance", codes)
+        self.assertNotIn("recycle-bin-allowance-unknown", codes)
+
+    def test_the_warning_changes_neither_the_mode_nor_the_exit_code(self):
+        tmp = _tempdir(self)
+        target = tmp / "cache"
+        target.mkdir()
+        write(target / "a.bin", 500)
+        module = moderate_module("modere", target, 500)
+        with registry_of(module), recycle_stub() as recycled, deletion_spy() as deletions:
+            with mock.patch.object(clean.shutil, "disk_usage", return_value=usage(1000)):
+                code, out, err = run_cli(
+                    ["--root", str(tmp), "--level", "moderate", "--apply", "--yes"]
+                )
+        self.assertEqual(code, clean.EXIT_OK, err)
+        self.assertIn("peut dépasser", out)
+        self.assertEqual(recycled["recycle"], [str(target)])
+        self.assertEqual(deletions, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -2060,48 +2101,6 @@ class TestOllamaExplicitSelection(unittest.TestCase):
             self.assertIn(name, out + err)
         self.assertIn(SKIP_UNATTEMPTED, out)
         self.assertIn("Opérations externes en échec", out)
-
-    def test_a_pathless_candidate_is_never_sized_against_a_volume(self):
-        """`splitdrive(None)` planterait, et cette étape court avant la répartition."""
-        tmp = _tempdir(self)
-        with docker_stub(), mock.patch.object(
-            clean, "volume_of", side_effect=clean.volume_of
-        ) as volumes:
-            code, out, err = run_cli(
-                [
-                    "--root",
-                    str(tmp),
-                    "--level",
-                    "moderate",
-                    "--only",
-                    "docker-light",
-                    "--json",
-                ]
-            )
-        self.assertEqual(code, clean.EXIT_OK, err)
-        volumes.assert_not_called()
-        codes = [warning["code"] for warning in json.loads(out)["warnings"]]
-        # `ceiling-total-partial` reste dû : un candidat sans prix rend le total
-        # partiel. Seul le quota de la corbeille est hors sujet ici.
-        self.assertNotIn("recycle-bin-allowance", codes)
-        self.assertNotIn("recycle-bin-allowance-unknown", codes)
-
-    def test_the_warning_changes_neither_the_mode_nor_the_exit_code(self):
-        tmp = _tempdir(self)
-        target = tmp / "cache"
-        target.mkdir()
-        write(target / "a.bin", 500)
-        module = moderate_module("modere", target, 500)
-        with registry_of(module), recycle_stub() as recycled, deletion_spy() as deletions:
-            with mock.patch.object(clean.shutil, "disk_usage", return_value=usage(1000)):
-                code, out, err = run_cli(
-                    ["--root", str(tmp), "--level", "moderate", "--apply", "--yes"]
-                )
-        self.assertEqual(code, clean.EXIT_OK, err)
-        self.assertIn("peut dépasser", out)
-        self.assertEqual(recycled["recycle"], [str(target)])
-        self.assertEqual(deletions, [])
-
 
 # --------------------------------------------------------------------------- #
 # `%TEMP%` : le garde secondaire, et jusqu'où il voit
