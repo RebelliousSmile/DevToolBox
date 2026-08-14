@@ -259,6 +259,7 @@ class TestOwnerProcessWarning(unittest.TestCase):
             discovery=DISCOVERY_FIXED,
             proc_guard=PROC_GUARD_WARN_ONLY,
             needs_network=False,
+            opt_in=False,
         )
         with mock.patch.object(procs, "is_running", return_value={"outil.exe"}):
             self.assertIsNone(registry_mod.proc_guard_skip(module, candidate, yes=False))
@@ -284,6 +285,7 @@ class TestOwnerProcessWarning(unittest.TestCase):
             discovery=DISCOVERY_FIXED,
             proc_guard=PROC_GUARD_WARN_AND_SKIP,
             needs_network=False,
+            opt_in=False,
         )
         weak = dataclasses.replace(strong, proc_guard=PROC_GUARD_WARN_ONLY)
         self.assertIsNotNone(
@@ -346,6 +348,7 @@ class TestMissingRequirement(unittest.TestCase):
             discovery=DISCOVERY_FIXED,
             proc_guard=None,
             needs_network=False,
+            opt_in=False,
         )
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):

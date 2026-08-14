@@ -308,7 +308,7 @@ class CleanResult:
 class CleanModule:
     """Enregistrement déclaratif d'un module.
 
-    `discovery`, `proc_guard` et `needs_network` sont **sans valeur par défaut** :
+    `discovery`, `proc_guard`, `needs_network` et `opt_in` sont **sans valeur par défaut** :
     enregistrer un module sans le classer est un `TypeError` à l'import, pas un
     défaut silencieux. Leur unique site de déclaration est `registry_mod.py`.
     """
@@ -321,6 +321,7 @@ class CleanModule:
     discovery: str
     proc_guard: str | None
     needs_network: bool
+    opt_in: bool
 
 
 @dataclass

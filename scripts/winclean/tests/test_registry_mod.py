@@ -90,6 +90,7 @@ EXPECTED_DISCOVERY: dict[str, str] = {
     "browser-cache-linux": DISCOVERY_FIXED,
     "user-cache-linux": DISCOVERY_FIXED,
     "journal-vacuum": DISCOVERY_PATHLESS,
+    "ollama-models": DISCOVERY_PATHLESS,
 }
 
 EXPECTED_PROC_GUARD: dict[str, str | None] = {
@@ -120,6 +121,7 @@ EXPECTED_PROC_GUARD: dict[str, str | None] = {
     "browser-cache-linux": PROC_GUARD_WARN_ONLY,
     "user-cache-linux": None,
     "journal-vacuum": None,
+    "ollama-models": None,
 }
 
 EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
@@ -152,6 +154,11 @@ EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
     "browser-cache-linux": False,
     "user-cache-linux": False,
     "journal-vacuum": False,
+    "ollama-models": True,
+}
+
+EXPECTED_OPT_IN: dict[str, bool] = {
+    name: name == "ollama-models" for name in EXPECTED_DISCOVERY
 }
 
 
@@ -222,6 +229,12 @@ class TestDeclaredTables(unittest.TestCase):
         for name, expected in EXPECTED_NEEDS_NETWORK.items():
             with self.subTest(module=name):
                 self.assertIs(MODULES[name].needs_network, expected)
+
+    def test_opt_in_covers_the_registered_set_exactly(self) -> None:
+        self.assertEqual(set(EXPECTED_OPT_IN), set(MODULES))
+        for name, expected in EXPECTED_OPT_IN.items():
+            with self.subTest(module=name):
+                self.assertIs(MODULES[name].opt_in, expected)
 
     def test_the_three_discovery_modes_are_all_represented(self) -> None:
         # La moitié comportementale de `pathless` arrive avec `docker-light` :
@@ -306,6 +319,8 @@ class TestDiscoveryBehaviour(unittest.TestCase):
             )
             stack.enter_context(mock.patch.object(procs, "is_running", return_value=set()))
             for name, module in MODULES.items():
+                if module.opt_in:
+                    continue
                 found[name] = [
                     c.path for c in discover_module(module, roots=[empty], max_depth=6)
                 ]
@@ -331,6 +346,8 @@ class TestNeedsNetworkStamping(unittest.TestCase):
           with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
             with mock.patch.object(procs, "is_running", return_value=set()):
                 for name, module in MODULES.items():
+                    if module.opt_in:
+                        continue
                     found = discover_module(module, roots=[root], max_depth=6)
                     for candidate in found:
                         seen += 1
@@ -349,6 +366,8 @@ class TestNeedsNetworkStamping(unittest.TestCase):
           with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
             with mock.patch.object(procs, "is_running", return_value=set()):
                 for module in MODULES.values():
+                    if module.opt_in:
+                        continue
                     candidates.extend(discover_module(module, roots=[root], max_depth=6))
         kept, excluded = guards.filter_needs_network(candidates)
         self.assertTrue(kept)
@@ -367,7 +386,7 @@ class TestNeedsNetworkStamping(unittest.TestCase):
           with mock.patch.object(mod_dev, "resolve_cache_path", return_value=cache):
             with mock.patch.object(procs, "is_running", return_value=set()):
                 for name, module in MODULES.items():
-                    if not module.needs_network:
+                    if not module.needs_network or module.opt_in:
                         continue
                     raw = module.discover(roots=[root], max_depth=6)
                     for candidate in raw:
@@ -391,7 +410,9 @@ class TestModuleOrder(unittest.TestCase):
 class TestLevelSelection(unittest.TestCase):
     def test_safe_selects_the_safe_modules_and_only_them(self) -> None:
         selected = [m.name for m in modules_for_level(Level.SAFE)]
-        expected = [n for n in MODULE_ORDER if MODULES[n].level is Level.SAFE]
+        expected = [
+            n for n in MODULE_ORDER if MODULES[n].level is Level.SAFE and not MODULES[n].opt_in
+        ]
         self.assertEqual(selected, expected)
         self.assertNotIn("browser-cache", selected)
 
@@ -404,7 +425,10 @@ class TestLevelSelection(unittest.TestCase):
     def test_a_higher_level_still_includes_the_safe_ones(self) -> None:
         names = [m.name for m in modules_for_level(Level.AGGRESSIVE)]
         for name in MODULE_ORDER:
-            self.assertIn(name, names)
+            if MODULES[name].opt_in:
+                self.assertNotIn(name, names)
+            else:
+                self.assertIn(name, names)
 
 
 class TestValidation(unittest.TestCase):
@@ -458,6 +482,7 @@ class TestValidateLevel(unittest.TestCase):
             discovery=DISCOVERY_FIXED,
             proc_guard=None,
             needs_network=False,
+            opt_in=False,
         )
         return registry
 

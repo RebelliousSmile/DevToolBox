@@ -23,7 +23,15 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.winclean import clean, history  # noqa: E402
-from scripts.winclean.common import CleanResult, Level, RunReport  # noqa: E402
+from scripts.winclean.common import (  # noqa: E402
+    SKIP_UNATTEMPTED,
+    CleanResult,
+    CompletedResource,
+    Level,
+    OperationFailure,
+    RunReport,
+    SkippedEntry,
+)
 from scripts.winclean.tests.test_clean import (  # noqa: E402
     aggressive_module,
     candidate,
@@ -158,6 +166,34 @@ class TestBuildRecord(unittest.TestCase):
         self.assertEqual(set(modules), {"pycache"})
         self.assertEqual(modules["pycache"]["estimated"], 42)
         self.assertIn("measured", modules["pycache"])
+
+    def test_external_operation_details_survive_in_the_audit_record(self):
+        report = RunReport(
+            results=[
+                CleanResult(
+                    module="ollama-models",
+                    completed_resources=[CompletedResource("one:latest")],
+                    operation_failures=[
+                        OperationFailure("two:latest", "ollama-http-error", "refusé")
+                    ],
+                    skipped=[
+                        SkippedEntry(
+                            "modèle three:latest",
+                            None,
+                            SKIP_UNATTEMPTED,
+                            "non tenté",
+                        )
+                    ],
+                )
+            ]
+        )
+        module = history.build_record("aggressive", report)["modules"]["ollama-models"]
+        self.assertEqual(module["completed_resources"], [{"resource_id": "one:latest"}])
+        self.assertEqual(module["operation_failures"][0]["resource_id"], "two:latest")
+        self.assertEqual(module["skipped"][0]["status"], SKIP_UNATTEMPTED)
+        text = history.format_history([history.build_record("aggressive", report)])
+        for value in ("one:latest", "two:latest", "three:latest", SKIP_UNATTEMPTED):
+            self.assertIn(value, text)
 
 
 # --------------------------------------------------------------------------- #

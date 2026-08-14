@@ -49,6 +49,7 @@ from scripts.winclean.common import (  # noqa: E402
     CleanResult,
     CleanWarning,
     Level,
+    ModuleDiscoveryError,
     Plan,
     RunReport,
     SkippedEntry,
@@ -304,6 +305,13 @@ def _positive_history(text: str) -> int:
     return value
 
 
+def _ollama_model(text: str) -> str:
+    value = str(text).strip()
+    if not value:
+        raise argparse.ArgumentTypeError("--ollama-model attend un nom de modèle non vide")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Le CLI. Toutes les chaînes en français, les jetons machine en anglais.
 
@@ -357,6 +365,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="MODULE",
         help="Retirer ces modules de la sélection, après --only.",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        action="append",
+        default=[],
+        type=_ollama_model,
+        metavar="MODEL",
+        help=(
+            "Nom canonique exact d'un modèle Ollama à supprimer (répétable). "
+            "Exige --level aggressive --only ollama-models."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -502,6 +521,11 @@ def _split_names(values: Iterable[str]) -> list[str]:
             if name and name not in names:
                 names.append(name)
     return names
+
+
+def _unique_ollama_models(values: Iterable[str]) -> tuple[str, ...]:
+    """Noms exacts, dédupliqués dans l'ordre de la ligne de commande."""
+    return tuple(dict.fromkeys(str(value).strip() for value in values))
 
 
 # --------------------------------------------------------------------------- #
@@ -732,6 +756,7 @@ def build_plan(
     level = Level(args.level)
     only = _split_names(args.only)
     skip = _split_names(args.skip)
+    ollama_models = _unique_ollama_models(args.ollama_model)
     modules = registry_mod.select_modules(
         level,
         only,
@@ -740,6 +765,21 @@ def build_plan(
         disabled=settings.disabled_modules,
         config_source=settings.source,
     )
+    selected_names = [module.name for module in modules]
+    ollama_module = registry_mod.mod_ollama.MODULE_NAME
+    if ollama_models and only != [ollama_module]:
+        raise registry_mod.ValidationError(
+            "--ollama-model exige une sélection exclusive : "
+            "--level aggressive --only ollama-models"
+        )
+    if only == [ollama_module] and not ollama_models:
+        raise registry_mod.ValidationError(
+            "--only ollama-models exige au moins un --ollama-model MODEL"
+        )
+    if ollama_models and selected_names != [ollama_module]:
+        raise registry_mod.ValidationError(
+            "ollama-models a été retiré de la sélection finale par --skip ou la configuration"
+        )
 
     roots = resolve_roots(args.root)
     warnings: list[CleanWarning] = []
@@ -766,6 +806,7 @@ def build_plan(
             max_depth=args.max_depth,
             trash_days=config_mod.resolve_trash_days(args.trash_days, settings),
             notes=warnings,
+            ollama_models=ollama_models,
         )
         durations[module.name] = time.monotonic() - started
         candidates.extend(found)
@@ -858,6 +899,8 @@ def _merge_result(target: CleanResult, other: CleanResult | None) -> None:
     target.locked_paths.extend(other.locked_paths)
     target.recycle_failed_paths.extend(other.recycle_failed_paths)
     target.recycle_events += other.recycle_events
+    target.completed_resources.extend(other.completed_resources)
+    target.operation_failures.extend(other.operation_failures)
 
 
 def _record(result: CleanResult, column: str, value: int | None) -> None:
@@ -1203,7 +1246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         plan = build_plan(args, config=settings)
-    except registry_mod.ValidationError as exc:
+    except (registry_mod.ValidationError, ModuleDiscoveryError) as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_VALIDATION
     except guards.CeilingExceeded as exc:
@@ -1279,6 +1322,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         for error in failures:
             print(f"Échec de suppression : {error.path} - {error.message}", file=sys.stderr)
         status = EXIT_REMOVAL
+    operation_failures = [
+        (result.module, failure)
+        for result in report.results
+        for failure in result.operation_failures
+    ]
+    if operation_failures:
+        for module, failure in operation_failures:
+            print(
+                f"Échec de l'opération externe {module} pour {failure.resource_id} : "
+                f"{failure.reason}",
+                file=sys.stderr,
+            )
+        if status == EXIT_OK:
+            status = EXIT_REMOVAL
     return status
 
 

@@ -88,8 +88,42 @@ Niveau `aggressive` (n'apparaissent qu'avec `--level aggressive`) :
 | --- | --- | --- | --- |
 | `recycle-bin` | corbeille par volume | non | les éléments de **votre** corbeille plus vieux que le plancher d'âge |
 | `package-cache` | chemin fixe | non | `%ProgramData%\Package Cache` — **sans retour arrière** |
+| `ollama-models` | API locale, opt-in | **oui** | les seuls modèles nommés exactement avec `--ollama-model` |
 
-Les deux suppriment **en direct** : `--recycle` est accepté et inerte à ce niveau.
+À ce niveau, les suppressions sont **directes** : `--recycle` est accepté et inerte.
+
+### Modèles Ollama : sélection explicite uniquement
+
+Les modèles sont des données utilisateur : `ollama-models` est donc exclu de
+tous les runs larges, même `--level aggressive`. Copiez le nom canonique complet
+depuis `ollama list`, tag compris (par exemple `qwen3:latest`), puis commencez
+par la simulation :
+
+```bash
+python scripts/winclean/clean.py --level aggressive --only ollama-models --ollama-model MODEL
+python scripts/winclean/clean.py --level aggressive --only ollama-models --ollama-model MODEL --apply
+```
+
+`--ollama-model` est répétable. `--top` ne tronque que l'affichage : sous
+`--apply`, tous les noms explicitement fournis restent dans la portée.
+
+Le démon Ollama local doit déjà tourner pour la simulation comme pour
+l'application. Si winclean annonce qu'il est indisponible, vérifiez d'abord
+`ollama list` et le service Ollama ; winclean ne démarre ni n'élève jamais un
+service implicitement. Les modèles actifs visibles dans `ollama ps` sont refusés
+et doivent être arrêtés explicitement. Seules les adresses HTTP loopback
+(`localhost`, `127.0.0.1`, `::1`) sont acceptées : un `OLLAMA_HOST` distant est
+refusé, car il ne libérerait pas ce disque.
+
+winclean n'infère jamais qu'un modèle est « inutilisé » : Ollama ne fournit pas
+de preuve de dernière utilisation. La suppression est sans retour arrière et la
+restauration exige normalement un nouveau `ollama pull`. Les tailles du plan
+sont logiques ; des modèles pouvant partager des blobs, les octets réellement
+récupérés restent `unknown`.
+
+Le nettoyage de blobs partiels ou orphelins est hors périmètre. La suppression
+manuelle sous `models/blobs/` ou `models/manifests/` n'est pas prise en charge :
+le module délègue toujours la suppression à l'API locale d'Ollama.
 
 - **`recycle-bin` n'énumère que la corbeille du compte courant.** Elle est
   identifiée par son SID ; si le SID ne se résout pas, le module ne propose

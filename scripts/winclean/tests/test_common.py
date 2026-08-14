@@ -149,6 +149,11 @@ class TestModel(unittest.TestCase):
             [{"resource_id": "two", "code": "api-error", "reason": "refusé"}],
         )
         self.assertIsNone(payload["freed"])
+        text = format_result_report([result])
+        self.assertIn("Ressources externes supprimées", text)
+        self.assertIn("one", text)
+        self.assertIn("Opérations externes en échec", text)
+        self.assertIn("api-error", text)
 
     def test_empty_label_is_rejected_at_construction(self) -> None:
         for bad in ("", "   "):

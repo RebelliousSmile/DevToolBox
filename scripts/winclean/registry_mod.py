@@ -1,9 +1,9 @@
 """Registre des modules. Unique site de déclaration de leurs propriétés.
 
-Le CLI ne connaît aucun nom de module : il lit `discovery`, `proc_guard` et
-`needs_network` sur l'enregistrement et se comporte en conséquence. Ajouter un
-module ici suffit à le faire prendre en charge partout ; brancher sur son nom
-ailleurs ferait de chaque ajout une modification du CLI.
+Le CLI lit `discovery`, `proc_guard`, `needs_network` et `opt_in` sur
+l'enregistrement et se comporte en conséquence. Ajouter un module ici suffit à
+le faire prendre en charge partout ; la seule donnée ciblée est routée ici vers
+l'adaptateur qui la comprend.
 
 `needs_network` est déclaré ici et estampillé sur les candidats par
 `discover_module()`. Aucun `discover_*()` ne le fixe lui-même : deux sites de
@@ -30,6 +30,7 @@ from scripts.winclean import (  # noqa: E402
     mod_linux_cache,
     mod_linux_pkg,
     mod_linux_system,
+    mod_ollama,
     mod_system,
     procs,
 )
@@ -87,6 +88,7 @@ def _cache_module(name: str, requires: tuple[str, ...] = ()) -> CleanModule:
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=True,
+        opt_in=False,
     )
 
 
@@ -100,6 +102,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_WALKING,
         proc_guard=PROC_GUARD_WARN_AND_SKIP,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="pycache",
@@ -110,6 +113,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_WALKING,
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="dotnet-binobj",
@@ -120,6 +124,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_WALKING,
         proc_guard=PROC_GUARD_WARN_AND_SKIP,
         needs_network=False,
+        opt_in=False,
     ),
     _cache_module("cargo-registry"),
     _cache_module("npm-cache"),
@@ -145,6 +150,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=True,
+        opt_in=False,
     ),
     CleanModule(
         name="pnpm-store-linux",
@@ -157,6 +163,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=True,
+        opt_in=False,
     ),
     CleanModule(
         name="apt-cache",
@@ -167,6 +174,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=True,
+        opt_in=False,
     ),
     # --- niveau `moderate` ------------------------------------------------- #
     # Aucun ne parcourt les racines : quatre chemins documentés par utilisateur
@@ -186,6 +194,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         # une omission silencieuse de tous les candidats du module.
         proc_guard=PROC_GUARD_WARN_ONLY,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="vscode-cache",
@@ -196,6 +205,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=PROC_GUARD_WARN_ONLY,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="user-temp",
@@ -208,6 +218,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         # interrogent des propriétaires **nommés**, et `%TEMP%` n'en a pas.
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="crashdumps",
@@ -218,6 +229,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="docker-light",
@@ -228,6 +240,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_PATHLESS,
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     # --- caches applicatifs, Linux ------------------------------------------ #
     # Même `proc_guard` que leurs équivalents Windows : `warn-only` pour le
@@ -242,6 +255,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=PROC_GUARD_WARN_ONLY,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="user-cache-linux",
@@ -252,6 +266,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     # --- niveau `aggressive` ----------------------------------------------- #
     # Les deux suppriment en direct : `--recycle` est accepté et inerte ici
@@ -272,6 +287,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         # qu'on saurait interroger, et `explorer.exe` tourne toujours.
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     CleanModule(
         name="package-cache",
@@ -282,6 +298,7 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
     ),
     # Contrepartie Linux : pas de corbeille ici (`trash_linux.py` couvre la
     # home trashcan freedesktop, câblée dans `remove.py`, pas dans un module
@@ -298,6 +315,20 @@ _REGISTERED: tuple[CleanModule, ...] = (
         discovery=DISCOVERY_PATHLESS,
         proc_guard=None,
         needs_network=False,
+        opt_in=False,
+    ),
+    # Modèles utilisateur : jamais inclus par un niveau large. Le CLI exige un
+    # nom canonique explicite et l'adaptateur délègue exclusivement à Ollama.
+    CleanModule(
+        name=mod_ollama.MODULE_NAME,
+        level=Level.AGGRESSIVE,
+        requires=(),
+        discover=mod_ollama.discover_ollama_models,
+        clean=mod_ollama.clean_ollama_models,
+        discovery=DISCOVERY_PATHLESS,
+        proc_guard=None,
+        needs_network=True,
+        opt_in=True,
     ),
 )
 
@@ -369,7 +400,11 @@ def modules_for_level(
 ) -> list[CleanModule]:
     """Modules dont le niveau est atteint par `level`, dans l'ordre déclaré."""
     ceiling = LEVEL_ORDER.index(level)
-    return [m for m in _registry(registry).values() if LEVEL_ORDER.index(m.level) <= ceiling]
+    return [
+        m
+        for m in _registry(registry).values()
+        if not m.opt_in and LEVEL_ORDER.index(m.level) <= ceiling
+    ]
 
 
 def validate_names(
@@ -485,7 +520,12 @@ def requirements_met(module: CleanModule) -> bool:
     return all(shutil.which(binary) is not None for binary in module.requires)
 
 
-def discover_module(module: CleanModule, **kwargs: object) -> list[CleanCandidate]:
+def discover_module(
+    module: CleanModule,
+    *,
+    ollama_models: Sequence[str] = (),
+    **kwargs: object,
+) -> list[CleanCandidate]:
     """Découverte d'un module, avec estampillage de `needs_network`.
 
     Unique appelant de `discover()` dans le programme : c'est ici que la valeur
@@ -495,7 +535,10 @@ def discover_module(module: CleanModule, **kwargs: object) -> list[CleanCandidat
     """
     if not requirements_met(module):
         return []
-    found = module.discover(**kwargs)
+    if module.name == mod_ollama.MODULE_NAME:
+        found = module.discover(requested_models=tuple(ollama_models), **kwargs)
+    else:
+        found = module.discover(**kwargs)
     if not module.needs_network:
         return found
     for candidate in found:

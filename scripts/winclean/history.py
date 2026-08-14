@@ -171,6 +171,13 @@ def build_record(
             result.module: {
                 "estimated": result.estimated,
                 "measured": _measured(result),
+                "completed_resources": [
+                    item.to_json_payload() for item in result.completed_resources
+                ],
+                "operation_failures": [
+                    failure.to_json_payload() for failure in result.operation_failures
+                ],
+                "skipped": [entry.to_json_payload() for entry in result.skipped],
             }
             for result in report.results
         },
@@ -340,6 +347,11 @@ def format_history(
         out.append("")
         out.append("Dernier run, par module (estimé / mesuré) :")
         out.extend(modules)
+    operations = _operation_lines(records[-1])
+    if operations:
+        out.append("")
+        out.append("Dernier run, opérations externes :")
+        out.extend(operations)
     if path is not None:
         out.append("")
         out.append(f"Journal : {path}")
@@ -359,4 +371,41 @@ def _modules_line(record: Mapping[str, Any]) -> list[str]:
             f"  {str(name):<24} {_cell(figures.get('estimated')):>{_SIZE_WIDTH}} "
             f"{_cell(figures.get('measured')):>{_SIZE_WIDTH}}"
         )
+    return lines
+
+
+def _operation_lines(record: Mapping[str, Any]) -> list[str]:
+    modules = record.get("modules")
+    if not isinstance(modules, Mapping):
+        return []
+    lines: list[str] = []
+    for name, details in modules.items():
+        if not isinstance(details, Mapping):
+            continue
+        completed = details.get("completed_resources")
+        failures = details.get("operation_failures")
+        skipped_entries = details.get("skipped")
+        completed = completed if isinstance(completed, list) else []
+        failures = failures if isinstance(failures, list) else []
+        skipped_entries = skipped_entries if isinstance(skipped_entries, list) else []
+        # Une omission de fichier ordinaire n'est pas une « opération externe ».
+        # Les omissions du module délégué sont affichées seulement à côté d'une
+        # réussite ou d'un échec d'opération qui établit ce contexte.
+        if not completed and not failures:
+            continue
+        for item in completed:
+            if isinstance(item, Mapping):
+                lines.append(f"  [completed] {name} - {item.get('resource_id', '-')}")
+        for failure in failures:
+            if isinstance(failure, Mapping):
+                lines.append(
+                    f"  [{failure.get('code', 'failed')}] {name} - "
+                    f"{failure.get('resource_id', '-')} : {failure.get('reason', '')}"
+                )
+        for skipped in skipped_entries:
+            if isinstance(skipped, Mapping):
+                lines.append(
+                    f"  [{skipped.get('status', 'skipped')}] {name} - "
+                    f"{skipped.get('label', '-')} : {skipped.get('reason', '')}"
+                )
     return lines

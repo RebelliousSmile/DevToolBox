@@ -25,6 +25,7 @@ from scripts.winclean.common import (
 )
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
+MODULE_NAME = "ollama-models"
 DEFAULT_PORT = 11434
 REQUEST_TIMEOUT_SECONDS = 5.0
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -129,7 +130,11 @@ def _model_rows(payload: Any, *, require_size: bool) -> dict[str, ModelInfo]:
         )
     models: dict[str, ModelInfo] = {}
     for row in payload["models"]:
-        if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"]:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("name"), str)
+            or not row["name"].strip()
+        ):
             raise ModuleDiscoveryError(
                 "ollama-payload-invalid", "Un modèle Ollama n'a pas de nom valide."
             )
@@ -153,7 +158,7 @@ def _state(endpoint: str, opener: _Opener) -> tuple[dict[str, ModelInfo], set[st
     )
     running = set(
         _model_rows(
-            _request_json(endpoint, "GET", "/api/ps", opener=opener), require_size=False
+            _request_json(endpoint, "GET", "/api/ps", opener=opener), require_size=True
         )
     )
     return installed, running
@@ -183,7 +188,7 @@ def discover_ollama_models(
         )
     return [
         CleanCandidate(
-            module="ollama-models",
+            module=MODULE_NAME,
             path=None,
             label=f"modèle Ollama {name}",
             estimated_bytes=installed[name].size,
@@ -206,7 +211,7 @@ def clean_ollama_models(
 ) -> CleanResult:
     """Revalide puis supprime chaque modèle, en s'arrêtant au premier échec API."""
     result = CleanResult(
-        module="ollama-models",
+        module=MODULE_NAME,
         estimated=sum_known(candidate.estimated_bytes for candidate in candidates),
     )
     try:

@@ -29,6 +29,7 @@ from scripts.winclean import clean, guards, mod_apps, registry_mod  # noqa: E402
 from scripts.winclean import config as config_mod  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
+    DISCOVERY_PATHLESS,
     DISCOVERY_WALKING,
     DROP_PROTECTED,
     DROP_SANITY,
@@ -39,11 +40,15 @@ from scripts.winclean.common import (  # noqa: E402
     SKIP_CHANGED,
     SKIP_GONE,
     SKIP_NO_UNDO,
+    SKIP_UNATTEMPTED,
     UNMEASURED_CELL,
     CleanCandidate,
+    CompletedResource,
     CleanModule,
     CleanResult,
     Level,
+    ModuleDiscoveryError,
+    OperationFailure,
     human_size,
 )
 from scripts.winclean.tests.test_mod_dev import tempdir as _tempdir  # noqa: E402
@@ -105,6 +110,7 @@ def fake_module(
     proc_guard: str | None = None,
     needs_network: bool = False,
     requires: tuple[str, ...] = (),
+    opt_in: bool = False,
 ) -> CleanModule:
     def _discover(**_kwargs: object) -> list[CleanCandidate]:
         return [dataclasses.replace(c) for c in candidates]
@@ -118,6 +124,7 @@ def fake_module(
         discovery=discovery,
         proc_guard=proc_guard,
         needs_network=needs_network,
+        opt_in=opt_in,
     )
 
 
@@ -1768,7 +1775,7 @@ class TestBinAllowanceWarning(unittest.TestCase):
     def test_an_unmeasurable_candidate_gets_its_own_code_in_the_payload(self):
         code, out, err, path = self._plan(None)
         self.assertEqual(code, clean.EXIT_OK, err)
-        codes = self._codes(out)
+        codes = [warning["code"] for warning in json.loads(out)["warnings"]]
         self.assertIn("recycle-bin-allowance-unknown", codes)
         self.assertNotIn("recycle-bin-allowance", codes)
         warning = next(
@@ -1791,6 +1798,269 @@ class TestBinAllowanceWarning(unittest.TestCase):
         self.assertEqual(code, clean.EXIT_OK, err)
         self.assertIn("peut dépasser", out)
 
+
+# --------------------------------------------------------------------------- #
+# Sélection explicite des modèles Ollama
+# --------------------------------------------------------------------------- #
+
+
+class TestOllamaExplicitSelection(unittest.TestCase):
+    MODULE = "ollama-models"
+
+    def _module(self, discovered, cleaned=None) -> CleanModule:
+        return fake_module(
+            self.MODULE,
+            discover=discovered,
+            clean_fn=cleaned,
+            level=Level.AGGRESSIVE,
+            discovery=DISCOVERY_PATHLESS,
+            needs_network=True,
+            opt_in=True,
+        )
+
+    def _candidate(self, name: str, size: int) -> CleanCandidate:
+        return dataclasses.replace(
+            candidate(self.MODULE, None, size, label=f"modèle Ollama {name}"),
+            level=Level.AGGRESSIVE,
+            no_undo=True,
+            needs_network=True,
+            resource_id=name,
+        )
+
+    def test_broad_levels_never_discover_an_opt_in_module(self) -> None:
+        calls = []
+
+        def discover(**kwargs):
+            calls.append(kwargs)
+            return []
+
+        with registry_of(self._module(discover)):
+            for level in ("safe", "moderate", "aggressive"):
+                code, _out, err = run_cli(["--level", level])
+                self.assertEqual(code, clean.EXIT_OK, err)
+        self.assertEqual(calls, [])
+
+    def test_dry_run_passes_exact_deduplicated_names_to_discovery(self) -> None:
+        received = []
+
+        def discover(*, requested_models, **_kwargs):
+            received.append(requested_models)
+            return [self._candidate(name, 100 + index) for index, name in enumerate(requested_models)]
+
+        with registry_of(self._module(discover)):
+            code, out, err = run_cli(
+                [
+                    "--level", "aggressive", "--only", self.MODULE,
+                    "--ollama-model", "namespace/model:latest",
+                    "--ollama-model", "second:latest",
+                    "--ollama-model", "namespace/model:latest",
+                ]
+            )
+        self.assertEqual(code, clean.EXIT_OK, err)
+        self.assertEqual(received, [("namespace/model:latest", "second:latest")])
+        self.assertIn("namespace/model:latest", out)
+        self.assertIn("Simulation", out)
+
+    def test_invalid_combinations_fail_before_discovery(self) -> None:
+        calls = []
+
+        def discover(**kwargs):
+            calls.append(kwargs)
+            return []
+
+        module = self._module(discover)
+        invalid = (
+            ["--level", "aggressive", "--ollama-model", "a:latest"],
+            ["--level", "aggressive", "--only", self.MODULE],
+            ["--level", "aggressive", "--only", self.MODULE, "--only", "other", "--ollama-model", "a:latest"],
+            ["--level", "aggressive", "--only", self.MODULE, "--skip", self.MODULE, "--ollama-model", "a:latest"],
+            ["--only", self.MODULE, "--ollama-model", "a:latest"],
+        )
+        other = fake_module("other", level=Level.AGGRESSIVE)
+        with registry_of(module, other):
+            for argv in invalid:
+                with self.subTest(argv=argv):
+                    code, _out, _err = run_cli(argv)
+                    self.assertEqual(code, clean.EXIT_VALIDATION)
+        self.assertEqual(calls, [])
+
+    def test_blank_model_is_rejected_by_argument_parsing(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                clean.build_parser().parse_args(["--ollama-model", "   "])
+        self.assertEqual(caught.exception.code, clean.EXIT_VALIDATION)
+
+    def test_disabled_target_fails_before_discovery(self) -> None:
+        calls = []
+        module = self._module(lambda **kwargs: calls.append(kwargs) or [])
+        config_path = _tempdir(self) / "winclean.json"
+        config_path.write_text(
+            json.dumps({"DISABLED_MODULES": [self.MODULE]}), encoding="utf-8"
+        )
+        with registry_of(module):
+            code, _out, err = run_cli(
+                [
+                    "--config", str(config_path), "--level", "aggressive",
+                    "--only", self.MODULE, "--ollama-model", "a:latest",
+                ]
+            )
+        self.assertEqual(code, clean.EXIT_VALIDATION)
+        self.assertIn("DISABLED_MODULES", err)
+        self.assertEqual(calls, [])
+
+    def test_discovery_error_is_validation_without_traceback_or_apply(self) -> None:
+        cleaned = []
+
+        def discover(**_kwargs):
+            raise ModuleDiscoveryError("ollama-transport-error", "Démon Ollama indisponible.")
+
+        def clean_fn(**kwargs):
+            cleaned.append(kwargs)
+            return CleanResult(module=self.MODULE)
+
+        with registry_of(self._module(discover, clean_fn)):
+            code, out, err = run_cli(
+                ["--level", "aggressive", "--only", self.MODULE, "--ollama-model", "a:latest", "--apply", "--yes"]
+            )
+        self.assertEqual(code, clean.EXIT_VALIDATION)
+        self.assertEqual(out, "")
+        self.assertIn("Démon Ollama indisponible", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(cleaned, [])
+
+    def test_offline_excludes_the_candidate_and_never_calls_clean(self) -> None:
+        cleaned = []
+        module = self._module(
+            lambda **_kwargs: [self._candidate("a:latest", 100)],
+            lambda **kwargs: cleaned.append(kwargs) or CleanResult(module=self.MODULE),
+        )
+        with registry_of(module):
+            code, out, err = run_cli(
+                ["--level", "aggressive", "--only", self.MODULE, "--ollama-model", "a:latest", "--offline", "--apply", "--yes", "--json"]
+            )
+        self.assertEqual(code, clean.EXIT_OK, err)
+        self.assertEqual(json.loads(out)["excluded"][0]["reason"], EXCLUDE_NEEDS_NETWORK)
+        self.assertEqual(cleaned, [])
+
+    def test_apply_without_aggressive_confirmation_never_calls_clean(self) -> None:
+        cleaned = []
+        module = self._module(
+            lambda **_kwargs: [self._candidate("a:latest", 100)],
+            lambda **kwargs: cleaned.append(kwargs) or CleanResult(module=self.MODULE),
+        )
+        with registry_of(module):
+            code, _out, err = run_cli(
+                [
+                    "--level", "aggressive", "--only", self.MODULE,
+                    "--ollama-model", "a:latest", "--apply",
+                ]
+            )
+        self.assertEqual(code, clean.EXIT_VALIDATION)
+        self.assertIn("Confirmation absente", err)
+        self.assertEqual(cleaned, [])
+
+    def test_ceiling_still_applies_to_logical_model_sizes(self) -> None:
+        with registry_of(self._module(lambda **_kwargs: [self._candidate("large:latest", 100)])):
+            code, _out, err = run_cli(
+                ["--level", "aggressive", "--only", self.MODULE, "--ollama-model", "large:latest", "--max-delete-bytes", "10"]
+            )
+        self.assertEqual(code, clean.EXIT_CEILING)
+        self.assertIn("--max-delete-bytes", err)
+
+    def test_top_is_display_only_and_apply_receives_every_model(self) -> None:
+        cleaned = []
+
+        def clean_fn(*, candidates, **_kwargs):
+            cleaned.extend(c.resource_id for c in candidates)
+            return CleanResult(
+                module=self.MODULE,
+                completed_resources=[CompletedResource(c.resource_id or "") for c in candidates],
+            )
+
+        module = self._module(
+            lambda **_kwargs: [self._candidate("big:latest", 200), self._candidate("small:latest", 100)],
+            clean_fn,
+        )
+        with registry_of(module):
+            code, out, err = run_cli(
+                ["--level", "aggressive", "--only", self.MODULE, "--ollama-model", "big:latest", "--ollama-model", "small:latest", "--top", "1", "--apply", "--yes"]
+            )
+        self.assertEqual(code, clean.EXIT_OK, err)
+        self.assertEqual(cleaned, ["big:latest", "small:latest"])
+        self.assertIn("1 ligne(s) masquée(s)", out)
+        self.assertIn("Ressources externes supprimées", out)
+
+    def test_partial_failure_is_completed_json_with_removal_exit(self) -> None:
+        def clean_fn(**_kwargs):
+            return CleanResult(
+                module=self.MODULE,
+                completed_resources=[CompletedResource("one:latest")],
+                operation_failures=[OperationFailure("two:latest", "ollama-http-error", "refusé")],
+                skipped=[
+                    clean.SkippedEntry(
+                        "modèle Ollama three:latest", None, SKIP_UNATTEMPTED, "non tenté"
+                    )
+                ],
+            )
+
+        names = ("one:latest", "two:latest", "three:latest")
+        module = self._module(
+            lambda **_kwargs: [self._candidate(name, 100) for name in names], clean_fn
+        )
+        argv = ["--level", "aggressive", "--only", self.MODULE, "--apply", "--yes", "--json"]
+        for name in names:
+            argv.extend(["--ollama-model", name])
+        history_path = _tempdir(self) / "history.jsonl"
+        with registry_of(module):
+            code, out, err = run_cli(argv, history_path=history_path)
+        self.assertEqual(code, clean.EXIT_REMOVAL)
+        payload = json.loads(out)
+        result = payload["run"]["results"][0]
+        self.assertEqual(result["completed_resources"], [{"resource_id": "one:latest"}])
+        self.assertEqual(result["operation_failures"][0]["resource_id"], "two:latest")
+        self.assertEqual(result["skipped"][0]["status"], SKIP_UNATTEMPTED)
+        self.assertEqual(payload["run"]["status"], "completed")
+        self.assertIsNone(result["freed"])
+        self.assertIn("two:latest", err)
+        (record,) = clean.history.read_runs(path=history_path)
+        audited = record["modules"][self.MODULE]
+        self.assertEqual(audited["completed_resources"], [{"resource_id": "one:latest"}])
+        self.assertEqual(audited["operation_failures"][0]["resource_id"], "two:latest")
+        self.assertEqual(audited["skipped"][0]["status"], SKIP_UNATTEMPTED)
+
+    def test_partial_failure_text_names_every_outcome(self) -> None:
+        def clean_fn(**_kwargs):
+            return CleanResult(
+                module=self.MODULE,
+                completed_resources=[CompletedResource("one:latest")],
+                operation_failures=[
+                    OperationFailure("two:latest", "ollama-http-error", "refusé")
+                ],
+                skipped=[
+                    clean.SkippedEntry(
+                        "modèle Ollama three:latest",
+                        None,
+                        SKIP_UNATTEMPTED,
+                        "non tenté",
+                    )
+                ],
+            )
+
+        names = ("one:latest", "two:latest", "three:latest")
+        module = self._module(
+            lambda **_kwargs: [self._candidate(name, 100) for name in names], clean_fn
+        )
+        argv = ["--level", "aggressive", "--only", self.MODULE, "--apply", "--yes"]
+        for name in names:
+            argv.extend(["--ollama-model", name])
+        with registry_of(module):
+            code, out, err = run_cli(argv)
+        self.assertEqual(code, clean.EXIT_REMOVAL)
+        for name in names:
+            self.assertIn(name, out + err)
+        self.assertIn(SKIP_UNATTEMPTED, out)
+        self.assertIn("Opérations externes en échec", out)
+
     def test_a_pathless_candidate_is_never_sized_against_a_volume(self):
         """`splitdrive(None)` planterait, et cette étape court avant la répartition."""
         tmp = _tempdir(self)
@@ -1810,7 +2080,7 @@ class TestBinAllowanceWarning(unittest.TestCase):
             )
         self.assertEqual(code, clean.EXIT_OK, err)
         volumes.assert_not_called()
-        codes = self._codes(out)
+        codes = [warning["code"] for warning in json.loads(out)["warnings"]]
         # `ceiling-total-partial` reste dû : un candidat sans prix rend le total
         # partiel. Seul le quota de la corbeille est hors sujet ici.
         self.assertNotIn("recycle-bin-allowance", codes)

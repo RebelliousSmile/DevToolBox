@@ -58,7 +58,7 @@ def tags(*models: tuple[str, int]) -> dict:
 
 
 def running(*names: str) -> dict:
-    return {"models": [{"name": name} for name in names]}
+    return {"models": [{"name": name, "size": 1} for name in names]}
 
 
 class EndpointTest(unittest.TestCase):
@@ -138,6 +138,17 @@ class DiscoveryTest(unittest.TestCase):
                     requested_models=("a",), env={}, opener=QueueOpener(response)
                 )
             self.assertEqual(caught.exception.code, code)
+
+    def test_running_model_payload_also_requires_valid_sizes(self) -> None:
+        opener = QueueOpener(
+            Response(tags(("a", 1))),
+            Response({"models": [{"name": "a", "size": "large"}]}),
+        )
+        with self.assertRaises(ModuleDiscoveryError) as caught:
+            mod_ollama.discover_ollama_models(
+                requested_models=("a",), env={}, opener=opener
+            )
+        self.assertEqual(caught.exception.code, "ollama-payload-invalid")
 
 
 class CleanTest(unittest.TestCase):
