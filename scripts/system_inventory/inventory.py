@@ -84,12 +84,20 @@ SCANNERS: dict[str, Callable[..., list[InventoryItem]]] = {
     "docker-wsl": scan_docker_wsl,
 }
 
-# Sources that require ``winreg`` (Windows-only stdlib) to run at all. Each
-# also raises ``WinregUnavailableError`` itself if called anyway, but
-# pre-filtering here lets ``_resolve_active_sources`` return an empty list
-# (rather than a list whose scanners are guaranteed to fail) so the
-# no-active-source guard in ``main()`` can report a clear message.
-_WINREG_DEPENDENT_SOURCES = frozenset({"registry", "path", "docker-wsl"})
+# Sources that require ``winreg`` (Windows-only stdlib) to run at all, with
+# no Linux dispatch of their own. Each also raises ``WinregUnavailableError``
+# itself if called anyway, but pre-filtering here lets
+# ``_resolve_active_sources`` return an empty list (rather than a list whose
+# scanners are guaranteed to fail) so the no-active-source guard in
+# ``main()`` can report a clear message.
+#
+# ``"registry"``, ``"scoop-choco"`` and ``"docker-wsl"`` are deliberately
+# *not* listed here (Part 4 Phases 2-3): all three now dispatch internally
+# to a Linux-native scanner (``systemd.py`` / ``packages_linux.py`` /
+# ``docker_native.py`` respectively) instead of requiring ``winreg``.
+# ``"path"`` (Windows PATH lives only in the registry, no POSIX ``$PATH``
+# equivalent implemented — see Part 4 plan Amendments) remains winreg-only.
+_WINREG_DEPENDENT_SOURCES = frozenset({"path"})
 
 
 def _resolve_active_sources(requested: list[str] | None) -> list[str]:

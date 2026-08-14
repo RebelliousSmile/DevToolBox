@@ -308,6 +308,18 @@ fn action_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// `true` if an executable named `name` (optionally with a `PATHEXT`
+/// extension such as `.exe`) exists somewhere on `PATH` — used only to pick
+/// between the `python3`/`python` fallbacks above.
+fn exists_on_path(name: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        dir.join(name).is_file() || dir.join(format!("{name}.exe")).is_file()
+    })
+}
+
 fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, LaunchError> {
     let (program, args) = tokenize(command)?;
     if program != "@python" {
@@ -351,7 +363,19 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, LaunchError>
     let python = local_python
         .map(|path| path.display().to_string())
         .or_else(|| std::env::var("DEVTOOLBOX_PYTHON").ok())
-        .unwrap_or_else(|| "python3".to_string());
+        .unwrap_or_else(|| {
+            // `python3` is not guaranteed on Windows/minimal installs (the
+            // official python.org installer and the Microsoft Store package
+            // both register `python`, not `python3`) — fall back to `python`
+            // when `python3` isn't resolvable on `PATH` (master plan
+            // decision 10's cross-platform addendum; mirrors
+            // `crate::ui::terminal_view::resolve_action`'s Linux cascade).
+            if exists_on_path("python3") {
+                "python3".to_string()
+            } else {
+                "python".to_string()
+            }
+        });
     let mut resolved_args = vec![script_path.display().to_string()];
     resolved_args.extend(script_args.iter().cloned());
     Ok(ActionSpec {

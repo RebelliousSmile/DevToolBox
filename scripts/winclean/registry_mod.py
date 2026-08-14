@@ -24,7 +24,15 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import mod_apps, mod_dev, mod_system, procs  # noqa: E402
+from scripts.winclean import (  # noqa: E402
+    mod_apps,
+    mod_dev,
+    mod_linux_cache,
+    mod_linux_pkg,
+    mod_linux_system,
+    mod_system,
+    procs,
+)
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
     DISCOVERY_PATHLESS,
@@ -123,6 +131,43 @@ _REGISTERED: tuple[CleanModule, ...] = (
     _cache_module("pip-cache"),
     _cache_module("uv-cache"),
     _cache_module("nuget-packages"),
+    # --- caches de gestionnaires de paquets, Linux ------------------------- #
+    # Même forme que `_cache_module` (fixed, needs_network=True), sans passer
+    # par elle : `mod_linux_pkg.discover_cache`/`discover_apt_archives`
+    # prennent `env`, pas la signature `(module, roots=..., trash_days=...)`
+    # que `_cache_module` fige via `functools.partial`.
+    CleanModule(
+        name="pip-cache-linux",
+        level=Level.SAFE,
+        requires=(),
+        discover=functools.partial(mod_linux_pkg.discover_cache, "pip-cache-linux"),
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=True,
+    ),
+    CleanModule(
+        name="pnpm-store-linux",
+        level=Level.SAFE,
+        # Même décision que `pnpm-store` côté Windows : le store pnpm vit où
+        # pnpm le dit, et le repli XDG désigne souvent un dossier vide.
+        requires=("pnpm",),
+        discover=functools.partial(mod_linux_pkg.discover_cache, "pnpm-store-linux"),
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=True,
+    ),
+    CleanModule(
+        name="apt-cache",
+        level=Level.SAFE,
+        requires=(),
+        discover=mod_linux_pkg.discover_apt_archives,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=True,
+    ),
     # --- niveau `moderate` ------------------------------------------------- #
     # Aucun ne parcourt les racines : quatre chemins documentés par utilisateur
     # (`fixed`) et un seul candidat sans chemin (`pathless`). Tous portent
@@ -184,6 +229,30 @@ _REGISTERED: tuple[CleanModule, ...] = (
         proc_guard=None,
         needs_network=False,
     ),
+    # --- caches applicatifs, Linux ------------------------------------------ #
+    # Même `proc_guard` que leurs équivalents Windows : `warn-only` pour le
+    # cache de navigateurs (fichiers tenus ouverts, pas réécrits), `None` pour
+    # le balayage générique (aucun propriétaire nommé pour `~/.cache`).
+    CleanModule(
+        name="browser-cache-linux",
+        level=Level.MODERATE,
+        requires=(),
+        discover=mod_linux_cache.discover_browser_cache,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=PROC_GUARD_WARN_ONLY,
+        needs_network=False,
+    ),
+    CleanModule(
+        name="user-cache-linux",
+        level=Level.MODERATE,
+        requires=(),
+        discover=mod_linux_cache.discover_user_cache,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=False,
+    ),
     # --- niveau `aggressive` ----------------------------------------------- #
     # Les deux suppriment en direct : `--recycle` est accepté et inerte ici
     # (décision 4). Les deux sont `fixed` — la corbeille s'énumère par volume
@@ -214,6 +283,22 @@ _REGISTERED: tuple[CleanModule, ...] = (
         proc_guard=None,
         needs_network=False,
     ),
+    # Contrepartie Linux : pas de corbeille ici (`trash_linux.py` couvre la
+    # home trashcan freedesktop, câblée dans `remove.py`, pas dans un module
+    # de ce registre). `journal-vacuum` porte son propre `clean()` pour la
+    # même raison que `docker-light` : son unité de suppression n'est pas un
+    # chemin, `apply_plan()` ne route donc les candidats sans chemin que vers
+    # un module qui définit `clean`.
+    CleanModule(
+        name="journal-vacuum",
+        level=Level.AGGRESSIVE,
+        requires=(),
+        discover=mod_linux_system.discover_journal_vacuum,
+        clean=mod_linux_system.clean_journal_vacuum,
+        discovery=DISCOVERY_PATHLESS,
+        proc_guard=None,
+        needs_network=False,
+    ),
 )
 
 MODULES: dict[str, CleanModule] = {m.name: m for m in _REGISTERED}
@@ -231,6 +316,7 @@ PROC_OWNERS: dict[str, tuple[str, ...]] = {
     "dotnet-binobj": mod_dev.DOTNET_OWNERS,
     "browser-cache": mod_apps.BROWSER_OWNERS,
     "vscode-cache": mod_apps.EDITOR_OWNERS,
+    "browser-cache-linux": mod_linux_cache.BROWSER_OWNERS,
 }
 
 

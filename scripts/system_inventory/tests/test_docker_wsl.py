@@ -14,8 +14,10 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import patch
 
+from scripts.system_inventory import docker_wsl
 from scripts.system_inventory.docker_wsl import (
     WINREG_AVAILABLE,
     _distro_items,
@@ -298,6 +300,51 @@ class ScanDockerWslLiveSmokeTest(unittest.TestCase):
         for item in items:
             self.assertEqual(item.source, "docker-wsl")
             self.assertIsNotNone(item.path)
+
+
+class ScanDockerWslLinuxDispatchTests(unittest.TestCase):
+    """Part 4 Phase 3: base=None on a non-Windows platform dispatches to
+    docker_native.scan_docker_native() instead of touching the registry."""
+
+    def test_base_none_on_linux_dispatches_to_docker_native(self):
+        fake_items = [object()]
+        with mock.patch.object(docker_wsl.sys, "platform", "linux"):
+            with mock.patch.object(
+                docker_wsl.docker_native, "scan_docker_native", return_value=fake_items
+            ) as scan_mock:
+                items = scan_docker_wsl()
+
+        scan_mock.assert_called_once_with()
+        self.assertIs(items, fake_items)
+
+    def test_base_given_on_linux_does_not_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_root = Path(tmp) / "does_not_exist"
+            with mock.patch.object(docker_wsl.sys, "platform", "linux"):
+                with mock.patch.object(docker_wsl, "docker_native") as native_mock:
+                    with patch(
+                        "scripts.system_inventory.docker_wsl._iter_lxss_subkeys",
+                        return_value={},
+                    ):
+                        items = scan_docker_wsl(base={"docker_wsl_root": str(missing_root)})
+
+        native_mock.scan_docker_native.assert_not_called()
+        self.assertEqual(items, [])
+
+
+@unittest.skipUnless(platform.system() == "Linux", "Linux dispatch only")
+class ScanDockerWslLinuxDispatchLiveSmokeTest(unittest.TestCase):
+    """Runs the real scanner on Linux: base=None must dispatch to the real
+    docker_native.scan_docker_native(), returning at least one item on this
+    machine (Docker is installed here — see docker_native.py's docstring).
+    """
+
+    def test_dispatches_to_docker_native_without_raising(self):
+        items = scan_docker_wsl()
+
+        self.assertGreater(len(items), 0)
+        for item in items:
+            self.assertEqual(item.source, "docker-native")
 
 
 if __name__ == "__main__":

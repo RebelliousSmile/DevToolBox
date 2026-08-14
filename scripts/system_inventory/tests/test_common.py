@@ -25,6 +25,7 @@ this test module is invoked two ways by the project:
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,7 @@ from unittest.mock import patch
 from scripts.system_inventory.common import (
     FILE_ATTRIBUTE_REPARSE_POINT,
     InventoryItem,
+    _path_comparison_key,
     dir_size_on_disk,
     format_report,
     human_size,
@@ -150,6 +152,41 @@ class DirSizeOnDiskRealFilesystemTests(unittest.TestCase):
             total = dir_size_on_disk(root, exclude_paths={excluded_dir.resolve()})
 
             self.assertEqual(total, 3)
+
+
+class PathComparisonKeyCaseSensitivityTests(unittest.TestCase):
+    """Verifies _path_comparison_key's per-OS case-sensitivity instead of
+    assuming os.path.normcase does the right thing (Part 4 risk register)."""
+
+    @unittest.skipUnless(sys.platform != "win32", "case-sensitive filesystem semantics")
+    def test_case_differing_paths_are_distinct_on_posix(self):
+        self.assertNotEqual(
+            _path_comparison_key("/tmp/App"),
+            _path_comparison_key("/tmp/app"),
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "case-insensitive filesystem semantics")
+    def test_case_differing_paths_are_identical_on_windows(self):
+        self.assertEqual(
+            _path_comparison_key("C:\\Temp\\App"),
+            _path_comparison_key("C:\\Temp\\app"),
+        )
+
+    @unittest.skipUnless(sys.platform != "win32", "case-sensitive filesystem semantics")
+    def test_dir_size_on_disk_exclude_paths_is_case_sensitive_on_posix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "App").mkdir()
+            (root / "App" / "f.txt").write_bytes(b"x" * 10)
+            (root / "app").mkdir()
+            (root / "app" / "f.txt").write_bytes(b"x" * 20)
+
+            # Excluding "App" (capital A) must not also exclude the
+            # distinct, differently-cased "app" directory on a
+            # case-sensitive filesystem.
+            total = dir_size_on_disk(root, exclude_paths={(root / "App").resolve()})
+
+            self.assertEqual(total, 20)
 
 
 class _FakeDirEntry:

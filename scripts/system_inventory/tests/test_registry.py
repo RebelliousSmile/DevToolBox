@@ -143,5 +143,25 @@ class ScanRegistryLiveSmokeTest(unittest.TestCase):
             self.assertIn(item.detail["view"], ("32", "64"))
 
 
+@unittest.skipUnless(platform.system() == "Linux", "Linux dispatch only")
+class ScanRegistryLinuxDispatchLiveSmokeTest(unittest.TestCase):
+    """Runs the real scanner on Linux: it must dispatch to systemd.scan_systemd()
+    (Part 4 Phase 2) rather than raise ``WinregUnavailableError``.
+
+    Guarded to Linux only, mirroring ``ScanRegistryLiveSmokeTest`` above for
+    Windows. A systemd-based Linux dev machine always has at least one
+    service unit loaded (systemd itself registers plenty).
+    """
+
+    def test_dispatches_to_systemd_without_raising(self):
+        items = scan_registry()
+
+        self.assertGreater(len(items), 0)
+        for item in items:
+            self.assertEqual(item.source, "systemd")
+            self.assertTrue(item.name)
+            self.assertIn(item.detail["kind"], ("service", "timer"))
+
+
 if __name__ == "__main__":
     unittest.main()

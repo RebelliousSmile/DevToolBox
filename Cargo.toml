@@ -3,28 +3,14 @@ name = "devtoolbox"
 version = "0.1.0"
 edition = "2021"
 authors = ["RebelliousSmile <contact@rebellioussmile.com>"]
-description = "Windows 11 Command Launcher with native Win32 UI"
+description = "Cross-platform (Windows/Linux) command launcher with a native eframe/egui UI"
 license = "MIT"
 
 [dependencies]
-# Window management
-tao = "0.26"
-
-# raw-window-handle 0.6 to extract HWND from the tao window
-raw-window-handle = "0.6"
-
-# Windows APIs
-windows = { version = "0.52", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
-    "Win32_System_ProcessStatus",
-    "Win32_System_Registry",
-    "Win32_UI_Shell",
-    "Win32_UI_Controls",
-    "Win32_UI_Input_KeyboardAndMouse",
-] }
+# Cross-platform UI (replaces `tao` + Win32 child controls; Part 2 of the
+# multi-OS transformation).
+eframe = "0.35"
+egui = "0.35"
 
 # Raster image decode and resize (PNG primary; jpg/bmp/gif via allowlist).
 # SVG is descoped to a follow-up (Decision D1).
@@ -38,6 +24,23 @@ serde_json = "1.0"
 log = "0.4"
 env_logger = "0.10"
 
+[target.'cfg(windows)'.dependencies]
+# Windows APIs
+windows = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
 [profile.release]
 opt-level = 3
 lto = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.35.0", default-features = false }

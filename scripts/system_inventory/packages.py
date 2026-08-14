@@ -21,14 +21,22 @@ Scoop installed with zero apps), is tolerated and contributes no items for
 that manager. No exception is ever raised; absence of both managers yields
 ``[]``.
 
+On Linux (production call, ``base is None``), this dispatches instead to
+``packages_linux.scan_packages_linux()`` — apt/dnf/pacman are the Linux
+equivalent of Scoop/Chocolatey for this same ``"scoop-choco"`` source slot.
+Scoop/Chocolatey are inherently Windows-only tools, so there is no Linux
+path resolution to perform here.
+
 Stdlib only. Never writes to disk.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+from scripts.system_inventory import packages_linux
 from scripts.system_inventory.common import InventoryItem, dir_size_on_disk
 
 # Chocolatey does not expose its install root through an environment
@@ -112,7 +120,14 @@ def scan_scoop_choco(base: dict[str, str] | None = None) -> list[InventoryItem]:
 
     Each emitted item's ``detail`` carries which manager it came from:
     ``{"manager": "scoop"}`` or ``{"manager": "chocolatey"}``.
+
+    On Linux, when ``base`` is not overridden (i.e. this is a real
+    production call, not a test), dispatches to
+    ``packages_linux.scan_packages_linux()`` instead — Scoop/Chocolatey are
+    Windows-only tools with no Linux equivalent path to resolve.
     """
+    if base is None and sys.platform != "win32":
+        return packages_linux.scan_packages_linux()
     items: list[InventoryItem] = []
     for manager, subdir_name in _MANAGER_SUBDIRS:
         root = _resolve_manager_root(base, manager)

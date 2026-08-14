@@ -24,6 +24,19 @@ FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _UNITS = ("B", "KB", "MB", "GB")
 
 
+def _path_comparison_key(path: str | os.PathLike[str]) -> str:
+    """Normalize a path into a case-appropriate comparison key.
+
+    Wraps ``os.path.normcase`` explicitly rather than relying on it being
+    invoked implicitly at each comparison site: ``normcase`` already does
+    the right thing per OS (a no-op on POSIX — Linux/macOS filesystems are
+    case-sensitive — and lowercasing on Windows, whose filesystems are
+    case-insensitive), but Part 4's risk register calls for that behavior
+    to be explicit and independently tested per OS rather than assumed.
+    """
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
 @dataclass
 class InventoryItem:
     """A single inventoried item, regardless of which source produced it."""
@@ -89,7 +102,7 @@ def dir_size_on_disk(
     swallowed and the walk continues with the remaining entries.
     """
     excluded = exclude_paths or set()
-    excluded_keys = {os.path.normcase(os.path.normpath(str(p))) for p in excluded}
+    excluded_keys = {_path_comparison_key(p) for p in excluded}
     total = 0
     stack: list[Path] = [Path(path)]
     while stack:
@@ -102,7 +115,7 @@ def dir_size_on_disk(
             try:
                 entry_path = Path(entry.path)
                 if excluded_keys:
-                    entry_key = os.path.normcase(os.path.normpath(str(entry_path)))
+                    entry_key = _path_comparison_key(entry_path)
                     if entry_key in excluded_keys:
                         continue
                 stat_result = entry.stat(follow_symlinks=False)

@@ -1,0 +1,54 @@
+{
+  "version": "0.1.0",
+  "default_settings": {
+    "show_categories": true,
+    "icon_size": 80,
+    "theme": "light",
+    "launch_at_startup": true,
+    "show_descriptions": true
+  },
+  "categories": [
+    {
+      "id": "system",
+      "name": "Système",
+      "icon": "🖥️"
+    },
+    {
+      "id": "network",
+      "name": "Réseau",
+      "icon": "🌐"
+    },
+    {
+      "id": "maintenance",
+      "name": "Maintenance",
+      "icon": "⚙️"
+    }
+  ],
+  "commands": [
+    {
+      "id": "gedit",
+      "name": "Éditeur de texte",
+      "command": "gedit",
+      "category": "system",
+      "icon": "📝",
+      "is_favorite": true,
+      "shortcut": "Ctrl+N"
+    },
+    {
+      "id": "terminal",
+      "name": "Terminal",
+      "command": "gnome-terminal",
+      "category": "system",
+      "icon": "💻",
+      "is_favorite": true
+    },
+    {
+      "id": "ip-addr",
+      "name": "Afficher l'adresse IP",
+      "command": "ip addr",
+      "category": "network",
+      "icon": "🌐",
+      "is_favorite": true
+    }
+  ]
+}

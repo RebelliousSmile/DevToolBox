@@ -1151,13 +1151,19 @@ class TestProcessGuardUnderApply(unittest.TestCase):
 
 
 class TestPlatformGuard(unittest.TestCase):
-    def test_non_windows_is_refused(self):
+    def test_neither_windows_nor_linux_is_refused(self):
         with self.assertRaises(clean.PlatformError):
-            clean.ensure_windows("linux")
-        with mock.patch.object(clean.sys, "platform", "linux"):
+            clean.ensure_windows("darwin")
+        with mock.patch.object(clean.sys, "platform", "darwin"):
             code, _out, err = run_cli([])
         self.assertEqual(code, clean.EXIT_PLATFORM)
         self.assertIn("Windows", err)
+
+    def test_linux_is_now_accepted(self):
+        """Part 5 Phase 3 : `remove.py` route sa suppression vers `trash_linux.py`
+        sur Linux, la garde n'a donc plus de raison de le refuser."""
+        clean.ensure_windows("linux")  # ne lève pas
+        clean.ensure_windows("linux2")  # ni un futur `sys.platform` Linux dérivé
 
 
 # --------------------------------------------------------------------------- #

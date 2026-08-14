@@ -104,13 +104,15 @@ flowchart TD
 
 | #   | Plan                                              | File                                                          | Status  | Validated |
 | --- | -------------------------------------------------- | -------------------------------------------------------------- | ------- | --------- |
-| 1   | Rust core portability (cfg-gating, `platform/`)    | `./2026_08_05-multi-os-transformation-part-1.md`               | pending | [ ]       |
-| 2   | Unified `egui`/`eframe` UI                         | `./2026_08_05-multi-os-transformation-part-2.md`               | blocked | [ ]       |
-| 3   | Linux OS integrations + cross-platform default config | `./2026_08_05-multi-os-transformation-part-3.md`             | blocked | [ ]       |
-| 4   | `system_inventory` Linux port                      | `./2026_08_05-multi-os-transformation-part-4.md`               | blocked | [ ]       |
-| 5   | `winclean` Linux port                              | `./2026_08_05-multi-os-transformation-part-5.md`               | blocked | [ ]       |
+| 1   | Rust core portability (cfg-gating, `platform/`)    | `./2026_08_05-multi-os-transformation-part-1.md`               | done    | [ ]       |
+| 2   | Unified `egui`/`eframe` UI                         | `./2026_08_05-multi-os-transformation-part-2.md`               | done    | [ ]       |
+| 3   | Linux OS integrations + cross-platform default config | `./2026_08_05-multi-os-transformation-part-3.md`             | done    | [ ]       |
+| 4   | `system_inventory` Linux port                      | `./2026_08_05-multi-os-transformation-part-4.md`               | done    | [ ]       |
+| 5   | `winclean` Linux port                              | `./2026_08_05-multi-os-transformation-part-5.md`               | done    | [ ]       |
 
-<!-- RULE: Plan N+1 blocked until Plan N checkbox checked -->
+<!-- Status values: pending, in-progress, done, blocked -->
+<!-- RULE: Plan N+1 blocked until Plan N checkbox checked — bypassed this run per explicit user instruction to execute all 5 parts consecutively without pausing at checkpoints. -->
+<!-- "done" = code-level work complete and regression-verified in a headless Linux dev environment. "Validated" stays [ ] on all 5 rows: it requires the user's own confirmation (live Windows build/run, and a disposable Ubuntu LTS desktop session — see Risk register and Validation Protocol below, none of which were available in this working environment). -->
 
 ## Validation Protocol
 

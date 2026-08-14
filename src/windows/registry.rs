@@ -17,6 +17,14 @@
 //! `DevToolBox` name overwrites in place — no dedup code is needed and no
 //! duplicate can be created (see Decision D4 in the plan).
 
+// Module-level cfg gate: this file is only ever reached via `crate::windows`,
+// which is itself gated on `#[cfg(windows)]` (see `src/windows/mod.rs`). This
+// second, redundant gate makes the file self-contained about its own
+// platform constraint (defense in depth) and matches Phase 3 of the
+// multi-OS transformation plan, which asks for both `mod.rs` and this file
+// to carry the module-level gate explicitly.
+#![cfg(windows)]
+
 // Read-side helpers (`open_key_read`, `query_value`, `is_startup_enabled`) are
 // part of the registry API surface but not all are wired to the UI yet.
 #![allow(dead_code)]

@@ -84,6 +84,12 @@ EXPECTED_DISCOVERY: dict[str, str] = {
     # documenté, et reste `fixed` : le critère est que `--root` ne le borne pas.
     "recycle-bin": DISCOVERY_FIXED,
     "package-cache": DISCOVERY_FIXED,
+    "pip-cache-linux": DISCOVERY_FIXED,
+    "pnpm-store-linux": DISCOVERY_FIXED,
+    "apt-cache": DISCOVERY_FIXED,
+    "browser-cache-linux": DISCOVERY_FIXED,
+    "user-cache-linux": DISCOVERY_FIXED,
+    "journal-vacuum": DISCOVERY_PATHLESS,
 }
 
 EXPECTED_PROC_GUARD: dict[str, str | None] = {
@@ -108,6 +114,12 @@ EXPECTED_PROC_GUARD: dict[str, str | None] = {
     # corbeille n'a pas de propriétaire nommé qu'on saurait interroger.
     "recycle-bin": None,
     "package-cache": None,
+    "pip-cache-linux": None,
+    "pnpm-store-linux": None,
+    "apt-cache": None,
+    "browser-cache-linux": PROC_GUARD_WARN_ONLY,
+    "user-cache-linux": None,
+    "journal-vacuum": None,
 }
 
 EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
@@ -134,6 +146,12 @@ EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
     # ne se recharge automatiquement, donc `--offline` n'a rien à protéger ici.
     "recycle-bin": False,
     "package-cache": False,
+    "pip-cache-linux": True,
+    "pnpm-store-linux": True,
+    "apt-cache": True,
+    "browser-cache-linux": False,
+    "user-cache-linux": False,
+    "journal-vacuum": False,
 }
 
 

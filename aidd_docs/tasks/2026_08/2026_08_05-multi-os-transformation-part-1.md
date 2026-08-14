@@ -99,8 +99,8 @@ flowchart TD
 
 #### Acceptance criteria
 
-- [ ] `cargo metadata --format-version=1` on Linux does not list `windows` as an active dependency
-- [ ] `cargo build --release` still succeeds on Windows
+- [x] `cargo metadata --format-version=1` on Linux does not list `windows` as an active dependency
+- [ ] `cargo build --release` still succeeds on Windows — unverifiable in this environment (native Linux, no Windows toolchain); `Cargo.toml` correctly places `windows`/`raw-window-handle` under `[target.'cfg(windows)'.dependencies]` and `cargo metadata --filter-platform x86_64-unknown-linux-gnu` confirms they resolve out on Linux, but the Windows build itself was not executed here
 
 ### Phase 2: platform module skeleton
 
@@ -112,8 +112,8 @@ flowchart TD
 
 #### Acceptance criteria
 
-- [ ] `platform::config_path()` on Windows returns byte-identical output to the current `user_config_path()`
-- [ ] `platform::linux::config_path()` returns `$XDG_CONFIG_HOME/devtoolbox/config.json` when set, `~/.config/devtoolbox/config.json` otherwise (unit test, runs on any OS by mocking env vars)
+- [ ] `platform::config_path()` on Windows returns byte-identical output to the current `user_config_path()` — unverifiable in this environment (native Linux, no Windows toolchain); verified only by manual side-by-side comparison against the original logic (see `src/platform/windows.rs` module doc, "Verification note"), not by actual execution
+- [x] `platform::linux::config_path()` returns `$XDG_CONFIG_HOME/devtoolbox/config.json` when set, `~/.config/devtoolbox/config.json` otherwise (unit test, runs on any OS by mocking env vars)
 
 ### Phase 3: cfg-gate existing Windows-only modules
 
@@ -124,8 +124,8 @@ flowchart TD
 
 #### Acceptance criteria
 
-- [ ] `cargo check --target x86_64-unknown-linux-gnu --workspace` succeeds
-- [ ] `cargo test` on Windows still passes, including the 5 existing `registry.rs` tests
+- [x] `cargo check --target x86_64-unknown-linux-gnu --workspace` succeeds
+- [ ] `cargo test` on Windows still passes, including the 5 existing `registry.rs` tests — unverifiable in this environment (native Linux, no Windows toolchain); note `src/windows/registry.rs` now contains 10 `#[test]` functions, not 5 as this line originally described (4 pure-logic tests plus a `no_test_references_run_key` guard were added alongside the original 5 that write to `HKCU\Software\DevToolBox\Test`) — the whole file is `#[cfg(windows)]`-gated and cannot be compiled or run on this Linux host
 
 ### Phase 4: Linux compile-only validation
 
@@ -136,8 +136,8 @@ flowchart TD
 
 #### Acceptance criteria
 
-- [ ] `cargo test --target x86_64-unknown-linux-gnu` passes for the new platform tests (UI/icon/registry-dependent tests remain Windows-only and are not expected to run on Linux yet — that is Part 2/3's job)
-- [ ] `grep -rn "^use windows" src/ | grep -v "cfg(windows)"` returns no unexpected matches outside files already gated in Phase 3
+- [x] `cargo test --target x86_64-unknown-linux-gnu` passes for the new platform tests — 93 tests passed, 0 failed (note: by the end of Phase 3 the whole crate compiles on Linux, so this run exercises the full test suite, not only `platform::linux`; all 10 `platform::linux::tests::*` tests are included and pass)
+- [x] `grep -rn "^use windows" src/ | grep -v "cfg(windows)"` returns no unexpected matches outside files already gated in Phase 3 — 15 raw matches across `src/icons/gdi.rs`, `src/ui/mod.rs`, `src/ui/card.rs`, `src/ui/app.rs`, `src/windows/registry.rs`; all verified false positives (gated via inline `#[cfg(windows)]` on the preceding line, a `#[cfg(windows)] pub mod ...;` on the parent module, or a file-level `#![cfg(windows)]` inner attribute)
 
 ## Amendments
 
@@ -146,6 +146,7 @@ None yet.
 ## Log
 
 - 2026-08-05: Plan created via `aidd-dev:01-plan`, part 1 of 5.
+- 2026-08-05: Part 1 implementation completed via `aidd-dev:02-implement` (Phases 1-4). `cargo check --target x86_64-unknown-linux-gnu --workspace` exits 0; `cargo test --target x86_64-unknown-linux-gnu --workspace` passes 93/93. Two acceptance criteria remain unticked as genuinely unverifiable in this Linux-only environment (no Windows toolchain): the Windows `cargo build --release` check (Phase 1) and the Windows `cargo test` / byte-identical `config_path()` checks (Phases 2-3) — both rest on manual code comparison rather than execution.
 
 ## Validation flow demonstration
 

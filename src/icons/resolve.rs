@@ -73,18 +73,21 @@ pub fn resolve_icon(icon: &str, dirs: &[PathBuf]) -> IconResolution {
 /// Build the ordered list of candidate icon search directories.
 ///
 /// Order (Decision D4):
-/// 1. `%APPDATA%\DevToolBox\icons\`  — user-editable; overrides bundled icons.
+/// 1. `platform::data_dir()/icons` — user-editable; overrides bundled icons.
+///    (`%APPDATA%\DevToolBox\icons\` on Windows; `$XDG_DATA_HOME/devtoolbox/icons`
+///    on Linux.)
 /// 2. `<exe_dir>\assets\`            — bundled default icons shipped with the binary.
 /// 3. `.\assets\`                    — dev/repo fallback (useful during development).
 ///
-/// If `APPDATA` is unset, that candidate is skipped (no panic).
+/// Delegated to [`crate::platform::data_dir`], which always returns a
+/// `PathBuf` (with its own OS-specific fallback for the unset-env-var case)
+/// — candidate 1 above is therefore always present now, unlike the previous
+/// `APPDATA`-unset-skips-the-candidate behavior.
 pub fn icons_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(3);
 
-    // 1. %APPDATA%\DevToolBox\icons\
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        dirs.push(PathBuf::from(appdata).join("DevToolBox").join("icons"));
-    }
+    // 1. platform::data_dir()/icons
+    dirs.push(crate::platform::data_dir().join("icons"));
 
     // 2. <exe_dir>\assets\
     if let Ok(exe) = std::env::current_exe() {

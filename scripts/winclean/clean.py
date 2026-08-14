@@ -1111,13 +1111,23 @@ def apply_plan(
 
 
 def ensure_windows(platform: str | None = None) -> None:
-    """Refuse tout autre système. Les primitives de `remove.py` sont Win32."""
+    """Refuse tout système hors Windows et Linux, les deux seuls que `remove.py` sait traiter.
+
+    Nommée `ensure_windows` pour rester le point d'appel historique de `main()` -
+    winclean est né Windows-only - mais la garde couvre désormais aussi Linux
+    depuis que `remove.py` route sa suppression vers `trash_linux.py` sur ce
+    système. macOS et le reste restent refusés : aucun des deux paquets de
+    primitives ne les couvre.
+    """
     current = sys.platform if platform is None else platform
-    if not str(current).startswith("win"):
-        raise PlatformError(
-            "winclean ne fonctionne que sous Windows : la suppression passe par les "
-            f"chemins longs \\\\?\\ et par SHFileOperationW. Système détecté : {current}."
-        )
+    text = str(current)
+    if text.startswith("win") or text.startswith("linux"):
+        return
+    raise PlatformError(
+        "winclean ne fonctionne que sous Windows ou Linux : la suppression passe par "
+        "les chemins longs \\\\?\\ et SHFileOperationW (Windows), ou par la corbeille "
+        f"utilisateur freedesktop.org (Linux). Système détecté : {current}."
+    )
 
 
 def show_history(limit: int, out: Output, *, as_json: bool = False) -> int:

@@ -29,14 +29,25 @@ existing/not a directory): they skip that root and return whatever the
 other root(s) produced, or an empty list if none exist. No exception is
 ever raised for a missing or unreadable root.
 
+On Linux, ``%LOCALAPPDATA%``/``%APPDATA%``/``%USERPROFILE%`` do not exist as
+environment variables at all, so ``scan_appdata``/``scan_dotfolders`` fall
+back to real equivalents instead of silently returning nothing: XDG
+``cache``/``data`` home (via ``xdg_dirs.py``) for the former,
+``$HOME`` for the latter. ``scan_programdata`` has no such fallback — there
+is no single Linux directory that plays the same "machine-wide app data"
+role as ``%ProgramData%`` — and simply returns ``[]`` there.
+
 Stdlib only. Never writes to disk.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+from typing import Callable
 
+from scripts.system_inventory import xdg_dirs
 from scripts.system_inventory.common import InventoryItem, dir_size_on_disk
 
 # (environment variable name, detail "root" tag) pairs scanned by scan_appdata.
@@ -44,6 +55,19 @@ _APPDATA_ROOTS: tuple[tuple[str, str], ...] = (
     ("LOCALAPPDATA", "LOCALAPPDATA"),
     ("APPDATA", "APPDATA"),
 )
+
+# Linux has no LOCALAPPDATA/APPDATA environment variable at all, so a plain
+# os.environ.get() always misses there. Real equivalents (not a stub):
+# XDG_CACHE_HOME stands in for LOCALAPPDATA (both hold machine-local,
+# non-roamed, often-large caches), XDG_DATA_HOME stands in for APPDATA
+# (both hold per-app data meant to persist/roam with the user). Only
+# consulted when the Windows-style env var is unset AND we are not on
+# Windows, so real Windows behavior (including a genuinely unset
+# LOCALAPPDATA/APPDATA edge case) is unchanged.
+_APPDATA_XDG_FALLBACKS: dict[str, Callable[[], Path | None]] = {
+    "LOCALAPPDATA": xdg_dirs.cache_home,
+    "APPDATA": xdg_dirs.data_home,
+}
 
 # Hardcoded exclusion: chocolatey's app tree is itemized per-app by the
 # future packages.scan_scoop_choco() source (Part 2 Phase 2). Summing it
@@ -56,18 +80,26 @@ def _resolve_mapped_root(base: dict[str, str] | None, env_var: str) -> Path | No
     """Resolve one root path for ``scan_appdata``.
 
     When ``base`` is ``None`` (production), reads ``env_var`` straight from
-    ``os.environ``; an unset variable resolves to ``None``. When ``base`` is
+    ``os.environ``. On Windows, an unset variable resolves to ``None``. On
+    any other platform, an unset variable instead falls back to the
+    matching XDG directory (see ``_APPDATA_XDG_FALLBACKS``) since
+    ``LOCALAPPDATA``/``APPDATA`` do not exist there at all. When ``base`` is
     given (tests), it is a plain ``dict`` such as
     ``{"LOCALAPPDATA": "C:/tmp/local"}`` — a key absent from ``base`` is
-    treated exactly like an unset environment variable (resolves to
-    ``None``), which is what lets tests exercise the "one root missing"
-    tolerance without touching ``os.environ``.
+    treated exactly like an unset environment variable and resolves to
+    ``None`` (the XDG fallback is bypassed entirely, by design: it lets
+    tests exercise the "one root missing" tolerance deterministically,
+    regardless of the OS actually running the test).
     """
     if base is not None:
         value = base.get(env_var)
-    else:
-        value = os.environ.get(env_var)
-    return Path(value) if value else None
+        return Path(value) if value else None
+    value = os.environ.get(env_var)
+    if value:
+        return Path(value)
+    if sys.platform != "win32":
+        return _APPDATA_XDG_FALLBACKS[env_var]()
+    return None
 
 
 def _resolve_single_root(base: str | os.PathLike[str] | None, env_var: str) -> Path | None:
@@ -75,12 +107,25 @@ def _resolve_single_root(base: str | os.PathLike[str] | None, env_var: str) -> P
 
     ``base`` given (tests): used verbatim as the root, no environment
     lookup at all. ``base is None`` (production): reads ``env_var`` from
-    ``os.environ``; unset resolves to ``None``.
+    ``os.environ``; unset resolves to ``None`` — except for
+    ``USERPROFILE`` on any non-Windows platform, which is not an
+    environment variable that exists there at all: ``$HOME`` is its real
+    equivalent (both are "the current user's home directory"), so it is
+    used as the fallback instead of leaving ``scan_dotfolders`` silently
+    stubbed out on Linux. ``ProgramData`` has no equivalent fallback: there
+    is no single Linux directory that plays the same "machine-wide app
+    data" role, so it is left unresolved (``scan_programdata`` naturally
+    returns ``[]``) rather than guessing at a wrong mapping.
     """
     if base is not None:
         return Path(base)
     value = os.environ.get(env_var)
-    return Path(value) if value else None
+    if value:
+        return Path(value)
+    if env_var == "USERPROFILE" and sys.platform != "win32":
+        home = os.environ.get("HOME")
+        return Path(home) if home else None
+    return None
 
 
 def _iter_first_level_dirs(root: Path) -> list[os.DirEntry]:

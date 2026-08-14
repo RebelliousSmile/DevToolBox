@@ -9,9 +9,12 @@ import form that resolves under both
 
 from __future__ import annotations
 
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.system_inventory.appdata import scan_appdata, scan_dotfolders, scan_programdata
 
@@ -112,6 +115,33 @@ class ScanAppdataTests(unittest.TestCase):
             self.assertEqual(items[0].size_bytes, 11)
 
 
+class ScanAppdataLinuxXdgFallbackTests(unittest.TestCase):
+    """Exercises the production (base=None) env-var path with real env vars
+    cleared, so the XDG fallback added in Part 4 is genuinely reached
+    rather than assumed. Linux/POSIX-only: on Windows, LOCALAPPDATA/APPDATA
+    are real env vars and the fallback branch is intentionally not taken."""
+
+    @unittest.skipUnless(sys.platform != "win32", "XDG fallback only applies off Windows")
+    def test_scan_appdata_falls_back_to_xdg_dirs_when_env_vars_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            cache = home / ".cache"
+            data = home / ".local" / "share"
+            (cache / "SomeCacheApp").mkdir(parents=True)
+            (cache / "SomeCacheApp" / "f.txt").write_bytes(b"x" * 9)
+            (data / "SomeDataApp").mkdir(parents=True)
+            (data / "SomeDataApp" / "f.txt").write_bytes(b"x" * 4)
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                items = scan_appdata()
+
+            by_name = {item.name: item for item in items}
+            self.assertEqual(by_name["SomeCacheApp"].size_bytes, 9)
+            self.assertEqual(by_name["SomeCacheApp"].detail, {"root": "LOCALAPPDATA"})
+            self.assertEqual(by_name["SomeDataApp"].size_bytes, 4)
+            self.assertEqual(by_name["SomeDataApp"].detail, {"root": "APPDATA"})
+
+
 class ScanDotfoldersTests(unittest.TestCase):
     def test_dotfolders_are_picked_up_with_correct_size(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +185,18 @@ class ScanDotfoldersTests(unittest.TestCase):
             root = Path(tmp) / "does_not_exist"
             items = scan_dotfolders(base=str(root))
             self.assertEqual(items, [])
+
+    @unittest.skipUnless(sys.platform != "win32", "$HOME fallback only applies off Windows")
+    def test_falls_back_to_home_when_userprofile_env_var_unset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".cargo").mkdir()
+            (home / ".cargo" / "f.txt").write_bytes(b"x" * 6)
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                items = scan_dotfolders()
+
+            self.assertEqual([item.name for item in items], [".cargo"])
 
 
 class ScanProgramdataTests(unittest.TestCase):

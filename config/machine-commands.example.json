@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "Template for DevToolBox's per-machine command mapping file.",
+    "This file itself is NOT read by DevToolBox — it is a copy-paste starting",
+    "point. To activate it, copy this file's *contents* into the real path",
+    "returned by platform::machine_commands_path() (see",
+    "aidd_docs/memory/architecture.md, 'Per-machine command resolution'):",
+    "  - Linux:   $XDG_STATE_HOME/devtoolbox/machine-commands.json",
+    "             (falls back to ~/.local/state/devtoolbox/machine-commands.json)",
+    "  - Windows: %LOCALAPPDATA%\\DevToolBox\\machine-commands.json",
+    "This '_comment' key is not part of the schema DevToolBox expects (only",
+    "'machines' is read); it is silently ignored by the loader, so you may",
+    "keep it or delete it once you understand the shape below.",
+    "",
+    "Shape: { \"machines\": { \"<machine-id>\": { \"<command-id>\": \"<override string>\" } } }",
+    "  - <machine-id>: matched case-insensitively against platform::machine_id()",
+    "    (the DEVTOOLBOX_MACHINE_ID env var if set, else the OS hostname, else",
+    "    \"unknown\"). A disabled card in the app shows the exact machine id to",
+    "    use for the current machine in its inline message.",
+    "  - <command-id>: the 'id' field (not 'name') of a command in config.json",
+    "    that has \"machine_specific\": true. A disabled card's inline message",
+    "    also names the missing command id.",
+    "  - <override string>: the literal launch string to use on that machine",
+    "    instead of the command's default 'command' field — same format as",
+    "    'command' (may itself be an '@python <script> [args...]' invocation).",
+    "",
+    "Only machines/commands you list here are overridden; every other",
+    "machine-specific command on an unlisted machine renders disabled until",
+    "you add an entry for it."
+  ],
+  "machines": {
+    "example-machine-id": {
+      "example-command-id": "example-actual-command --with-any-flags-needed-on-this-machine"
+    }
+  }
+}

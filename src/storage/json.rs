@@ -1,8 +1,12 @@
 //! JSON persistence for DevToolBox configuration.
 //!
-//! - `load()`: reads `%APPDATA%\DevToolBox\config.json`; falls back to the
-//!   bundled `config/default.json` (cwd then exe-dir) when the user file is
-//!   absent.
+//! - `load()`: reads the user config file (`platform::config_path()` —
+//!   `%APPDATA%\DevToolBox\config.json` on Windows,
+//!   `$XDG_CONFIG_HOME/devtoolbox/config.json` on Linux); falls back to the
+//!   bundled default (cwd then exe-dir) when the user file is absent —
+//!   `config/default.json` on Windows/other, `config/default.linux.json` on
+//!   Linux (the Windows default's `notepad.exe`/`cmd.exe`/`ipconfig` commands
+//!   don't exist there).
 //! - `save()`: writes the typed [`Config`] to `%APPDATA%\DevToolBox\config.json`,
 //!   creating the directory if needed.  The `version` field is preserved as-is.
 //!
@@ -84,21 +88,40 @@ impl From<serde_json::Error> for StorageError {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `%APPDATA%\DevToolBox\config.json`, or `None` if `APPDATA` is unset.
+/// Returns the user configuration file path, delegated to
+/// [`crate::platform::config_path`] (Windows: `%APPDATA%\DevToolBox\config.json`;
+/// Linux: `$XDG_CONFIG_HOME/devtoolbox/config.json`, falling back to
+/// `~/.config/devtoolbox/config.json`).
+///
+/// Always returns `Some` — `platform::config_path()` returns a bare
+/// `PathBuf` with its own OS-specific fallback for the unset-env-var case
+/// (falls back to a temp dir on Windows rather than returning `None`), so
+/// this wrapper never observes an absent path. Kept `Option`-returning for
+/// source compatibility with existing callers in this file.
 pub fn user_config_path() -> Option<PathBuf> {
-    std::env::var("APPDATA").ok().map(|appdata| {
-        PathBuf::from(appdata)
-            .join("DevToolBox")
-            .join("config.json")
-    })
+    Some(crate::platform::config_path())
 }
 
-/// Returns the path to the bundled `config/default.json` using the same
-/// candidates as the former `load_config()` in `app.rs`:
+/// Returns the path to the bundled default config using the same candidates
+/// as the former `load_config()` in `app.rs`:
 /// 1. Relative to the current working directory.
 /// 2. Relative to the executable directory.
+///
+/// Picks `config/default.linux.json` on Linux (real, Ubuntu-LTS-validated
+/// commands — `notepad.exe`/`cmd.exe`/`ipconfig` in `default.json` don't
+/// exist there) and `config/default.json` everywhere else.
 pub fn default_config_path() -> Option<PathBuf> {
-    bundled_config_path("default.json")
+    bundled_config_path(default_config_filename())
+}
+
+#[cfg(target_os = "linux")]
+fn default_config_filename() -> &'static str {
+    "default.linux.json"
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_config_filename() -> &'static str {
+    "default.json"
 }
 
 fn bundled_config_path(filename: &str) -> Option<PathBuf> {
@@ -259,6 +282,7 @@ mod tests {
                 variant_group: None,
                 group_name: None,
                 variant_label: None,
+                machine_specific: false,
                 },
                 Command {
                     id: "cmd".to_string(),
@@ -271,6 +295,7 @@ mod tests {
                 variant_group: None,
                 group_name: None,
                 variant_label: None,
+                machine_specific: false,
                 },
             ],
         }
@@ -391,18 +416,45 @@ mod tests {
 
     #[test]
     fn user_config_path_contains_devtoolbox() {
-        // Only verify shape when APPDATA is set; skip if absent.
-        if let Some(path) = user_config_path() {
-            let display = path.display().to_string();
-            assert!(
-                display.contains("DevToolBox"),
-                "user config path must contain DevToolBox, got: {display}"
-            );
-            assert!(
-                display.ends_with("config.json"),
-                "user config path must end with config.json, got: {display}"
-            );
-        }
+        // Delegated to `platform::config_path()`, which always returns
+        // `Some` now (see `user_config_path`'s doc comment) — no env-var
+        // skip branch needed anymore.
+        let path = user_config_path().expect("user_config_path must always return Some");
+        let display = path.display().to_string();
+        // Directory-name casing is OS-specific: `DevToolBox` on Windows
+        // (`platform::windows::config_path`), lowercase `devtoolbox` on
+        // Linux (`platform::linux::config_path`, XDG convention).
+        #[cfg(windows)]
+        assert!(
+            display.contains("DevToolBox"),
+            "user config path must contain DevToolBox, got: {display}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            display.contains("devtoolbox"),
+            "user config path must contain devtoolbox, got: {display}"
+        );
+        assert!(
+            display.ends_with("config.json"),
+            "user config path must end with config.json, got: {display}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn default_config_path_resolves_to_the_real_linux_bundled_file() {
+        let path = default_config_path().expect("default_config_path must find a bundled file");
+        assert!(
+            path.ends_with("config/default.linux.json"),
+            "expected the Linux-specific default, got: {}",
+            path.display()
+        );
+        assert!(path.is_file(), "resolved path must exist for real");
+        let config = load_from(&path).expect("default.linux.json must parse as a valid Config");
+        assert!(
+            !config.commands.is_empty(),
+            "default.linux.json must ship at least one real command"
+        );
     }
 
     #[test]

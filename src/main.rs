@@ -1,18 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! DevToolBox - Windows 11 Command Launcher
+//! DevToolBox - Windows 11 / Linux Command Launcher
 //!
-//! Native Rust application using tao for windowing and Win32 child controls
-//! for the command-grid UI.
+//! Cross-platform Rust application using `eframe`/`egui` for the UI (Part 2
+//! of the multi-OS transformation). Phase 1 wires up a minimal `eframe::App`
+//! bootstrap; the full card grid lands in Phase 2.
 
 mod icons;
+mod linux;
+mod platform;
 mod storage;
 mod ui;
 mod windows;
 
-use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoop};
-use tao::window::WindowBuilder;
+use eframe::egui;
+
+use ui::egui_app::EguiApp;
 
 struct FlushFile(std::fs::File);
 
@@ -75,8 +78,7 @@ fn main() {
     // Best-effort boot sync: align the registry startup entry with config.
     match storage::load() {
         Ok(cfg) => {
-            if let Err(e) = windows::registry::sync_startup(cfg.default_settings.launch_at_startup)
-            {
+            if let Err(e) = platform::sync_startup(cfg.default_settings.launch_at_startup) {
                 log::warn!("boot sync_startup failed: {}", e);
             }
         }
@@ -85,41 +87,22 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoop::new();
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("DevToolBox - Actions Windows")
+            .with_inner_size([800.0, 600.0])
+            .with_min_inner_size([400.0, 300.0]),
+        ..Default::default()
+    };
 
-    let window = WindowBuilder::new()
-        .with_title("DevToolBox - Actions Windows")
-        .with_inner_size(tao::dpi::LogicalSize::new(800u32, 600u32))
-        .with_min_inner_size(tao::dpi::LogicalSize::new(400u32, 300u32))
-        .build(&event_loop)
-        .expect("Failed to create window");
+    let run_result = eframe::run_native(
+        "DevToolBox",
+        native_options,
+        Box::new(|cc| Ok(Box::new(EguiApp::new(cc)))),
+    );
 
-    // Obtain the Win32 HWND from the tao window via raw-window-handle 0.6.
-    let hwnd = ui::hwnd_from_window(&window);
-    log::info!("HWND obtained: {:?}", hwnd);
-
-    // Initialise the native UI host with the parent HWND.
-    ui::host_init(hwnd).expect("Failed to initialise UI host");
-
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                log::info!("Close requested — exiting event loop");
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => {
-                let hwnd = ui::hwnd_from_window(&window);
-                ui::on_resize(hwnd, size.width, size.height);
-            }
-            _ => {}
-        }
-    });
+    match run_result {
+        Ok(()) => log::info!("eframe event loop exited cleanly"),
+        Err(e) => log::error!("eframe::run_native returned an error: {e}"),
+    }
 }

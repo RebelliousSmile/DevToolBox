@@ -162,9 +162,13 @@ class NoActiveSourceGuardTests(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("Aucune source disponible", err)
 
-    def test_registry_requested_but_winreg_unavailable_triggers_guard(self):
+    def test_path_requested_but_winreg_unavailable_triggers_guard(self):
+        # "path" has no Linux dispatch of its own (Windows PATH lives only
+        # in the registry — see Part 4 plan Amendments), so it stays in
+        # _WINREG_DEPENDENT_SOURCES and is pre-filtered when WINREG_AVAILABLE
+        # is False.
         with (
-            patch.dict(SCANNERS, {"registry": _fake_registry_items}, clear=True),
+            patch.dict(SCANNERS, {"path": lambda: []}, clear=True),
             patch("scripts.system_inventory.inventory.WINREG_AVAILABLE", False),
         ):
             code, out, err = _run([])
@@ -172,6 +176,34 @@ class NoActiveSourceGuardTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertEqual(out, "")
         self.assertIn("winreg", err)
+
+    def test_registry_requested_with_winreg_unavailable_still_runs(self):
+        # Part 4 Phase 2: "registry" now dispatches internally to
+        # systemd.py on Linux instead of hard-requiring winreg, so it must
+        # no longer be pre-filtered by WINREG_AVAILABLE alone.
+        with (
+            patch.dict(SCANNERS, {"registry": _fake_registry_items}, clear=True),
+            patch("scripts.system_inventory.inventory.WINREG_AVAILABLE", False),
+        ):
+            code, out, err = _run([])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("[registry] Big App", out)
+
+    def test_docker_wsl_requested_with_winreg_unavailable_still_runs(self):
+        # Part 4 Phase 3: "docker-wsl" now dispatches internally to
+        # docker_native.py on Linux instead of hard-requiring winreg, so it
+        # must no longer be pre-filtered by WINREG_AVAILABLE alone.
+        with (
+            patch.dict(SCANNERS, {"docker-wsl": _fake_docker_wsl_items}, clear=True),
+            patch("scripts.system_inventory.inventory.WINREG_AVAILABLE", False),
+        ):
+            code, out, err = _run([])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("[docker-wsl] Ubuntu", out)
 
 
 class DockerWslAppdataExcludePathsThreadingTests(unittest.TestCase):

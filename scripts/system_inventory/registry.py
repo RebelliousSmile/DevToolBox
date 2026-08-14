@@ -16,13 +16,24 @@ importing this package (e.g. for tooling, linting, or an orchestrator that
 wants to enumerate available sources before deciding what to run). Instead:
 the import is guarded, ``WINREG_AVAILABLE`` records whether it succeeded,
 and ``scan_registry()`` raises the catchable ``WinregUnavailableError`` at
-*call* time if it did not. This lets Part 3's orchestrator do
+*call* time if it did not on a platform where no Linux dispatch applies.
+This lets Part 3's orchestrator do
 ``try: scan_registry() except WinregUnavailableError:`` and degrade with a
 clear message instead of the whole program dying at import time.
+
+On Linux, ``scan_registry()`` dispatches instead to
+``systemd.scan_systemd()`` for this same ``"registry"`` source slot: the
+Windows Uninstall registry's closest Linux analogue for "what background
+software runs itself" is not a package list (that is Scoop/Chocolatey's
+Linux equivalent — see ``packages.py``/``packages_linux.py``) but the set
+of systemd service/timer units.
 """
 
 from __future__ import annotations
 
+import sys
+
+from scripts.system_inventory import systemd
 from scripts.system_inventory.common import InventoryItem
 
 try:
@@ -135,10 +146,16 @@ def scan_registry() -> list[InventoryItem]:
     ``_SCAN_TARGETS`` docstring above); only an exact duplicate triple
     (the same key somehow enumerated twice) is collapsed.
 
-    Raises ``WinregUnavailableError`` if ``winreg`` failed to import (i.e.
-    this is not Windows). Never raises for a single unreadable subkey or
+    On Linux (``sys.platform != "win32"``), dispatches instead to
+    ``systemd.scan_systemd()`` — see the module docstring. Raises
+    ``WinregUnavailableError`` only if ``winreg`` failed to import *and*
+    this is not the Linux dispatch case (e.g. some other non-Windows,
+    non-Linux platform). Never raises for a single unreadable subkey or
     missing value: those are skipped and the scan continues.
     """
+    if sys.platform != "win32":
+        return systemd.scan_systemd()
+
     if not WINREG_AVAILABLE:
         raise WinregUnavailableError(
             "winreg n'est pas disponible sur cette plateforme (module stdlib "

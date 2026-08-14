@@ -240,6 +240,7 @@ mod tests {
                 variant_group: None,
                 group_name: None,
                 variant_label: None,
+                machine_specific: false,
         }
     }
 

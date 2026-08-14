@@ -30,6 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from scripts.winclean import trash_linux  # noqa: E402
 from scripts.winclean.common import estimate_path, volume_of  # noqa: E402
 
 __all__ = [
@@ -124,7 +125,7 @@ def is_partial_error(error: RemovalError) -> bool:
 
 
 def long_path(p: str | os.PathLike[str]) -> str:
-    """Forme `\\\\?\\` d'un chemin absolu déjà résolu.
+    """Forme `\\\\?\\` d'un chemin absolu déjà résolu (Windows), ou chemin nu (Linux).
 
     Lève sur un chemin relatif, **et** sur un chemin absolu portant encore un
     composant `.` ou `..` ou terminé par un point ou une espace. L'absoluité
@@ -133,7 +134,15 @@ def long_path(p: str | os.PathLike[str]) -> str:
     un composant littéral `..` et désignerait un chemin qu'aucun garde n'a
     évalué. On lève plutôt que de réparer : réparer placerait une seconde
     résolution, plus discrète, **sous** la couche de gardes au lieu de devant.
+
+    Linux n'a ni préfixe long-path ni lettre de lecteur : `_posix_long_path()`
+    prend le relais et rend le chemin **nu**, après la même garde `.`/`..` -
+    la comparaison lexicale des gardes en amont (`exclude_paths`, etc.) reste
+    la même sur les deux systèmes, seule la forme du chemin qu'elle protège
+    change.
     """
+    if sys.platform != "win32":
+        return _posix_long_path(str(p))
     raw = str(p)
     if raw.startswith("\\\\?\\"):
         return raw.replace("/", "\\")
@@ -157,6 +166,25 @@ def long_path(p: str | os.PathLike[str]) -> str:
     if text.startswith("\\\\"):
         return "\\\\?\\UNC\\" + text.lstrip("\\")
     return "\\\\?\\" + text
+
+
+def _posix_long_path(raw: str) -> str:
+    """Contrepartie Linux de `long_path()` : pas de préfixe, chemin rendu nu.
+
+    Aucune norme POSIX n'interdit un nom de fichier terminé par un point ou
+    une espace - contrairement à Windows, ce n'est pas illisible côté noyau -
+    donc seule la garde `.`/`..` est reconduite ici, pas celle sur le dernier
+    caractère.
+    """
+    if not raw.startswith("/"):
+        raise ValueError(f"chemin relatif refusé par long_path() : {raw!r}")
+    for component in raw.split("/"):
+        if component in _ILLEGAL_COMPONENTS:
+            raise ValueError(
+                f"composant {component!r} non résolu dans {raw!r} : ce chemin ne "
+                "désigne pas ce qu'il paraît sans une résolution préalable."
+            )
+    return raw
 
 
 # --------------------------------------------------------------------------- #
@@ -329,11 +357,18 @@ def _get_drive_type(root: str) -> int:
 def can_recycle(path: str | os.PathLike[str]) -> bool:
     """Vrai si la corbeille peut accueillir ce chemin.
 
-    Faux au-delà de MAX_PATH — la corbeille ne connaît pas les chemins longs —
-    et faux sur tout volume qui n'est pas `DRIVE_FIXED`, ce que décide
-    `GetDriveTypeW` et jamais une heuristique sur le préfixe du chemin. Un
-    retour inconnu ou en échec vaut faux.
+    Sur Windows : faux au-delà de MAX_PATH — la corbeille ne connaît pas les
+    chemins longs — et faux sur tout volume qui n'est pas `DRIVE_FIXED`, ce
+    que décide `GetDriveTypeW` et jamais une heuristique sur le préfixe du
+    chemin. Un retour inconnu ou en échec vaut faux.
+
+    Sur Linux : délègue entièrement à `trash_linux.can_trash()`, la home
+    trashcan freedesktop.org - il n'y a ni MAX_PATH ni notion de volume fixe
+    à vérifier ici, `can_trash()` porte déjà sa propre condition (`$HOME`
+    résolu, chemin absolu, chemin existant).
     """
+    if sys.platform != "win32":
+        return trash_linux.can_trash(path)
     try:
         prefixed = long_path(path)
     except ValueError:
@@ -350,11 +385,15 @@ def can_recycle(path: str | os.PathLike[str]) -> bool:
 def recycle(path: str | os.PathLike[str]) -> RecycleOutcome:
     """Déplace un chemin vers la corbeille. Aucun repli sur `delete_tree`.
 
-    Un retour non nul **ou** `fAnyOperationsAborted` armé signifie : candidat
-    compté en échec avec la raison `recycle-failed`, laissé en place
-    (décision 14). Le chemin est passé **non préfixé** — `SHFileOperationW`
-    refuse `\\\\?\\`.
+    Sur Windows : un retour non nul **ou** `fAnyOperationsAborted` armé
+    signifie candidat compté en échec avec la raison `recycle-failed`, laissé
+    en place (décision 14). Le chemin est passé **non préfixé** —
+    `SHFileOperationW` refuse `\\\\?\\`.
+
+    Sur Linux : délègue à `_recycle_via_trash()`.
     """
+    if sys.platform != "win32":
+        return _recycle_via_trash(path)
     target = str(Path(path))
     op = SHFILEOPSTRUCTW()
     op.hwnd = None
@@ -393,6 +432,33 @@ def recycle(path: str | os.PathLike[str]) -> RecycleOutcome:
             errors=[RemovalError(path=target, winerror=None, message=detail)],
         )
     return RecycleOutcome(ok=True, code=code, aborted=False)
+
+
+def _recycle_via_trash(path: str | os.PathLike[str]) -> RecycleOutcome:
+    """Adapte `trash_linux.move_to_trash()` en `RecycleOutcome`.
+
+    Le seul point de contact entre les deux corbeilles : `clean.py` n'appelle
+    que `remove.recycle()` et lit `.ok`/`.errors`, jamais `trash_linux`
+    directement (voir la docstring de tête de `trash_linux.py`). `TrashError`
+    n'a pas de `winerror` - la spécification freedesktop.org n'en connaît
+    pas - donc chaque erreur devient une `RemovalError` à `winerror=None`.
+    """
+    target = str(Path(path))
+    outcome = trash_linux.move_to_trash(path)
+    if outcome.ok:
+        return RecycleOutcome(ok=True, code=0)
+    errors = [
+        RemovalError(path=error.path, winerror=None, message=error.message)
+        for error in outcome.errors
+    ] or [RemovalError(path=target, winerror=None, message=outcome.detail)]
+    return RecycleOutcome(
+        ok=False,
+        code=-1,
+        aborted=False,
+        reason=outcome.reason,
+        detail=outcome.detail,
+        errors=errors,
+    )
 
 
 # --------------------------------------------------------------------------- #

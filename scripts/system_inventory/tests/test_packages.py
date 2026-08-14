@@ -9,10 +9,13 @@ for why this is the only import form that resolves under both
 
 from __future__ import annotations
 
+import platform
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from scripts.system_inventory import packages
 from scripts.system_inventory.packages import scan_scoop_choco
 
 
@@ -104,6 +107,47 @@ class ScanScoopChocoTests(unittest.TestCase):
             items = scan_scoop_choco(base={"scoop": str(does_not_exist)})
 
             self.assertEqual(items, [])
+
+
+class ScanScoopChocoLinuxDispatchTests(unittest.TestCase):
+    """Part 4 Phase 2: base=None on a non-Windows platform dispatches to
+    packages_linux.scan_packages_linux() instead of resolving Scoop/Choco
+    roots (Windows-only tools, no Linux path to resolve)."""
+
+    def test_base_none_on_linux_dispatches_to_packages_linux(self):
+        fake_items = [object()]
+        with mock.patch.object(packages.sys, "platform", "linux"):
+            with mock.patch.object(
+                packages.packages_linux, "scan_packages_linux", return_value=fake_items
+            ) as scan_mock:
+                items = scan_scoop_choco()
+
+        scan_mock.assert_called_once_with()
+        self.assertIs(items, fake_items)
+
+    def test_base_given_on_linux_does_not_dispatch(self):
+        with mock.patch.object(packages.sys, "platform", "linux"):
+            with mock.patch.object(packages.packages_linux, "scan_packages_linux") as scan_mock:
+                items = scan_scoop_choco(base={})
+
+        scan_mock.assert_not_called()
+        self.assertEqual(items, [])
+
+
+@unittest.skipUnless(platform.system() == "Linux", "Linux dispatch only")
+class ScanScoopChocoLinuxLiveSmokeTest(unittest.TestCase):
+    """Runs the real scanner on Linux: base=None must dispatch to the real
+    apt/dnf/pacman-backed packages_linux.scan_packages_linux(), returning at
+    least one item on any machine with a recognized package manager."""
+
+    def test_returns_items_tagged_packages_linux(self):
+        items = scan_scoop_choco()
+
+        self.assertGreater(len(items), 0)
+        for item in items:
+            self.assertEqual(item.source, "packages-linux")
+            self.assertTrue(item.name)
+            self.assertIn(item.detail["manager"], ("apt", "dnf", "pacman"))
 
 
 if __name__ == "__main__":

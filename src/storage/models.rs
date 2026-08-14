@@ -32,7 +32,7 @@ pub struct Category {
 ///
 /// `shortcut` is optional — commands without a shortcut omit the key in JSON
 /// (via `skip_serializing_if`) so the round-trip stays lossless.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Command {
     pub id: String,
     pub name: String,
@@ -48,6 +48,12 @@ pub struct Command {
     pub group_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant_label: Option<String>,
+    /// Whether this command's launch string should be resolved per-machine
+    /// via the Part 1 `MachineCommands` mapping instead of using `command`
+    /// as-is. Absent from JSON (existing configs) deserializes to `false`,
+    /// preserving current behaviour for every pre-existing entry.
+    #[serde(default)]
+    pub machine_specific: bool,
 }
 
 /// Top-level configuration wrapper.

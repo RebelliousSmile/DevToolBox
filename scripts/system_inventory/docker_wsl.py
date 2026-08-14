@@ -30,11 +30,19 @@ generic ``LOCALAPPDATA`` first-level folder (``Docker`` or ``Packages``).
 
 Present-only: a missing Docker/WSL root and a missing/empty ``Lxss`` key are
 both tolerated independently — if neither contributes anything, ``[]`` is
-returned without raising. ``winreg`` unavailability (non-Windows) is *not*
-tolerated the same way: it raises ``WinregUnavailableError`` (imported from
-``registry.py`` and reused verbatim), exactly like ``registry.py`` and
-``path_env.py``, since this source fundamentally requires the registry for
-its distro half.
+returned without raising.
+
+Part 4 Phase 3: when ``base is None`` and ``sys.platform != "win32"``,
+``scan_docker_wsl`` dispatches to ``docker_native.scan_docker_native()``
+under the same ``"docker-wsl"`` source slot instead of touching ``winreg`` at
+all (mirrors the ``registry.py``/``packages.py`` dispatch pattern from Phase
+2) — the returned items carry ``source="docker-native"``. When a ``base`` is
+given (test injection of the vhdx-glob root, on any platform), or on real
+Windows, the original Windows-shaped logic runs instead: ``winreg``
+unavailability there is *not* tolerated — ``_iter_lxss_subkeys`` raises
+``WinregUnavailableError`` (imported from ``registry.py`` and reused
+verbatim) if it is ever actually called without ``winreg`` available, since
+the distro half fundamentally requires the registry.
 
 Read-only contract: only ``winreg.OpenKey``/``winreg.EnumKey``/
 ``winreg.QueryValueEx`` are used. No write API is imported or referenced —
@@ -47,8 +55,10 @@ Stdlib only. Never writes to disk or the registry.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+from scripts.system_inventory import docker_native
 from scripts.system_inventory.common import InventoryItem
 from scripts.system_inventory.registry import WinregUnavailableError
 
@@ -210,7 +220,18 @@ def _iter_lxss_subkeys() -> dict[str, dict[str, str]]:
     read successfully, possibly neither — ``_parse_lxss_distros`` then skips
     it). Only ``winreg.OpenKey``/``winreg.EnumKey``/``winreg.QueryValueEx``
     (read APIs) are used.
+
+    Raises ``WinregUnavailableError`` if ``winreg`` failed to import (i.e.
+    this is not Windows) — the one point in this module where ``winreg`` is
+    actually touched. Callers that inject a fake vhdx root via ``base=`` for
+    testability are expected to patch this function directly rather than let
+    it run live, so this raise never fires under test.
     """
+    if not WINREG_AVAILABLE:
+        raise WinregUnavailableError(
+            "winreg n'est pas disponible sur cette plateforme (module stdlib "
+            "réservé à Windows) : la source docker-wsl ne peut pas être scannée."
+        )
     subkeys: dict[str, dict[str, str]] = {}
     try:
         lxss_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, LXSS_SUBKEY, 0, winreg.KEY_READ)
@@ -281,21 +302,25 @@ def scan_docker_wsl(base: dict[str, str] | None = None) -> list[InventoryItem]:
     ``_iter_lxss_subkeys`` directly, or exercise ``_parse_lxss_distros`` in
     isolation with an injected dict).
 
-    Raises ``WinregUnavailableError`` (imported from ``registry.py``) if
-    ``winreg`` failed to import (i.e. this is not Windows). Once ``winreg``
-    is available, a missing vhdx root and a missing/empty ``Lxss`` key are
-    both tolerated independently — if neither contributes anything, ``[]``
-    is returned without raising.
+    Part 4 Phase 3: when ``base is None`` and this is not Windows, dispatches
+    to ``docker_native.scan_docker_native()`` instead of touching the
+    registry at all — production's only call site (``inventory.py``, zero
+    arguments) always hits this path on Linux. A ``base`` given explicitly
+    (test injection, any platform) always runs the original Windows-shaped
+    logic below instead.
+
+    Once past the dispatch check, a missing vhdx root and a missing/empty
+    ``Lxss`` key are both tolerated independently — if neither contributes
+    anything, ``[]`` is returned without raising. ``winreg`` unavailability
+    only surfaces as ``WinregUnavailableError`` if ``_iter_lxss_subkeys`` is
+    actually reached without a mock in place (see its own docstring).
 
     When the same absolute vhdx path is found by both the glob and a
     registered distro, only the distro-tagged item is kept (it carries the
     distro name — strictly more information than the bare glob item).
     """
-    if not WINREG_AVAILABLE:
-        raise WinregUnavailableError(
-            "winreg n'est pas disponible sur cette plateforme (module stdlib "
-            "réservé à Windows) : la source docker-wsl ne peut pas être scannée."
-        )
+    if base is None and sys.platform != "win32":
+        return docker_native.scan_docker_native()
 
     glob_items = _vhdx_glob_items(base)
 
