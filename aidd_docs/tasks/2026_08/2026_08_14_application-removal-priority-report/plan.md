@@ -1,6 +1,6 @@
 ---
 objective: Ajouter à DevToolBox un rapport natif multi-OS, explicable et strictement en lecture seule qui classe les applications à désinstaller selon leur empreinte disque et leur ancienneté d’usage estimée.
-status: in-progress
+status: implemented
 ---
 
 # Plan
