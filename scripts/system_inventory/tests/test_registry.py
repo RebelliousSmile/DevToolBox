@@ -14,7 +14,12 @@ import re
 import unittest
 from pathlib import Path
 
-from scripts.system_inventory.registry import WINREG_AVAILABLE, _read_uninstall_entry, scan_registry
+from scripts.system_inventory.registry import (
+    WINREG_AVAILABLE,
+    _read_uninstall_entry,
+    _read_uninstall_metadata,
+    scan_registry,
+)
 
 _REGISTRY_SOURCE = (Path(__file__).resolve().parent.parent / "registry.py").read_text(encoding="utf-8")
 
@@ -120,6 +125,23 @@ class RegistrySourceReadOnlyContractTests(unittest.TestCase):
                     match,
                     f"registry.py must never call the winreg write API winreg.{write_api}(...)",
                 )
+
+
+class ReadUninstallMetadataTests(unittest.TestCase):
+    def test_rich_metadata_is_exposed_without_changing_legacy_shape(self):
+        values = {
+            "DisplayName": "Editor",
+            "EstimatedSize": 10,
+            "DisplayIcon": 'C:\\Apps\\Editor\\editor.exe,0',
+            "UninstallString": '"C:\\Apps\\Editor\\uninstall.exe" /remove',
+            "SystemComponent": 1,
+        }
+        legacy = _read_uninstall_entry(values)
+        metadata = _read_uninstall_metadata(values)
+        self.assertEqual(set(legacy), {"name", "size_bytes", "install_date", "install_location"})
+        self.assertEqual(metadata["display_icon"], values["DisplayIcon"])
+        self.assertEqual(metadata["uninstall_string"], values["UninstallString"])
+        self.assertTrue(metadata["system_component"])
 
 
 @unittest.skipUnless(WINREG_AVAILABLE and platform.system() == "Windows", "winreg only available on Windows")

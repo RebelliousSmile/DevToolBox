@@ -108,6 +108,14 @@ class ScanScoopChocoTests(unittest.TestCase):
 
             self.assertEqual(items, [])
 
+    def test_explicit_windows_primitive_is_fixture_friendly_on_linux(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scoop = Path(tmp) / "scoop"
+            (scoop / "apps" / "editor").mkdir(parents=True)
+            (scoop / "apps" / "editor" / "editor.exe").write_bytes(b"abc")
+            items = packages.scan_scoop_choco_windows({"scoop": str(scoop)})
+        self.assertEqual([(item.name, item.size_bytes) for item in items], [("editor", 3)])
+
 
 class ScanScoopChocoLinuxDispatchTests(unittest.TestCase):
     """Part 4 Phase 2: base=None on a non-Windows platform dispatches to

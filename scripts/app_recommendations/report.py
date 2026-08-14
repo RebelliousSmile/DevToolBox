@@ -15,6 +15,8 @@ from typing import Any
 from .history import UsageHistory, usage_for
 from .models import (
     Candidate,
+    CommandSuggestion,
+    Protection,
     RecommendationReport,
     SizeEvidence,
     SourceError,
@@ -28,8 +30,15 @@ def _merge_candidates(left: Candidate, right: Candidate) -> Candidate:
     left_size = left.size.installed_bytes
     right_size = right.size.installed_bytes
     size = right.size if right_size is not None and (left_size is None or right_size > left_size) else left.size
-    protected = left.protection if left.protection.protected else right.protection
-    command = None if protected.protected else left.command or right.command
+    protection_reasons = sorted(set(left.protection.reasons + right.protection.reasons))
+    protected = Protection(left.protection.protected or right.protection.protected, protection_reasons)
+    commands = [command for command in (left.command, right.command) if command is not None]
+    verified = next((command for command in commands if command.origin == "manager_verified"), None)
+    command: CommandSuggestion | None = None if protected.protected else verified or (commands[0] if commands else None)
+    sources = {left.source, right.source}
+    for value in (left.metadata.get("all_sources"), right.metadata.get("all_sources")):
+        if value:
+            sources.update(source for source in value.split(",") if source)
     return replace(
         left,
         name=min(left.name, right.name, key=str.casefold),
@@ -37,7 +46,7 @@ def _merge_candidates(left: Candidate, right: Candidate) -> Candidate:
         executable_hints=sorted(set(left.executable_hints + right.executable_hints)),
         protection=protected,
         command=command,
-        metadata={**right.metadata, **left.metadata},
+        metadata={**right.metadata, **left.metadata, "all_sources": ",".join(sorted(sources))},
     )
 
 
@@ -102,8 +111,18 @@ def build_report(
             _merge_candidates(existing, candidate) if existing else candidate
         )
 
-    scored: list[Candidate] = []
+    cross_source: dict[str, Candidate] = {}
+    without_cross_key: list[Candidate] = []
     for candidate in deduplicated.values():
+        key = candidate.metadata.get("dedupe_key")
+        if not key:
+            without_cross_key.append(candidate)
+            continue
+        existing = cross_source.get(key)
+        cross_source[key] = _merge_candidates(existing, candidate) if existing else candidate
+
+    scored: list[Candidate] = []
+    for candidate in [*without_cross_key, *cross_source.values()]:
         with_usage = replace(candidate, usage=usage_for(candidate.app_id, history))
         scored.append(score_candidate(with_usage))
     scored.sort(key=lambda item: (-item.score, item.name.casefold(), item.app_id))

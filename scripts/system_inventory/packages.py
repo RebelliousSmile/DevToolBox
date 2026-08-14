@@ -128,6 +128,16 @@ def scan_scoop_choco(base: dict[str, str] | None = None) -> list[InventoryItem]:
     """
     if base is None and sys.platform != "win32":
         return packages_linux.scan_packages_linux()
+    return scan_scoop_choco_windows(base)
+
+
+def scan_scoop_choco_windows(base: dict[str, str] | None = None) -> list[InventoryItem]:
+    """Read Windows Scoop/Chocolatey roots without platform dispatch.
+
+    The explicit primitive lets the recommendation adapter remain testable
+    on Linux with temporary roots while preserving ``scan_scoop_choco``'s
+    existing Linux dispatch contract.
+    """
     items: list[InventoryItem] = []
     for manager, subdir_name in _MANAGER_SUBDIRS:
         root = _resolve_manager_root(base, manager)

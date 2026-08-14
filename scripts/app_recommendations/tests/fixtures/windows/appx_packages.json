@@ -1,0 +1,24 @@
+[
+  {
+    "Name": "Contoso.Editor",
+    "PackageFullName": "Contoso.Editor_1.0_x64__abc",
+    "PackageFamilyName": "Contoso.Editor_abc",
+    "InstallLocation": "C:\\Program Files\\WindowsApps\\Contoso.Editor",
+    "IsFramework": false,
+    "IsResourcePackage": false,
+    "NonRemovable": false,
+    "SignatureKind": "Store",
+    "SizeBytes": 700000000
+  },
+  {
+    "Name": "Contoso.Runtime",
+    "PackageFullName": "Contoso.Runtime_1.0_x64__abc",
+    "PackageFamilyName": "Contoso.Runtime_abc",
+    "InstallLocation": "C:\\Program Files\\WindowsApps\\Contoso.Runtime",
+    "IsFramework": true,
+    "IsResourcePackage": false,
+    "NonRemovable": false,
+    "SignatureKind": "System",
+    "SizeBytes": 2000000000
+  }
+]

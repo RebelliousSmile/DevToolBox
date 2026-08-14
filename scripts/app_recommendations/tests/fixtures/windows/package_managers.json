@@ -1,0 +1,4 @@
+[
+  {"source":"scoop-choco","name":"Editor","path":"C:\\Apps\\Editor","size_bytes":600000000,"detail":{"manager":"scoop"}},
+  {"source":"scoop-choco","name":"Node JS","path":"C:\\Tools\\Node JS","size_bytes":null,"detail":{"manager":"chocolatey"}}
+]

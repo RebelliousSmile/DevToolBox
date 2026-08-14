@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Editor",
+    "key": "Editor",
+    "hive": "HKLM",
+    "view": "64",
+    "size_bytes": 500000000,
+    "install_location": "C:\\Apps\\Editor",
+    "display_icon": "\"C:\\Apps\\Editor\\editor.exe\",0",
+    "publisher": "Example",
+    "uninstall_string": "\"C:\\Apps\\Editor\\uninstall.exe\" /remove",
+    "system_component": false,
+    "no_remove": false,
+    "parent_key_name": "",
+    "release_type": ""
+  },
+  {
+    "name": "KB500000",
+    "key": "KB500000",
+    "hive": "HKLM",
+    "view": "64",
+    "size_bytes": null,
+    "install_location": "",
+    "uninstall_string": "wusa.exe /uninstall /kb:500000",
+    "system_component": true,
+    "no_remove": false,
+    "parent_key_name": "Windows",
+    "release_type": "Security Update"
+  }
+]

@@ -1,6 +1,6 @@
 ---
 objective: Collecter sous Windows les applications installées via le registre, MSIX/AppX, Scoop et Chocolatey sans recommander les composants système.
-status: pending
+status: done
 ---
 
 # Instruction

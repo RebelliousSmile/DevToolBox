@@ -56,7 +56,19 @@ class WinregUnavailableError(RuntimeError):
 
 UNINSTALL_SUBKEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
 
-_UNINSTALL_VALUE_NAMES = ("DisplayName", "InstallDate", "EstimatedSize", "InstallLocation")
+_UNINSTALL_VALUE_NAMES = (
+    "DisplayName",
+    "InstallDate",
+    "EstimatedSize",
+    "InstallLocation",
+    "DisplayIcon",
+    "Publisher",
+    "UninstallString",
+    "SystemComponent",
+    "NoRemove",
+    "ParentKeyName",
+    "ReleaseType",
+)
 
 # Scan targets as (hive_label, hive_const_attr, view_label, view_flag_attr).
 # The winreg attribute *names* (not the objects) are stored here because
@@ -137,6 +149,74 @@ def _query_uninstall_values(subkey: object) -> dict[str, object]:
     return values
 
 
+def _read_uninstall_metadata(values: dict[str, object]) -> dict[str, object] | None:
+    """Expose recommendation metadata while preserving the legacy parser."""
+    parsed = _read_uninstall_entry(values)
+    if parsed is None:
+        return None
+
+    def text(name: str) -> str:
+        value = values.get(name)
+        return value if isinstance(value, str) else ""
+
+    def flag(name: str) -> bool:
+        value = values.get(name)
+        return value is True or value == 1
+
+    return {
+        **parsed,
+        "display_icon": text("DisplayIcon"),
+        "publisher": text("Publisher"),
+        "uninstall_string": text("UninstallString"),
+        "system_component": flag("SystemComponent"),
+        "no_remove": flag("NoRemove"),
+        "parent_key_name": text("ParentKeyName"),
+        "release_type": text("ReleaseType"),
+    }
+
+
+def _scan_uninstall_records() -> list[dict[str, object]]:
+    if not WINREG_AVAILABLE:
+        raise WinregUnavailableError("winreg n'est pas disponible sur cette plateforme")
+    records: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for hive_label, hive_const_attr, view_label, view_flag_attr in _SCAN_TARGETS:
+        hive_const = getattr(winreg, hive_const_attr)
+        view_flag = getattr(winreg, view_flag_attr)
+        try:
+            uninstall_key = winreg.OpenKey(hive_const, UNINSTALL_SUBKEY, 0, winreg.KEY_READ | view_flag)
+        except OSError:
+            continue
+        with uninstall_key:
+            index = 0
+            while True:
+                try:
+                    subkey_name = winreg.EnumKey(uninstall_key, index)
+                except OSError:
+                    break
+                index += 1
+                dedup_key = (hive_label, view_label, subkey_name)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                try:
+                    with winreg.OpenKey(uninstall_key, subkey_name, 0, winreg.KEY_READ | view_flag) as subkey:
+                        values = _query_uninstall_values(subkey)
+                except OSError:
+                    continue
+                parsed = _read_uninstall_metadata(values)
+                if parsed is not None:
+                    records.append({**parsed, "hive": hive_label, "view": view_label, "key": subkey_name})
+    return records
+
+
+def scan_uninstall_records() -> list[dict[str, object]]:
+    """Return rich Windows uninstall records without changing inventory JSON."""
+    if sys.platform != "win32":
+        raise WinregUnavailableError("les entrées Uninstall sont réservées à Windows")
+    return _scan_uninstall_records()
+
+
 def scan_registry() -> list[InventoryItem]:
     """Scan the Uninstall registry (HKLM x2 views + HKCU) into ``InventoryItem``s.
 
@@ -162,54 +242,17 @@ def scan_registry() -> list[InventoryItem]:
             "réservé à Windows) : la source registre ne peut pas être scannée."
         )
 
-    items: list[InventoryItem] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    for hive_label, hive_const_attr, view_label, view_flag_attr in _SCAN_TARGETS:
-        hive_const = getattr(winreg, hive_const_attr)
-        view_flag = getattr(winreg, view_flag_attr)
-
-        try:
-            uninstall_key = winreg.OpenKey(hive_const, UNINSTALL_SUBKEY, 0, winreg.KEY_READ | view_flag)
-        except OSError:
-            continue
-
-        with uninstall_key:
-            index = 0
-            while True:
-                try:
-                    subkey_name = winreg.EnumKey(uninstall_key, index)
-                except OSError:
-                    break
-                index += 1
-
-                dedup_key = (hive_label, view_label, subkey_name)
-                if dedup_key in seen:
-                    continue
-                seen.add(dedup_key)
-
-                try:
-                    with winreg.OpenKey(uninstall_key, subkey_name, 0, winreg.KEY_READ | view_flag) as subkey:
-                        values = _query_uninstall_values(subkey)
-                except OSError:
-                    continue
-
-                parsed = _read_uninstall_entry(values)
-                if parsed is None:
-                    continue
-
-                items.append(
-                    InventoryItem(
-                        source="registry",
-                        name=str(parsed["name"]),
-                        path=str(parsed["install_location"]) or None,
-                        size_bytes=parsed["size_bytes"],  # type: ignore[arg-type]
-                        detail={
-                            "install_date": str(parsed["install_date"]),
-                            "hive": hive_label,
-                            "view": view_label,
-                        },
-                    )
-                )
-
-    return items
+    return [
+        InventoryItem(
+            source="registry",
+            name=str(record["name"]),
+            path=str(record["install_location"]) or None,
+            size_bytes=record["size_bytes"],  # type: ignore[arg-type]
+            detail={
+                "install_date": str(record["install_date"]),
+                "hive": str(record["hive"]),
+                "view": str(record["view"]),
+            },
+        )
+        for record in _scan_uninstall_records()
+    ]
