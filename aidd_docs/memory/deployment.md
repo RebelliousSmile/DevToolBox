@@ -8,6 +8,10 @@ see `architecture.md`). There is no server deployment; the app is built locally 
 on the end-user machine, for either OS.
 
 - **Build**: `cargo build --release` (profile: `lto = true`, `opt-level = 3`)
+  — on Windows, a rebuild fails with "Accès refusé" (exit code 1) if a
+  previously-launched `devtoolbox.exe` is still running and holding the
+  executable file locked; `taskkill //IM devtoolbox.exe //F` before rebuilding
+  clears it.
 - **Artifact**: single `devtoolbox.exe` (Windows) or `devtoolbox` ELF binary (Linux)
   under `target/release/`
 - **Startup at login**:

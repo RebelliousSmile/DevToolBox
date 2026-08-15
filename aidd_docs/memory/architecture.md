@@ -73,16 +73,27 @@ script under the DevToolBox root (`DEVTOOLBOX_HOME`, else the nearest ancestor
 holding a `scripts/` directory). `src/python_runtime.rs` centralizes the root and
 interpreter cascade for both launch paths:
 
-- `src/windows/process.rs` — `#[cfg(windows)]`-gated, backs the direct
-  card-click launch path (`build_command()`/`build_action_command()`, using
-  Windows' `CREATE_NO_WINDOW` creation flag so a script that reports by
-  printing reports to nobody — such a script must write to a file via
-  `--out <path>` and the UI must surface that file). **As of Part 2, this
-  direct-launch wiring from the card grid is still deferred** — the `egui`
-  UI's click handler is not yet connected to it on either OS.
+- `src/windows/process.rs` — `#[cfg(windows)]`-gated, backs
+  `build_command()`/`build_action_command()`, using Windows' `CREATE_NO_WINDOW`
+  creation flag so a script that reports by printing reports to nobody — such
+  a script must write to a file via `--out <path>` and the UI must surface
+  that file. Not wired into any launch path from the card grid.
 - `src/ui/terminal_view.rs` — cross-platform (`std::process::Command`, no
-  `cfg(windows)` gate), backs the Terminal panel's launch button via
-  `launch_captured()`. This is the one currently wired into the running UI.
+  `cfg(windows)` gate), `launch_captured()`. Backs both the Terminal panel's
+  own launch button **and**, since the `actions-launch-and-variants` plan
+  (`aidd_docs/tasks/2026_08/2026_08_15_actions-launch-and-variants/`), the
+  Actions card grid's click-to-launch: a click on a simple card's body (icon +
+  name, outside the Favori button) or "Lancer" on a grouped/variant card
+  launches through this same function. The card grid uses a launch-state slot
+  dedicated to it (`EguiApp::action_rx`/`action_running`, drained by
+  `drain_action_events`), separate from the Terminal view's own
+  `terminal_rx`/`terminal_running`, so a card launch and a Terminal-view
+  command never interfere with each other; `action_running` also gates
+  concurrency, allowing only one card launch at a time. Commands sharing a
+  `variant_group` (`config/builtin-actions.json`) render as one card with an
+  `egui::ComboBox` variant selector plus a dedicated "Lancer" button, rather
+  than one card per variant — `EguiApp::selected_variant` (session-only, never
+  persisted to `config.json`) tracks the chosen variant per group.
 
 Four consequences bind any script exposed either way:
 
@@ -99,6 +110,44 @@ Four consequences bind any script exposed either way:
 - `bundled_python_actions_reference_existing_scripts` asserts an **exact count**
   of `@python` actions; adding one requires updating that assertion in the same
   change.
+- **Any piped Python subprocess must set `PYTHONIOENCODING=utf-8` on the
+  child's environment.** Without it, Python picks the console's codepage
+  (e.g. `cp1252` on a French Windows install) for stdout whenever stdout isn't
+  a real console — a piped `Stdio`, as used by `recommendation_command`
+  (`src/python_runtime.rs`), always qualifies. An accented character (app
+  name, size label, …) then comes out as raw Latin-1 bytes instead of UTF-8,
+  which `serde_json::from_slice`/`from_str` reject outright.
+
+## PowerShell JSON bridges (Automations view)
+
+`src/ui/automations_view.rs`'s `fetch_impl` (Windows) shells out to
+`Get-ScheduledTask` + `ConvertTo-Json -Compress` and deserializes the result
+into `Vec<AutomationRow>`.
+
+- **A field PowerShell always seems to populate can still be genuinely
+  `$null`.** `Get-ScheduledTask`'s `Author` is `$null` (not `""`) for several
+  built-in system tasks (e.g. the `.NET Framework NGEN` family) — a plain,
+  non-optional `String` field rejects that outright. The fix is a
+  `#[serde(deserialize_with = "...")]` mapper that folds `null` to `""`,
+  matching how `NextRun` already represents "nothing to show" as an empty
+  string rather than an absent/optional field — not switching the field to
+  `Option<String>`, which would push the null-check onto every caller.
+- **A single-object PowerShell response and an array response both have to
+  deserialize.** `ConvertTo-Json` returns a bare object (no `[...]`) when
+  exactly one task matches, and an array otherwise — `fetch_impl` tries
+  `Vec<AutomationRow>` first, falling back (`.or_else`) to a single
+  `AutomationRow` wrapped in a one-element `Vec` if that first attempt errors.
+  The surfaced error (via `.map_err`) is always the *second* attempt's, so
+  when the real payload genuinely is an array but the first `Vec<...>` parse
+  fails for an unrelated reason (e.g. a field-level type mismatch on one
+  element), the message the user actually sees comes from trying to
+  deserialize that whole array as one struct — serde_json doesn't reply
+  "expected a struct, found a sequence" there, it falls back to
+  positional/seq-based field binding and reports something like `invalid
+  type: map, expected a string at line 1 column 1`, which points at a
+  field-type mismatch that isn't the real shape mismatch either. Don't trust
+  that message when diagnosing a "réponse PowerShell inattendue" error;
+  reproduce the raw JSON directly instead.
 
 ## Per-machine command resolution
 
@@ -141,11 +190,10 @@ unaffected) opts a command into this.
   with an inline message naming the current machine id and
   `machine_commands_path()` so the user knows exactly what to add and where;
   the favorite-toggle star stays enabled regardless, so an unconfigured card
-  can still be favorited. As of this lot, only the enabled/disabled
-  determination is wired — the resolved override string itself is not yet
-  threaded into a launch call, since the card grid's click-to-launch handler
-  remains unconnected on both OSes (the same deferred state already noted
-  above for the direct-launch `@python` path).
+  can still be favorited. The resolved override string feeds `CardData.command`
+  and is what the card grid's click-to-launch actually launches (see the
+  `terminal_view::launch_captured` note above) — an `Unconfigured` card is
+  simply never clickable.
 
 **Relative to the `@python` cascade above**: these are two independent,
 composable resolution stages over the same string. Per-machine resolution
