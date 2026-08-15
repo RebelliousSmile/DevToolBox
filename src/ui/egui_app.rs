@@ -435,6 +435,7 @@ enum ActiveView {
     Terminal,
     Automations,
     Applications,
+    Preferences,
 }
 
 /// An action deferred behind a confirm dialog — applied by
@@ -745,29 +746,48 @@ impl EguiApp {
             ui.set_width(96.0);
             ui.vertical_centered(|ui| {
                 ui.add_enabled_ui(card.is_configured, |ui| {
-                    match visual {
-                        IconVisual::Texture(texture) => {
-                            let size = texture.size_vec2();
-                            let display_size =
-                                egui::vec2(48.0, 48.0).min(size.max(egui::vec2(1.0, 1.0)));
-                            ui.add(egui::Image::new((texture.id(), display_size)));
-                        }
-                        IconVisual::Emoji(text) => {
-                            ui.label(egui::RichText::new(text).size(28.0));
-                        }
-                    }
-                    // `Sense::click()` keeps this discoverable via
-                    // `egui_kittest::Queryable::get_by_label(&card.name)`
-                    // (a `Label`'s accessibility name is its text) while
-                    // also making it react to clicks — a raw
-                    // `response.interact(Sense::click())` on the group
-                    // would have no named accessibility info and would not
-                    // be findable by name in a test.
-                    let name_response = ui.add(
-                        egui::Label::new(egui::RichText::new(&card.name).strong())
-                            .sense(egui::Sense::click()),
-                    );
-                    if name_response.clicked() {
+                    // The whole icon+name block is the click target, not
+                    // just the name text — a text-only target left most of
+                    // the card (icon, padding) dead to clicks in real
+                    // mouse use, even though it passed kittest (which
+                    // clicks by accessibility label regardless of hit
+                    // size). `.interact(Sense::click())` upgrades the
+                    // container response's existing rect/id, and an
+                    // explicit `widget_info` keeps it discoverable via
+                    // `egui_kittest::Queryable::get_by_label(&card.name)`.
+                    let body_response = ui
+                        .vertical_centered(|ui| {
+                            match visual {
+                                IconVisual::Texture(texture) => {
+                                    let size = texture.size_vec2();
+                                    let display_size = egui::vec2(48.0, 48.0)
+                                        .min(size.max(egui::vec2(1.0, 1.0)));
+                                    ui.add(egui::Image::new((texture.id(), display_size)));
+                                }
+                                IconVisual::Emoji(text) => {
+                                    // `selectable(false)`: a plain `ui.label`
+                                    // is selectable text by default, which
+                                    // gives it its own click+drag sense —
+                                    // that widget then wins hit-testing over
+                                    // the card's own `.interact(click)`
+                                    // below, silently eating every click.
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(text).size(28.0))
+                                            .selectable(false),
+                                    );
+                                }
+                            }
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&card.name).strong())
+                                    .selectable(false),
+                            );
+                        })
+                        .response
+                        .interact(egui::Sense::click());
+                    body_response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &card.name)
+                    });
+                    if body_response.clicked() {
                         body_clicked = true;
                     }
 
@@ -889,16 +909,22 @@ impl EguiApp {
         }
     }
 
-    /// Launch a card's resolved command in the background, mirroring
-    /// `launch_terminal_command` but through the dedicated `action_rx`
-    /// slot so it never interferes with a command running in the Terminal
-    /// view.
+    /// Launch a card's resolved command in the background, through the
+    /// dedicated `action_rx` slot so it never interferes with a command
+    /// running from the Terminal view's own input field — but its output
+    /// still streams into `terminal_lines` and switches `active_view` to
+    /// Terminal, so the user actually sees what a diagnostic command (e.g.
+    /// `ipconfig`) printed instead of just a "launched successfully"
+    /// status with no visible result.
     fn launch_command(&mut self, command_id: &str, command: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
         match terminal_view::launch_captured(command, tx) {
             Ok(_pid) => {
                 self.action_rx = Some(rx);
                 self.action_running = Some(command_id.to_string());
+                self.terminal_lines.push_back(format!("$ {command}"));
+                terminal_view::trim_lines(&mut self.terminal_lines);
+                self.active_view = ActiveView::Terminal;
             }
             Err(err) => {
                 self.set_status(format!("Échec du lancement: {err}"), true);
@@ -999,60 +1025,64 @@ impl EguiApp {
         }
     }
 
-    fn render_categories_panel(&mut self, ui: &mut egui::Ui) {
+    /// Dedicated Préférences view — moved out of `render_actions_view` (was
+    /// a `CollapsingHeader` at the top of the Actions grid) so category
+    /// management no longer eats into the vertical space available for
+    /// action cards.
+    fn render_preferences_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Préférences");
+        ui.separator();
+
         let mut actions: Vec<CategoryAction> = Vec::new();
         let categories_snapshot = self.config.categories.clone();
 
-        egui::CollapsingHeader::new("Catégories")
-            .default_open(false)
-            .show(ui, |ui| {
-                for category in &categories_snapshot {
-                    ui.horizontal(|ui| {
-                        ui.label(&category.icon);
-                        ui.label(&category.name);
-                        let buffer = self
-                            .rename_buffers
-                            .entry(category.id.clone())
-                            .or_insert_with(|| category.name.clone());
-                        ui.text_edit_singleline(buffer);
-                        if ui.button("Renommer").clicked() && !buffer.trim().is_empty() {
-                            actions.push(CategoryAction::Rename {
-                                id: category.id.clone(),
-                                new_name: buffer.clone(),
-                            });
-                        }
-                        if ui.button("Supprimer").clicked() {
-                            actions.push(CategoryAction::Remove {
-                                id: category.id.clone(),
-                            });
-                        }
+        ui.label("Catégories");
+        for category in &categories_snapshot {
+            ui.horizontal(|ui| {
+                ui.label(&category.icon);
+                ui.label(&category.name);
+                let buffer = self
+                    .rename_buffers
+                    .entry(category.id.clone())
+                    .or_insert_with(|| category.name.clone());
+                ui.text_edit_singleline(buffer);
+                if ui.button("Renommer").clicked() && !buffer.trim().is_empty() {
+                    actions.push(CategoryAction::Rename {
+                        id: category.id.clone(),
+                        new_name: buffer.clone(),
                     });
                 }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Nouvelle catégorie —");
-
-                    let id_label = ui.label("id");
-                    ui.text_edit_singleline(&mut self.category_form.id)
-                        .labelled_by(id_label.id)
-                        .on_hover_text("identifiant unique");
-
-                    let name_label = ui.label("nom");
-                    ui.text_edit_singleline(&mut self.category_form.name)
-                        .labelled_by(name_label.id)
-                        .on_hover_text("nom affiché");
-
-                    let icon_label = ui.label("icône");
-                    ui.text_edit_singleline(&mut self.category_form.icon)
-                        .labelled_by(icon_label.id)
-                        .on_hover_text("emoji");
-
-                    if ui.button("Ajouter").clicked() {
-                        actions.push(CategoryAction::Add);
-                    }
-                });
+                if ui.button("Supprimer").clicked() {
+                    actions.push(CategoryAction::Remove {
+                        id: category.id.clone(),
+                    });
+                }
             });
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Nouvelle catégorie —");
+
+            let id_label = ui.label("id");
+            ui.text_edit_singleline(&mut self.category_form.id)
+                .labelled_by(id_label.id)
+                .on_hover_text("identifiant unique");
+
+            let name_label = ui.label("nom");
+            ui.text_edit_singleline(&mut self.category_form.name)
+                .labelled_by(name_label.id)
+                .on_hover_text("nom affiché");
+
+            let icon_label = ui.label("icône");
+            ui.text_edit_singleline(&mut self.category_form.icon)
+                .labelled_by(icon_label.id)
+                .on_hover_text("emoji");
+
+            if ui.button("Ajouter").clicked() {
+                actions.push(CategoryAction::Add);
+            }
+        });
 
         for action in actions {
             self.apply_category_action(action);
@@ -1118,6 +1148,11 @@ impl EguiApp {
                 ActiveView::Applications,
                 "Applications",
             );
+            ui.selectable_value(
+                &mut self.active_view,
+                ActiveView::Preferences,
+                "Préférences",
+            );
             if ui.button("À propos").clicked() {
                 self.active_dialog = Some(ActiveDialog {
                     kind: dialogs::info(
@@ -1135,6 +1170,7 @@ impl EguiApp {
             ActiveView::Terminal => self.render_terminal_view(ui),
             ActiveView::Automations => self.render_automations_view(ui),
             ActiveView::Applications => self.render_applications_view(ui),
+            ActiveView::Preferences => self.render_preferences_view(ui),
         }
     }
 
@@ -1160,9 +1196,6 @@ impl EguiApp {
                 self.set_status(format!("Échec de sauvegarde: {err}"), true);
             }
         }
-
-        self.render_categories_panel(ui);
-        ui.separator();
 
         let groups = build_display_groups(&self.config, &self.machine_commands, &self.machine_id);
         let mut toggles: Vec<String> = Vec::new();
@@ -1259,9 +1292,11 @@ impl EguiApp {
     }
 
     /// Mirror of `drain_terminal_events` for a card launch: drains
-    /// `action_rx`, but feeds `self.status` (success/error) instead of
-    /// `terminal_lines`, and clears `action_running` once the command
-    /// settles — freeing the concurrency guard for the next card click.
+    /// `action_rx`, feeding both `self.status` (success/error) and
+    /// `terminal_lines` (so the command's actual output is visible in the
+    /// Terminal view, which `launch_command` already switched to), and
+    /// clears `action_running` once the command settles — freeing the
+    /// concurrency guard for the next card click.
     fn drain_action_events(&mut self) {
         let Some(rx) = &self.action_rx else {
             return;
@@ -1272,12 +1307,18 @@ impl EguiApp {
         while let Ok(event) = rx.try_recv() {
             match event {
                 TerminalEvent::Started { .. } => {}
-                TerminalEvent::Output(_) => {}
-                TerminalEvent::Finished { .. } => {
+                TerminalEvent::Output(line) => {
+                    self.terminal_lines.push_back(line);
+                    terminal_view::trim_lines(&mut self.terminal_lines);
+                }
+                TerminalEvent::Finished { code } => {
+                    self.terminal_lines
+                        .push_back(format!("(terminé — code {code:?})"));
                     outcome = Some(Ok(()));
                     settled = true;
                 }
                 TerminalEvent::Failed(err) => {
+                    self.terminal_lines.push_back(format!("(erreur: {err})"));
                     outcome = Some(Err(err));
                     settled = true;
                 }
@@ -1323,6 +1364,7 @@ impl EguiApp {
 
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.terminal_lines.is_empty() {
                     ui.label("(aucune sortie)");
@@ -1890,8 +1932,8 @@ mod tests {
             );
 
         harness.run();
-        // Open the collapsed "Catégories" panel first.
-        harness.get_by_label("Catégories").click();
+        // Category management now lives on the dedicated Préférences view.
+        harness.get_by_label("Préférences").click();
         harness.run();
 
         // Each `TextEdit` only consumes `Event::Text` while it holds egui's
@@ -1959,15 +2001,15 @@ mod tests {
             );
 
         harness.run();
-        harness.get_by_label("Catégories").click();
+        harness.get_by_label("Préférences").click();
         harness.run();
         harness.get_by_label("Supprimer").click();
         harness.run();
 
         // The confirm dialog is now up and should block everything behind
-        // it: the category row's own "Supprimer" button, the nav row's
-        // "Catégories" toggle — nothing but the dialog itself is rendered
-        // this frame.
+        // it: the category row's own "Supprimer" button, the Préférences
+        // view's "Catégories" heading — nothing but the dialog itself is
+        // rendered this frame.
         assert!(
             harness.query_by_label("Oui").is_some(),
             "confirm dialog should be showing an Oui button"
@@ -2027,7 +2069,7 @@ mod tests {
             );
 
         harness.run();
-        harness.get_by_label("Catégories").click();
+        harness.get_by_label("Préférences").click();
         harness.run();
         harness.get_by_label("Supprimer").click();
         harness.run();
