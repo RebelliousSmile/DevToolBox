@@ -123,6 +123,10 @@ struct CardData {
     /// current machine id and the mapping file path, shown on the disabled
     /// card.
     disabled_message: Option<String>,
+    /// The resolved shell command to run on click — empty when
+    /// `is_configured` is `false` (an unconfigured card is never clickable,
+    /// so there is nothing meaningful to launch).
+    command: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -142,9 +146,9 @@ fn resolution_fields(
     command: &storage::Command,
     overrides: &MachineCommands,
     machine_id: &str,
-) -> (bool, Option<String>) {
+) -> (bool, Option<String>, String) {
     match storage::resolve_command(command, overrides, machine_id) {
-        CommandResolution::Resolved(_) => (true, None),
+        CommandResolution::Resolved(resolved) => (true, None, resolved),
         CommandResolution::Unconfigured {
             command_id,
             machine_id,
@@ -156,9 +160,19 @@ fn resolution_fields(
                     "Non configuré pour la machine « {machine_id} » — ajoutez '{command_id}' dans {}",
                     mapping_path.display()
                 )),
+                String::new(),
             )
         }
     }
+}
+
+/// Pure click-handling guard for a card body click: a card can only launch
+/// if it is configured and no other card launch is already in flight (one
+/// card launch at a time — see the `action_running` field doc). Kept as a
+/// free function, independent of `EguiApp`, so the concurrency guard is
+/// directly unit-testable without building a full app/harness.
+fn can_launch_card(is_configured: bool, action_running: &Option<String>) -> bool {
+    is_configured && action_running.is_none()
 }
 
 /// Pure grouping/flattening step — mirrors `app.rs`'s
@@ -185,7 +199,7 @@ fn build_display_groups(
                     .commands
                     .iter()
                     .map(|c| {
-                        let (is_configured, disabled_message) =
+                        let (is_configured, disabled_message, command) =
                             resolution_fields(c, overrides, machine_id);
                         CardData {
                             command_id: c.id.clone(),
@@ -194,6 +208,7 @@ fn build_display_groups(
                             is_favorite: c.is_favorite,
                             is_configured,
                             disabled_message,
+                            command,
                         }
                     })
                     .collect();
@@ -209,7 +224,8 @@ fn build_display_groups(
             .iter()
             .filter(|c| c.is_favorite)
             .map(|c| {
-                let (is_configured, disabled_message) = resolution_fields(c, overrides, machine_id);
+                let (is_configured, disabled_message, command) =
+                    resolution_fields(c, overrides, machine_id);
                 CardData {
                     command_id: c.id.clone(),
                     name: c.name.clone(),
@@ -217,6 +233,7 @@ fn build_display_groups(
                     is_favorite: c.is_favorite,
                     is_configured,
                     disabled_message,
+                    command,
                 }
             })
             .collect();
@@ -357,6 +374,15 @@ pub struct EguiApp {
     terminal_lines: VecDeque<String>,
     terminal_rx: Option<Receiver<TerminalEvent>>,
     terminal_running: bool,
+    /// Events for a command launched by clicking an Actions card — a
+    /// dedicated slot separate from `terminal_rx`/`terminal_running` so a
+    /// card launch never interferes with (or is interfered with by) a
+    /// command running in the Terminal view.
+    action_rx: Option<Receiver<TerminalEvent>>,
+    /// The `command_id` of the card currently launching/running, if any —
+    /// used both to gate the concurrency guard (`can_launch_card`) and to
+    /// name the command in the status message once it settles.
+    action_running: Option<String>,
     /// `None` until the Automations view has fetched at least once.
     automations: Option<Result<Vec<AutomationRow>, String>>,
     application_report: Option<RecommendationReport>,
@@ -462,6 +488,8 @@ impl EguiApp {
             terminal_lines: VecDeque::new(),
             terminal_rx: None,
             terminal_running: false,
+            action_rx: None,
+            action_running: None,
             automations: None,
             application_report: None,
             application_error: None,
@@ -600,6 +628,7 @@ impl EguiApp {
     /// is a config edit, not a launch (see this lot's risk register).
     fn render_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
         let visual = self.icon_visual(&card.icon);
+        let mut body_clicked = false;
         ui.group(|ui| {
             ui.set_width(96.0);
             ui.vertical_centered(|ui| {
@@ -615,7 +644,20 @@ impl EguiApp {
                             ui.label(egui::RichText::new(text).size(28.0));
                         }
                     }
-                    ui.label(egui::RichText::new(&card.name).strong());
+                    // `Sense::click()` keeps this discoverable via
+                    // `egui_kittest::Queryable::get_by_label(&card.name)`
+                    // (a `Label`'s accessibility name is its text) while
+                    // also making it react to clicks — a raw
+                    // `response.interact(Sense::click())` on the group
+                    // would have no named accessibility info and would not
+                    // be findable by name in a test.
+                    let name_response = ui.add(
+                        egui::Label::new(egui::RichText::new(&card.name).strong())
+                            .sense(egui::Sense::click()),
+                    );
+                    if name_response.clicked() {
+                        body_clicked = true;
+                    }
 
                     if let Some(message) = &card.disabled_message {
                         ui.label(egui::RichText::new(message).small().italics())
@@ -633,6 +675,31 @@ impl EguiApp {
                 }
             });
         });
+
+        // `add_enabled_ui` already suppresses `clicked()` for an
+        // unconfigured card, so `card.is_configured` is redundant with
+        // `body_clicked` here — kept explicit as the same guard
+        // `can_launch_card` exposes for its pure unit test.
+        if body_clicked && can_launch_card(card.is_configured, &self.action_running) {
+            self.launch_card_command(card);
+        }
+    }
+
+    /// Launch a card's resolved command in the background, mirroring
+    /// `launch_terminal_command` but through the dedicated `action_rx`
+    /// slot so it never interferes with a command running in the Terminal
+    /// view.
+    fn launch_card_command(&mut self, card: &CardData) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        match terminal_view::launch_captured(&card.command, tx) {
+            Ok(_pid) => {
+                self.action_rx = Some(rx);
+                self.action_running = Some(card.command_id.clone());
+            }
+            Err(err) => {
+                self.set_status(format!("Échec du lancement: {err}"), true);
+            }
+        }
     }
 
     fn apply_favorite_toggles(&mut self, toggles: Vec<String>) {
@@ -817,10 +884,16 @@ impl EguiApp {
         }
 
         self.drain_terminal_events();
+        self.drain_action_events();
         self.drain_application_events();
         if self.terminal_running {
             // Keep polling for output while a command is in flight, even if
             // the user has switched away from the Terminal view.
+            ui.ctx().request_repaint();
+        }
+        if self.action_running.is_some() {
+            // Same rationale as above, for a command launched from an
+            // Actions card.
             ui.ctx().request_repaint();
         }
         if self.application_loading {
@@ -978,6 +1051,48 @@ impl EguiApp {
         if settled {
             self.terminal_running = false;
             self.terminal_rx = None;
+        }
+    }
+
+    /// Mirror of `drain_terminal_events` for a card launch: drains
+    /// `action_rx`, but feeds `self.status` (success/error) instead of
+    /// `terminal_lines`, and clears `action_running` once the command
+    /// settles — freeing the concurrency guard for the next card click.
+    fn drain_action_events(&mut self) {
+        let Some(rx) = &self.action_rx else {
+            return;
+        };
+
+        let mut settled = false;
+        let mut outcome: Option<Result<(), String>> = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                TerminalEvent::Started { .. } => {}
+                TerminalEvent::Output(_) => {}
+                TerminalEvent::Finished { .. } => {
+                    outcome = Some(Ok(()));
+                    settled = true;
+                }
+                TerminalEvent::Failed(err) => {
+                    outcome = Some(Err(err));
+                    settled = true;
+                }
+            }
+        }
+
+        if settled {
+            let command_id = self.action_running.take().unwrap_or_default();
+            self.action_rx = None;
+            self.status = Some(match outcome.expect("settled implies a terminal event was seen") {
+                Ok(()) => StatusMessage {
+                    text: format!("'{command_id}' lancé avec succès."),
+                    is_error: false,
+                },
+                Err(err) => StatusMessage {
+                    text: format!("Échec du lancement de '{command_id}': {err}"),
+                    is_error: true,
+                },
+            });
         }
     }
 
@@ -1653,6 +1768,150 @@ mod tests {
         assert!(
             !harness.state().terminal_running,
             "the real echo process should have finished by now"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Card click-to-launch tests (this phase's acceptance criteria) -------
+
+    #[test]
+    fn can_launch_card_blocks_any_click_while_another_launch_is_in_flight() {
+        let another_launch = Some("some-other-command".to_string());
+        assert!(
+            !can_launch_card(true, &another_launch),
+            "a configured card must not be launchable while a different launch is running"
+        );
+        assert!(
+            can_launch_card(true, &None),
+            "a configured card must be launchable when no launch is in flight"
+        );
+        assert!(
+            !can_launch_card(false, &None),
+            "an unconfigured card must never be launchable, even with no launch in flight"
+        );
+    }
+
+    #[test]
+    fn clicking_a_configured_cards_body_launches_it_and_shows_a_success_status() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "card-click-launch"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let mut config = sample_config();
+        config.commands.push(Command {
+            id: "echo-card".into(),
+            name: "Echo Carte".into(),
+            command: "echo hello-from-card-click".into(),
+            category: "system".into(),
+            icon: "🔧".into(),
+            is_favorite: false,
+            shortcut: None,
+            variant_group: None,
+            group_name: None,
+            variant_label: None,
+            machine_specific: false,
+        });
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Echo Carte").click();
+        // Same rationale as the Terminal view test above: `ui_content`
+        // requests a repaint every frame while `action_running` is set, so
+        // `Harness::run()`'s "until no more repaints" contract never
+        // stabilizes here — drive single frames instead.
+        harness.run_steps(1);
+
+        let mut saw_success = false;
+        for _ in 0..200 {
+            saw_success = saw_success
+                || harness
+                    .state()
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| !status.is_error && status.text.contains("echo-card"));
+            if saw_success && harness.state().action_running.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            harness.run_steps(1);
+        }
+
+        assert!(
+            saw_success,
+            "expected a success status naming 'echo-card' after clicking its card body; got {:?}",
+            harness.state().status.as_ref().map(|s| &s.text)
+        );
+        assert!(
+            harness.state().action_running.is_none(),
+            "action_running must be cleared once the launched command settles"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_the_body_of_an_unconfigured_card_does_not_launch_anything() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "card-click-unconfigured"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let mut config = sample_config();
+        config.commands.push(Command {
+            id: "deploy".into(),
+            name: "Déploiement".into(),
+            command: "deploy.sh".into(),
+            category: "system".into(),
+            icon: "🚀".into(),
+            is_favorite: false,
+            shortcut: None,
+            variant_group: None,
+            group_name: None,
+            variant_label: None,
+            machine_specific: true,
+        });
+
+        // Empty mapping: "deploy" has no override for "test-machine" (the
+        // fixed machine id used by `new_for_test`), so it renders disabled.
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Déploiement").click();
+        harness.run();
+
+        assert!(
+            harness.state().action_running.is_none(),
+            "clicking an unconfigured card's body must not start a launch"
+        );
+        assert!(
+            harness.state().status.is_none(),
+            "clicking an unconfigured card's body must not produce a status message; got {:?}",
+            harness.state().status.as_ref().map(|s| &s.text)
         );
 
         let _ = std::fs::remove_dir_all(&dir);
