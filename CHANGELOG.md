@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-08-15
+
+### Added
+- Click-to-launch on Actions cards: clicking a simple card's body (icon + name) now
+  launches its resolved command through the same capture pipeline as the Terminal
+  view, with success/failure status feedback
+- Variant-group cards: commands sharing a `variant_group` (e.g. the 4 `sftp-sync`
+  variants, `email-to-markdown`, `lyremember`) now render as a single card with an
+  `egui::ComboBox` variant selector and a dedicated "Lancer" button, instead of one
+  flat card per variant
+- Application removal priority report: Windows/Linux application collectors, local
+  usage-history tracking, and a recommendation/scoring engine surfaced in a new
+  Applications view
+
+### Fixed
+- Accented characters (app names, size labels) in the Applications view no longer
+  corrupt JSON parsing — the bundled Python recommendation subprocess now forces
+  `PYTHONIOENCODING=utf-8`
+- Automations view: a scheduled task with a genuinely null `Author` (several
+  built-in Windows tasks) no longer breaks the whole refresh with a misleading
+  "réponse PowerShell inattendue" error
+- Category management moved out of the Actions view's `CollapsingHeader` into a
+  dedicated Préférences nav tab, freeing vertical space for action cards
+
 ## [0.2.0] - 2026-08-05
 
 ### Added
