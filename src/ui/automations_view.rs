@@ -37,7 +37,20 @@ pub struct AutomationRow {
     pub category: String,
     pub next_run: String,
     pub state: String,
+    // `Get-ScheduledTask`'s `Author` is genuinely `$null` (not an empty
+    // string) for several built-in system tasks (e.g. the ".NET Framework
+    // NGEN" family) — a plain `String` field rejects that `null` outright,
+    // so this maps it to `""`, matching how `NextRun` already represents
+    // "nothing to show" as an empty string rather than an absent field.
+    #[serde(deserialize_with = "null_to_empty_string")]
     pub author: String,
+}
+
+fn null_to_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Fetch the current list of scheduled automations for this OS: real
@@ -118,6 +131,21 @@ mod tests {
         assert_eq!(row.next_run, "2026-08-06 02:00:00");
         assert_eq!(row.state, "Ready");
         assert_eq!(row.author, "SYSTEM");
+    }
+
+    #[test]
+    fn automation_row_maps_a_null_author_to_an_empty_string() {
+        let json = r#"{"Name":".NET Framework NGEN v4.0.30319","Category":"\\Microsoft\\Windows\\.NET Framework\\","NextRun":"","State":"Ready","Author":null}"#;
+        let row: AutomationRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.author, "");
+    }
+
+    #[test]
+    fn a_json_array_mixing_null_and_populated_authors_deserializes_as_a_vec() {
+        let json = r#"[{"Name":"A","Category":"\\","NextRun":"","State":"Ready","Author":null},{"Name":"B","Category":"\\","NextRun":"","State":"Ready","Author":"SYSTEM"}]"#;
+        let rows: Vec<AutomationRow> = serde_json::from_str(json).unwrap();
+        assert_eq!(rows[0].author, "");
+        assert_eq!(rows[1].author, "SYSTEM");
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]

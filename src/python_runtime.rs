@@ -110,6 +110,13 @@ fn recommendation_command_from_root(root: PathBuf, history_path: &Path) -> Resul
         .args(["-m", "scripts.app_recommendations", "--json", "--history"])
         .arg(history_path)
         .current_dir(root)
+        // Without this, Python picks the console's codepage (e.g. cp1252
+        // on a French Windows install) for stdout when it isn't a real
+        // console — a piped `Stdio` here always qualifies. Any accented
+        // character (app names, size labels, …) then comes out as raw
+        // Latin-1 bytes instead of UTF-8, which `serde_json::from_slice`
+        // rejects outright since Rust strings must be valid UTF-8.
+        .env("PYTHONIOENCODING", "utf-8")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
