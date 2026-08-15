@@ -127,6 +127,33 @@ struct CardData {
     /// `is_configured` is `false` (an unconfigured card is never clickable,
     /// so there is nothing meaningful to launch).
     command: String,
+    /// `Some` for a variant-grouped card (mirrors `storage::Command::group_name`
+    /// of its variants) — used as the card's displayed title instead of
+    /// `name`, and as the key into `EguiApp::selected_variant`. `None` for a
+    /// simple (non-grouped) card.
+    group_name: Option<String>,
+    /// Empty for a simple card. For a grouped card, every variant sharing
+    /// the `variant_group`, in `config.commands` order — including
+    /// non-favorite ones in favorites mode, so a card made visible by one
+    /// favorite variant still offers its siblings in the dropdown. When
+    /// non-empty, the root `command`/`is_configured`/`disabled_message`
+    /// fields above are meaningless — read them from the currently selected
+    /// `VariantCardData` instead.
+    variants: Vec<VariantCardData>,
+}
+
+/// One entry in a variant-grouped card's dropdown — the per-variant
+/// counterpart of the resolution-derived fields on [`CardData`].
+#[derive(Clone, Debug, PartialEq)]
+struct VariantCardData {
+    command_id: String,
+    /// `storage::Command::variant_label`, falling back to the command's
+    /// `name` if unset.
+    label: String,
+    is_favorite: bool,
+    is_configured: bool,
+    disabled_message: Option<String>,
+    command: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,6 +202,104 @@ fn can_launch_card(is_configured: bool, action_running: &Option<String>) -> bool
     is_configured && action_running.is_none()
 }
 
+/// Groups commands for [`partition_by_variant_group`]: every command with a
+/// `variant_group` merges with its siblings sharing that same group id;
+/// every command without one gets its own bucket keyed by its own `id`, so
+/// distinct ungrouped commands never collapse into each other (all sharing
+/// the same `None` `variant_group` would otherwise hash identically).
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum PartitionKey {
+    Single(String),
+    Group(String),
+}
+
+/// Partitions `commands` into [`CardData`]s: commands sharing a
+/// `variant_group` consolidate into a single card carrying all of them as
+/// `variants` (in `commands` order); commands without one keep today's
+/// one-command-one-card behavior. `is_visible` additionally gates whether a
+/// candidate card is emitted at all — e.g. the favorites branch only emits a
+/// grouped card if at least one of its variants passes `is_visible`, but
+/// every variant is still attached to `variants` regardless, so a favorited
+/// variant's card still shows its non-favorited siblings in the dropdown.
+fn partition_by_variant_group(
+    commands: &[&storage::Command],
+    overrides: &MachineCommands,
+    machine_id: &str,
+    is_visible: impl Fn(&storage::Command) -> bool,
+) -> Vec<CardData> {
+    let mut order: Vec<PartitionKey> = Vec::new();
+    let mut buckets: HashMap<PartitionKey, Vec<&storage::Command>> = HashMap::new();
+    for &c in commands {
+        let key = match &c.variant_group {
+            Some(g) => PartitionKey::Group(g.clone()),
+            None => PartitionKey::Single(c.id.clone()),
+        };
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(c);
+    }
+
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let members = buckets.get(&key)?;
+            if !members.iter().copied().any(&is_visible) {
+                return None;
+            }
+            let first = members[0];
+
+            match key {
+                PartitionKey::Single(_) => {
+                    let (is_configured, disabled_message, command) =
+                        resolution_fields(first, overrides, machine_id);
+                    Some(CardData {
+                        command_id: first.id.clone(),
+                        name: first.name.clone(),
+                        icon: first.icon.clone(),
+                        is_favorite: first.is_favorite,
+                        is_configured,
+                        disabled_message,
+                        command,
+                        group_name: None,
+                        variants: Vec::new(),
+                    })
+                }
+                PartitionKey::Group(_) => {
+                    let variants: Vec<VariantCardData> = members
+                        .iter()
+                        .copied()
+                        .map(|c| {
+                            let (is_configured, disabled_message, command) =
+                                resolution_fields(c, overrides, machine_id);
+                            VariantCardData {
+                                command_id: c.id.clone(),
+                                label: c.variant_label.clone().unwrap_or_else(|| c.name.clone()),
+                                is_favorite: c.is_favorite,
+                                is_configured,
+                                disabled_message,
+                                command,
+                            }
+                        })
+                        .collect();
+                    let group_name = first.group_name.clone().unwrap_or_else(|| first.name.clone());
+                    Some(CardData {
+                        command_id: first.id.clone(),
+                        name: group_name.clone(),
+                        icon: first.icon.clone(),
+                        is_favorite: members.iter().any(|c| c.is_favorite),
+                        is_configured: false,
+                        disabled_message: None,
+                        command: String::new(),
+                        group_name: Some(group_name),
+                        variants,
+                    })
+                }
+            }
+        })
+        .collect()
+}
+
 /// Pure grouping/flattening step — mirrors `app.rs`'s
 /// `build_from_config`'s branch on `config.default_settings.show_categories`
 /// (grouped path uses `group_commands_by_category`; flat path filters to
@@ -182,6 +307,8 @@ fn can_launch_card(is_configured: bool, action_running: &Option<String>) -> bool
 /// callers never hold a borrow of `config` while later mutating it. Each
 /// card's `is_configured`/`disabled_message` is computed via
 /// `storage::resolve_command` against `overrides`/`machine_id` (Part 3).
+/// Commands sharing a `variant_group` are consolidated by
+/// `partition_by_variant_group` in both branches below.
 fn build_display_groups(
     config: &Config,
     overrides: &MachineCommands,
@@ -195,23 +322,8 @@ fn build_display_groups(
                     Some(cat) => cat.name.clone(),
                     None => "Sans catégorie".to_string(),
                 };
-                let cards = group
-                    .commands
-                    .iter()
-                    .map(|c| {
-                        let (is_configured, disabled_message, command) =
-                            resolution_fields(c, overrides, machine_id);
-                        CardData {
-                            command_id: c.id.clone(),
-                            name: c.name.clone(),
-                            icon: c.icon.clone(),
-                            is_favorite: c.is_favorite,
-                            is_configured,
-                            disabled_message,
-                            command,
-                        }
-                    })
-                    .collect();
+                let cards =
+                    partition_by_variant_group(&group.commands, overrides, machine_id, |_| true);
                 DisplayGroup {
                     header: Some(header),
                     cards,
@@ -219,24 +331,10 @@ fn build_display_groups(
             })
             .collect()
     } else {
-        let cards = config
-            .commands
-            .iter()
-            .filter(|c| c.is_favorite)
-            .map(|c| {
-                let (is_configured, disabled_message, command) =
-                    resolution_fields(c, overrides, machine_id);
-                CardData {
-                    command_id: c.id.clone(),
-                    name: c.name.clone(),
-                    icon: c.icon.clone(),
-                    is_favorite: c.is_favorite,
-                    is_configured,
-                    disabled_message,
-                    command,
-                }
-            })
-            .collect();
+        let commands: Vec<&storage::Command> = config.commands.iter().collect();
+        let cards = partition_by_variant_group(&commands, overrides, machine_id, |c| {
+            c.is_favorite
+        });
         vec![DisplayGroup {
             header: None,
             cards,
@@ -383,6 +481,11 @@ pub struct EguiApp {
     /// used both to gate the concurrency guard (`can_launch_card`) and to
     /// name the command in the status message once it settles.
     action_running: Option<String>,
+    /// Session-only, never persisted to `config.json`: `variant_group` →
+    /// currently selected `command_id` for a grouped card's dropdown.
+    /// Lazily defaulted to the group's first variant on first render if
+    /// absent.
+    selected_variant: HashMap<String, String>,
     /// `None` until the Automations view has fetched at least once.
     automations: Option<Result<Vec<AutomationRow>, String>>,
     application_report: Option<RecommendationReport>,
@@ -490,6 +593,7 @@ impl EguiApp {
             terminal_running: false,
             action_rx: None,
             action_running: None,
+            selected_variant: HashMap::new(),
             automations: None,
             application_report: None,
             application_error: None,
@@ -627,6 +731,14 @@ impl EguiApp {
     /// clickable regardless of resolution state — toggling favorite status
     /// is a config edit, not a launch (see this lot's risk register).
     fn render_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
+        if card.variants.is_empty() {
+            self.render_simple_card(ui, card, toggles);
+        } else {
+            self.render_grouped_card(ui, card, toggles);
+        }
+    }
+
+    fn render_simple_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
         let visual = self.icon_visual(&card.icon);
         let mut body_clicked = false;
         ui.group(|ui| {
@@ -681,7 +793,99 @@ impl EguiApp {
         // `body_clicked` here — kept explicit as the same guard
         // `can_launch_card` exposes for its pure unit test.
         if body_clicked && can_launch_card(card.is_configured, &self.action_running) {
-            self.launch_card_command(card);
+            self.launch_command(&card.command_id, &card.command);
+        }
+    }
+
+    /// Grouped card: a `ComboBox` selects among `card.variants` (session
+    /// state in `self.selected_variant`, keyed by `card.group_name`) and an
+    /// explicit "Lancer" button launches the selected variant's resolved
+    /// command — unlike a simple card, the body itself is not clickable, so
+    /// interacting with the dropdown never risks an accidental launch.
+    fn render_grouped_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
+        let visual = self.icon_visual(&card.icon);
+        let group_key = card.group_name.clone().unwrap_or_else(|| card.command_id.clone());
+        let selected_id = self
+            .selected_variant
+            .get(&group_key)
+            .cloned()
+            .unwrap_or_else(|| card.variants[0].command_id.clone());
+        let selected = card
+            .variants
+            .iter()
+            .find(|v| v.command_id == selected_id)
+            .unwrap_or(&card.variants[0]);
+        let selected_command_id = selected.command_id.clone();
+        let selected_command = selected.command.clone();
+        let selected_label = selected.label.clone();
+        let selected_is_configured = selected.is_configured;
+        let selected_is_favorite = selected.is_favorite;
+        let selected_disabled_message = selected.disabled_message.clone();
+
+        let mut requested_variant: Option<String> = None;
+        let mut launch_clicked = false;
+        let mut favorite_clicked = false;
+
+        ui.group(|ui| {
+            ui.set_width(96.0);
+            ui.vertical_centered(|ui| {
+                match visual {
+                    IconVisual::Texture(texture) => {
+                        let size = texture.size_vec2();
+                        let display_size =
+                            egui::vec2(48.0, 48.0).min(size.max(egui::vec2(1.0, 1.0)));
+                        ui.add(egui::Image::new((texture.id(), display_size)));
+                    }
+                    IconVisual::Emoji(text) => {
+                        ui.label(egui::RichText::new(text).size(28.0));
+                    }
+                }
+                ui.label(egui::RichText::new(&card.name).strong());
+
+                egui::ComboBox::from_id_salt(&group_key)
+                    .selected_text(&selected_label)
+                    .show_ui(ui, |ui| {
+                        for variant in &card.variants {
+                            let is_selected = variant.command_id == selected_command_id;
+                            if ui.selectable_label(is_selected, &variant.label).clicked() {
+                                requested_variant = Some(variant.command_id.clone());
+                            }
+                        }
+                    });
+
+                if let Some(message) = &selected_disabled_message {
+                    ui.label(egui::RichText::new(message).small().italics())
+                        .on_hover_text(message.clone());
+                }
+
+                ui.add_enabled_ui(
+                    can_launch_card(selected_is_configured, &self.action_running),
+                    |ui| {
+                        if ui.button("Lancer").clicked() {
+                            launch_clicked = true;
+                        }
+                    },
+                );
+
+                let star_label = if selected_is_favorite {
+                    "★ Favori"
+                } else {
+                    "☆ Favori"
+                };
+                if ui.small_button(star_label).clicked() {
+                    favorite_clicked = true;
+                }
+            });
+        });
+
+        if let Some(variant_id) = requested_variant {
+            self.selected_variant.insert(group_key, variant_id);
+        }
+        if launch_clicked && can_launch_card(selected_is_configured, &self.action_running) {
+            self.launch_command(&selected_command_id, &selected_command);
+        }
+        if favorite_clicked {
+            toggles.push(selected_command_id);
         }
     }
 
@@ -689,12 +893,12 @@ impl EguiApp {
     /// `launch_terminal_command` but through the dedicated `action_rx`
     /// slot so it never interferes with a command running in the Terminal
     /// view.
-    fn launch_card_command(&mut self, card: &CardData) {
+    fn launch_command(&mut self, command_id: &str, command: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
-        match terminal_view::launch_captured(&card.command, tx) {
+        match terminal_view::launch_captured(command, tx) {
             Ok(_pid) => {
                 self.action_rx = Some(rx);
-                self.action_running = Some(card.command_id.clone());
+                self.action_running = Some(command_id.to_string());
             }
             Err(err) => {
                 self.set_status(format!("Échec du lancement: {err}"), true);
@@ -1262,6 +1466,44 @@ mod tests {
         }
     }
 
+    /// Builds one variant of a variant-grouped command — the Phase 2
+    /// counterpart of `sample_config`'s plain `Command` literals.
+    #[allow(clippy::too_many_arguments)]
+    fn variant_command(
+        id: &str,
+        variant_group: &str,
+        group_name: &str,
+        variant_label: &str,
+        command: &str,
+        category: &str,
+        is_favorite: bool,
+    ) -> Command {
+        Command {
+            id: id.into(),
+            name: variant_label.into(),
+            command: command.into(),
+            category: category.into(),
+            icon: "🔧".into(),
+            is_favorite,
+            shortcut: None,
+            variant_group: Some(variant_group.into()),
+            group_name: Some(group_name.into()),
+            variant_label: Some(variant_label.into()),
+            machine_specific: false,
+        }
+    }
+
+    /// `sample_config()` with its `commands` replaced wholesale — new
+    /// grouped-card tests need fixtures with no widget-label overlap with
+    /// `sample_config`'s own "Bloc-notes"/"Invite de commandes" cards
+    /// (`kittest`'s `get()`/`query()` panics on more than one match), so
+    /// they build their command list from scratch rather than appending.
+    fn config_with_commands(commands: Vec<Command>) -> Config {
+        let mut config = sample_config();
+        config.commands = commands;
+        config
+    }
+
     fn sample_application_report() -> RecommendationReport {
         serde_json::from_str(
             r#"{
@@ -1322,6 +1564,131 @@ mod tests {
             .iter()
             .any(|g| g.header.as_deref() == Some("Sans catégorie")
                 && g.cards.iter().any(|c| c.command_id == "orphan")));
+    }
+
+    // -- Phase 2: variant-group consolidation --------------------------------
+
+    #[test]
+    fn variant_group_commands_consolidate_into_one_card_with_all_variants() {
+        let commands = vec![
+            variant_command("sftp-pro", "sftp-sync", "Synchroniser", "Pro", "sync.sh pro", "system", true),
+            variant_command(
+                "sftp-perso",
+                "sftp-sync",
+                "Synchroniser",
+                "Perso",
+                "sync.sh perso",
+                "system",
+                true,
+            ),
+            variant_command(
+                "sftp-hermes",
+                "sftp-sync",
+                "Synchroniser",
+                "Hermes",
+                "sync.sh hermes",
+                "system",
+                true,
+            ),
+            variant_command("sftp-tout", "sftp-sync", "Synchroniser", "Tout", "sync.sh tout", "system", true),
+        ];
+
+        for show_categories in [true, false] {
+            let mut config = config_with_commands(commands.clone());
+            config.default_settings.show_categories = show_categories;
+
+            let groups = build_display_groups(&config, &MachineCommands::default(), "test-machine");
+            let cards: Vec<&CardData> = groups.iter().flat_map(|g| &g.cards).collect();
+
+            assert_eq!(
+                cards.len(),
+                1,
+                "show_categories={show_categories}: expected exactly one grouped card"
+            );
+            assert_eq!(cards[0].variants.len(), 4);
+            assert_eq!(cards[0].group_name.as_deref(), Some("Synchroniser"));
+        }
+    }
+
+    #[test]
+    fn a_single_favorite_variant_still_pulls_in_all_its_siblings_in_favorites_mode() {
+        let commands = vec![
+            variant_command(
+                "e2m-tray",
+                "email-to-markdown",
+                "Email to Markdown",
+                "Tray auto",
+                "e2m.sh tray",
+                "system",
+                true,
+            ),
+            variant_command(
+                "e2m-release",
+                "email-to-markdown",
+                "Email to Markdown",
+                "Tray release",
+                "e2m.sh release",
+                "system",
+                false,
+            ),
+            variant_command(
+                "e2m-debug",
+                "email-to-markdown",
+                "Email to Markdown",
+                "Tray debug",
+                "e2m.sh debug",
+                "system",
+                false,
+            ),
+            variant_command(
+                "e2m-build-release",
+                "email-to-markdown",
+                "Email to Markdown",
+                "Build+launch release",
+                "e2m.sh build-release",
+                "system",
+                false,
+            ),
+            variant_command(
+                "e2m-build-debug",
+                "email-to-markdown",
+                "Email to Markdown",
+                "Build+launch debug",
+                "e2m.sh build-debug",
+                "system",
+                false,
+            ),
+        ];
+        let mut config = config_with_commands(commands);
+        config.default_settings.show_categories = false;
+
+        let groups = build_display_groups(&config, &MachineCommands::default(), "test-machine");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].cards.len(), 1);
+        assert_eq!(
+            groups[0].cards[0].variants.len(),
+            5,
+            "non-favorite siblings must still ride along in the dropdown"
+        );
+    }
+
+    #[test]
+    fn an_ungrouped_command_still_produces_exactly_one_plain_card() {
+        for show_categories in [true, false] {
+            let mut config = sample_config();
+            config.default_settings.show_categories = show_categories;
+
+            let groups = build_display_groups(&config, &MachineCommands::default(), "test-machine");
+            let cards: Vec<&CardData> = groups.iter().flat_map(|g| &g.cards).collect();
+
+            let notepad = cards
+                .iter()
+                .find(|c| c.command_id == "notepad")
+                .expect("notepad card present");
+            assert!(notepad.variants.is_empty());
+            assert_eq!(notepad.group_name, None);
+        }
     }
 
     // -- Part 3: per-machine resolution wiring into CardData -----------------
@@ -1912,6 +2279,220 @@ mod tests {
             harness.state().status.is_none(),
             "clicking an unconfigured card's body must not produce a status message; got {:?}",
             harness.state().status.as_ref().map(|s| &s.text)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Grouped-card variant selector tests (this phase's acceptance criteria) --
+
+    #[test]
+    fn selecting_a_variant_then_clicking_lancer_launches_that_variants_command() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "variant-select-launch"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let commands = vec![
+            variant_command(
+                "sync-pro",
+                "sync",
+                "Synchroniser",
+                "Pro",
+                "echo hello-from-pro",
+                "system",
+                true,
+            ),
+            variant_command(
+                "sync-perso",
+                "sync",
+                "Synchroniser",
+                "Perso",
+                "echo hello-from-perso",
+                "system",
+                true,
+            ),
+        ];
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        // "Pro" is the first variant in `config.commands` order, so it is
+        // the lazily-defaulted initial selection — open the label-less
+        // `ComboBox` via its current value (see `partition_by_variant_group`
+        // doc comment / `VariantCardData`).
+        harness.get_by_value("Pro").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Perso")
+            .click();
+        harness.run();
+
+        harness.get_by_label("Lancer").click();
+        harness.run_steps(1);
+
+        let mut saw_success = false;
+        for _ in 0..200 {
+            saw_success = saw_success
+                || harness.state().status.as_ref().is_some_and(|status| {
+                    !status.is_error && status.text.contains("sync-perso")
+                });
+            if saw_success && harness.state().action_running.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            harness.run_steps(1);
+        }
+
+        assert!(
+            saw_success,
+            "expected a success status naming the selected variant 'sync-perso', not the default 'sync-pro'; got {:?}",
+            harness.state().status.as_ref().map(|s| &s.text)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selecting_an_unconfigured_variant_disables_lancer() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "variant-select-unconfigured"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let mut commands = vec![variant_command(
+            "sync-pro",
+            "sync",
+            "Synchroniser",
+            "Pro",
+            "echo hello-from-pro",
+            "system",
+            true,
+        )];
+        let mut perso = variant_command(
+            "sync-perso",
+            "sync",
+            "Synchroniser",
+            "Perso",
+            "echo hello-from-perso",
+            "system",
+            true,
+        );
+        // No override exists for "test-machine" in the empty `MachineCommands`
+        // used by `new_for_test`, so this variant resolves as unconfigured.
+        perso.machine_specific = true;
+        commands.push(perso);
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_value("Pro").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Perso")
+            .click();
+        harness.run();
+
+        harness.get_by_label("Lancer").click();
+        harness.run();
+
+        assert!(
+            harness.state().action_running.is_none(),
+            "clicking 'Lancer' on an unconfigured selected variant must not start a launch"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn favorite_toggle_on_a_grouped_card_only_affects_the_selected_variant() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "variant-favorite-toggle"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let commands = vec![
+            variant_command(
+                "sync-pro",
+                "sync",
+                "Synchroniser",
+                "Pro",
+                "echo hello-from-pro",
+                "system",
+                false,
+            ),
+            variant_command(
+                "sync-perso",
+                "sync",
+                "Synchroniser",
+                "Perso",
+                "echo hello-from-perso",
+                "system",
+                true,
+            ),
+        ];
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        // "Pro" (not favorite) is the initial selection; switch to "Perso"
+        // (favorite) before toggling.
+        harness.get_by_value("Pro").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Perso")
+            .click();
+        harness.run();
+
+        harness.get_by_label("★ Favori").click();
+        harness.run();
+
+        let commands = &harness.state().config.commands;
+        let pro = commands.iter().find(|c| c.id == "sync-pro").unwrap();
+        let perso = commands.iter().find(|c| c.id == "sync-perso").unwrap();
+        assert!(
+            !pro.is_favorite,
+            "toggling the selected variant's favorite must not affect an unselected sibling"
+        );
+        assert!(
+            !perso.is_favorite,
+            "the selected variant's own favorite state must have flipped"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
