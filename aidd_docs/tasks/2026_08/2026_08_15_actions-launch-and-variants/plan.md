@@ -1,6 +1,6 @@
 ---
 objective: "Restaurer, sur la vue Actions du launcher DevToolBox, le clic-pour-lancer sur les cartes et le regroupement par variante avec menu déroulant, deux capacités perdues lors du portage multi-OS tao/WinUI3/GDI → eframe/egui."
-status: in-progress
+status: implemented
 ---
 
 # Plan: Clic-pour-lancer et regroupement par variante sur la vue Actions
