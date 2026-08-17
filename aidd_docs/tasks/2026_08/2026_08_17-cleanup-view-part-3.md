@@ -1,6 +1,6 @@
 ---
 name: plan
-status: pending
+status: implemented
 description: Wire everything into EguiApp — rename the Applications tab to « Nettoyage », add cleanup state/channels/drain, the blocking confirmation dialog before --apply, and the single-command-slot concurrency guard shared with Actions cards and the Terminal
 argument-hint: N/A
 objective: "The « Nettoyage » tab shows the installed-apps report on top and the Bibliothèques section below; Analyser fills rows from a background clean.py run; Nettoyer on a safe row opens a blocking confirm dialog (size + paths) then applies and refreshes the row from the run payload; all launch entry points share one busy guard"
@@ -76,3 +76,11 @@ flowchart TD
 
 - `cargo test` (workspace) green, including: tab renamed (kittest label « Nettoyage »), Analyser sets `cleanup_running` and drains a synthetic `CleanupEvent` into rows, Clean opens the dialog and only spawns on « Oui », `command_busy` gates cards/terminal/cleanup mutually, partial-failure event produces the failure badge (count from `locked_paths`/`operation_failures`) and `measured` size, interrupted run never shows a success badge.
 - Master final: real end-to-end click-through on this machine (see master plan step 6).
+
+## Deviations (2026-08-17, at execution)
+
+- `cleanup_running: bool` became `cleanup_job: Option<CleanupJob>` (`Analyze` / `Clean(String)`): distinguishes the analysis spinner from an apply run and lets a failure message name the module. `command_busy` reads `cleanup_job.is_some()`.
+- `cleanup_last_runs` stores `cleanup_view::LastRun { result, interrupted }` (not bare `ModuleResult`): the interrupted flag must survive per-row for the badge rule "interrupted is never a success".
+- `cleanup_spawning_enabled` is initialized from the existing `report_spawning_enabled` argument of `from_parts` — no signature change; `new_for_test` already passes `false`.
+- The plan's "both Terminal launch paths (Lancer button and Enter)" — no Enter-to-launch path exists in the code; only the Lancer button was gated.
+- Workspace `cargo test` is not fully green on this machine: 5 pre-existing environmental failures (`applications::usage` os error 123 on Windows temp paths, venv tests expecting Unix `bin/python`), none touching cleanup code paths.

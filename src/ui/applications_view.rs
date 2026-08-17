@@ -68,7 +68,7 @@ pub fn render(
 ) -> bool {
     let mut refresh = false;
     ui.horizontal(|ui| {
-        ui.heading("DevToolBox — Applications");
+        ui.heading("DevToolBox — Nettoyage");
         if ui
             .add_enabled(!loading, egui::Button::new("Rafraîchir"))
             .clicked()
