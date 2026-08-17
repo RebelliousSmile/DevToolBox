@@ -145,10 +145,14 @@ pub fn render(ui: &mut egui::Ui, state: &CleanupViewState<'_>) -> Vec<CleanupAct
                 .striped(true)
                 .min_col_width(85.0)
                 .show(ui, |ui| {
+                    // Action sits before Contenu: the path column is often
+                    // wider than the window, and a trailing Action column
+                    // would land past the right edge, hiding the Nettoyer
+                    // button behind a horizontal scroll.
                     ui.strong("Bibliothèque");
                     ui.strong("Taille");
-                    ui.strong("Contenu");
                     ui.strong("Action");
+                    ui.strong("Contenu");
                     ui.end_row();
                     for row in rows {
                         let last = state.last_runs.get(&row.module);
@@ -167,12 +171,10 @@ pub fn render(ui: &mut egui::Ui, state: &CleanupViewState<'_>) -> Vec<CleanupAct
                         if cleanable {
                             ui.label(&row.module);
                             ui.label(size);
-                            ui.label(content).on_hover_text(row.paths.join("\n"));
                         } else {
                             // Greyed row: analysable but not cleanable from here.
                             ui.weak(format!("{} (niveau {})", row.module, row.level));
                             ui.weak(size);
-                            ui.weak(content).on_hover_text(row.paths.join("\n"));
                         }
                         ui.horizontal(|ui| {
                             if cleanable
@@ -191,6 +193,11 @@ pub fn render(ui: &mut egui::Ui, state: &CleanupViewState<'_>) -> Vec<CleanupAct
                                 ui.colored_label(color, row_badge(run));
                             }
                         });
+                        if cleanable {
+                            ui.label(content).on_hover_text(row.paths.join("\n"));
+                        } else {
+                            ui.weak(content).on_hover_text(row.paths.join("\n"));
+                        }
                         ui.end_row();
                     }
                 });
