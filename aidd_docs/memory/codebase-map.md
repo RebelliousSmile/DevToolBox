@@ -14,8 +14,8 @@ flowchart TD
 
     subgraph Native["Native modules"]
         WINMOD["src/windows/ - registry, task_scheduler, process"]
-        UIMOD["src/ui/ - egui app, terminal, applications view"]
-        STOREMOD["src/storage/ - models, json"]
+        UIMOD["src/ui/ - egui app, terminal, applications view, icon_picker, command_form"]
+        STOREMOD["src/storage/ - models, json, categories, commands, slug, machine_commands"]
         ASSETS["src/assets/ - custom icons"]
         APPMOD["src/applications/ - process matching and usage history"]
         PYRUN["src/python_runtime.rs - bundled Python resolution"]
