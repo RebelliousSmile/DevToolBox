@@ -36,20 +36,9 @@ pub fn filtered_candidates<'a>(
 }
 
 fn human_size(bytes: Option<u64>) -> String {
-    let Some(bytes) = bytes else {
-        return "inconnue".to_string();
-    };
-    const UNITS: [&str; 5] = ["o", "Kio", "Mio", "Gio", "Tio"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
+    match bytes {
+        Some(bytes) => super::format::human_size(bytes),
+        None => "inconnue".to_string(),
     }
 }
 

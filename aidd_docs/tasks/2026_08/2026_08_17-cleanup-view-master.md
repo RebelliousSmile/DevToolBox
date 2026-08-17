@@ -26,7 +26,7 @@ argument-hint: N/A
 | #   | Plan                                        | File                                     | Status  | Validated |
 | --- | ------------------------------------------- | ---------------------------------------- | ------- | --------- |
 | 1   | winclean JSON client (spawn + model)        | `./2026_08_17-cleanup-view-part-1.md`    | implemented | [x]   |
-| 2   | Cleanup view rendering (pure UI)            | `./2026_08_17-cleanup-view-part-2.md`    | pending | [ ]       |
+| 2   | Cleanup view rendering (pure UI)            | `./2026_08_17-cleanup-view-part-2.md`    | implemented | [x]       |
 | 3   | Integration into EguiApp (rename + wiring)  | `./2026_08_17-cleanup-view-part-3.md`    | pending | [ ]       |
 
 <!-- RULE: Plan N+1 blocked until Plan N checkbox checked -->

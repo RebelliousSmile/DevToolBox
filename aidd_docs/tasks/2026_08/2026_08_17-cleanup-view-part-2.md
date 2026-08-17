@@ -1,10 +1,10 @@
 ---
 name: plan
-status: pending
+status: implemented
 description: Pure rendering for the « Bibliothèques » section — module rows with size/paths/level, Analyser button with spinner, greyed moderate rows, per-row Nettoyer button, run badges and error banner — mirroring applications_view.rs's stateless render style
 argument-hint: N/A
 objective: "src/ui/cleanup_view.rs renders module rows from Part 1's ModuleRow list plus per-module run state, returns requested actions (Analyze / Clean(module)) without mutating anything, and is unit-tested as pure functions"
-success_condition: "cargo test --lib ui::cleanup_view:: exits 0"
+success_condition: "cargo test --bin devtoolbox ui::cleanup_view:: exits 0 (adjusted at execution: the crate is bin-only, --lib has no target)"
 iteration: 0
 created_at: "2026-08-17T00:00:00Z"
 ---
