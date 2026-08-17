@@ -6,6 +6,11 @@
 //!   the requested command id.
 //! - [`toggle_favorite`]: flip `is_favorite` for a single command and return
 //!   the new state; persist via [`crate::storage::json::save`].
+//! - [`CommandError`]: typed error returned by `add_command`/`update_command`/
+//!   `remove_command` (mirrors [`crate::storage::categories::CategoryError`]).
+//! - [`add_command`]: append a new command (rejects a duplicate id).
+//! - [`update_command`]: replace an existing command in place by id.
+//! - [`remove_command`]: remove a command by id.
 //!
 //! ## Deferred interactive toggle seam (issue #9)
 //!
@@ -19,10 +24,11 @@
 //! // Then call UiHost::reload() to refresh the visible grid.
 //! ```
 
-// Staged favorite-toggle API (issue #9): fully tested but not yet wired to the UI.
+// Staged favorite-toggle API (issue #9) and command CRUD (preferences config
+// editor part 1): fully tested but not yet wired to the UI.
 #![allow(dead_code)]
 
-use crate::storage::models::Config;
+use crate::storage::models::{Command, Config};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -74,6 +80,77 @@ pub fn toggle_favorite(config: &mut Config, command_id: &str) -> Result<bool, Fa
 
     cmd.is_favorite = !cmd.is_favorite;
     Ok(cmd.is_favorite)
+}
+
+// ---------------------------------------------------------------------------
+// Command CRUD
+// ---------------------------------------------------------------------------
+
+/// Error type for command CRUD operations, mirroring
+/// [`crate::storage::categories::CategoryError`]'s shape.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CommandError {
+    /// A command with this id already exists (returned by `add_command`).
+    DuplicateId(String),
+    /// No command with this id was found (returned by `update_command` /
+    /// `remove_command`).
+    NotFound(String),
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandError::DuplicateId(id) => {
+                write!(f, "command id '{id}' already exists")
+            }
+            CommandError::NotFound(id) => {
+                write!(f, "command id '{id}' not found")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+/// Append a new command to `config.commands`.
+///
+/// Returns `Err(CommandError::DuplicateId)` if a command with the same id
+/// already exists, mirroring [`crate::storage::categories::add_category`].
+pub fn add_command(config: &mut Config, command: Command) -> Result<(), CommandError> {
+    if config.commands.iter().any(|c| c.id == command.id) {
+        return Err(CommandError::DuplicateId(command.id));
+    }
+    config.commands.push(command);
+    Ok(())
+}
+
+/// Replace the command matching `id` in place with `updated`.
+///
+/// Returns `Ok(())` on success or `Err(CommandError::NotFound)` when no
+/// command with `id` exists. The config is left unchanged in that case.
+pub fn update_command(config: &mut Config, id: &str, updated: Command) -> Result<(), CommandError> {
+    match config.commands.iter_mut().find(|c| c.id == id) {
+        Some(cmd) => {
+            *cmd = updated;
+            Ok(())
+        }
+        None => Err(CommandError::NotFound(id.to_string())),
+    }
+}
+
+/// Remove the command matching `id` from `config.commands`.
+///
+/// Returns `Ok(())` on success or `Err(CommandError::NotFound)` when no
+/// command with `id` exists.
+pub fn remove_command(config: &mut Config, id: &str) -> Result<(), CommandError> {
+    let pos = config
+        .commands
+        .iter()
+        .position(|c| c.id == id)
+        .ok_or_else(|| CommandError::NotFound(id.to_string()))?;
+
+    config.commands.remove(pos);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -346,5 +423,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // add_command
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn add_command_appends() {
+        let mut config = two_command_config();
+        let new_cmd = make_command("calc", false);
+        add_command(&mut config, new_cmd).expect("add failed");
+
+        assert_eq!(config.commands.len(), 3);
+        assert_eq!(config.commands[2].id, "calc");
+    }
+
+    #[test]
+    fn add_command_rejects_duplicate_id() {
+        let mut config = two_command_config();
+        let dup = make_command("notepad", false);
+        let result = add_command(&mut config, dup);
+        assert_eq!(
+            result,
+            Err(CommandError::DuplicateId("notepad".to_string()))
+        );
+        // Original command count unchanged.
+        assert_eq!(config.commands.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // update_command
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn update_command_replaces_fields_in_place() {
+        let mut config = two_command_config();
+        let mut updated = make_command("notepad", false);
+        updated.name = "Notepad Renamed".to_string();
+        updated.command = "notepad2.exe".to_string();
+
+        update_command(&mut config, "notepad", updated).expect("update failed");
+
+        let cmd = config.commands.iter().find(|c| c.id == "notepad").unwrap();
+        assert_eq!(cmd.name, "Notepad Renamed");
+        assert_eq!(cmd.command, "notepad2.exe");
+        // Command count unchanged.
+        assert_eq!(config.commands.len(), 2);
+    }
+
+    #[test]
+    fn update_command_returns_error_for_unknown_id() {
+        let mut config = two_command_config();
+        let updated = make_command("ghost", false);
+        let result = update_command(&mut config, "ghost", updated);
+        assert_eq!(result, Err(CommandError::NotFound("ghost".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // remove_command
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remove_command_deletes_the_command() {
+        let mut config = two_command_config();
+        remove_command(&mut config, "notepad").expect("remove failed");
+
+        assert_eq!(config.commands.len(), 1);
+        assert!(!config.commands.iter().any(|c| c.id == "notepad"));
+    }
+
+    #[test]
+    fn remove_command_returns_error_for_unknown_id() {
+        let mut config = two_command_config();
+        let result = remove_command(&mut config, "ghost");
+        assert_eq!(result, Err(CommandError::NotFound("ghost".to_string())));
+        // Command count unchanged.
+        assert_eq!(config.commands.len(), 2);
     }
 }
