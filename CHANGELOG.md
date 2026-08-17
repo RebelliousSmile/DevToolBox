@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-08-17
+
+### Added
+- Préférences view: full CRUD on an action (name, executable+arguments,
+  category, curated icon picker, favorite, shortcut), reusable ⬆/⬇ move
+  buttons on categories and actions, and a blocking confirmation dialog on
+  delete
+- Préférences view: commands sharing a `variant_group` now collapse into a
+  single row (mirroring the Actions view's grouped cards) with an
+  expand/collapse toggle revealing each variant for individual edit, move,
+  or delete
+- `storage`: `add_command`/`update_command`/`remove_command`/
+  `remove_command_group` command CRUD, `move_category`/`move_command`/
+  `move_command_group`/`move_variant` reordering, `generate_slug`
+  collision-free id generation, and a reserved-name guard on the
+  "Sans catégorie" pseudo-category
+
 ## [0.3.0] - 2026-08-15
 
 ### Added
