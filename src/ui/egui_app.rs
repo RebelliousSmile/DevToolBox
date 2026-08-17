@@ -284,7 +284,10 @@ fn partition_by_variant_group(
                             }
                         })
                         .collect();
-                    let group_name = first.group_name.clone().unwrap_or_else(|| first.name.clone());
+                    let group_name = first
+                        .group_name
+                        .clone()
+                        .unwrap_or_else(|| first.name.clone());
                     Some(CardData {
                         command_id: first.id.clone(),
                         name: group_name.clone(),
@@ -334,9 +337,7 @@ fn build_display_groups(
             .collect()
     } else {
         let commands: Vec<&storage::Command> = config.commands.iter().collect();
-        let cards = partition_by_variant_group(&commands, overrides, machine_id, |c| {
-            c.is_favorite
-        });
+        let cards = partition_by_variant_group(&commands, overrides, machine_id, |c| c.is_favorite);
         vec![DisplayGroup {
             header: None,
             cards,
@@ -400,8 +401,10 @@ fn partition_preferences_rows(commands: Vec<storage::Command>) -> Vec<Preference
                 PartitionKey::Single(_) => members.into_iter().next().map(PreferencesRow::Single),
                 PartitionKey::Group(group_key) => {
                     let first = members.first()?;
-                    let group_name =
-                        first.group_name.clone().unwrap_or_else(|| first.name.clone());
+                    let group_name = first
+                        .group_name
+                        .clone()
+                        .unwrap_or_else(|| first.name.clone());
                     let icon = first.icon.clone();
                     Some(PreferencesRow::Group {
                         key: group_key,
@@ -556,9 +559,17 @@ impl ActionForm {
 
 enum CategoryAction {
     Add,
-    Rename { id: String, new_name: String },
-    Remove { id: String },
-    Move { id: String, direction: storage::MoveDirection },
+    Rename {
+        id: String,
+        new_name: String,
+    },
+    Remove {
+        id: String,
+    },
+    Move {
+        id: String,
+        direction: storage::MoveDirection,
+    },
 }
 
 /// Which top-level view the nav row has selected.
@@ -573,7 +584,11 @@ enum ActiveView {
 }
 
 /// An action deferred behind a confirm dialog — applied by
-/// [`EguiApp::resolve_pending_action`] only once the user picks "Oui".
+/// [`EguiApp::resolve_pending_action`] only once the user picks "Oui". Every
+/// variant is a removal by design (this enum only ever gates destructive
+/// actions behind a blocking confirm), so the shared `Remove` prefix is
+/// intentional, not a naming smell.
+#[allow(clippy::enum_variant_names)]
 enum PendingAction {
     RemoveCategory(String),
     RemoveCommand(String),
@@ -905,8 +920,8 @@ impl EguiApp {
                             match visual {
                                 IconVisual::Texture(texture) => {
                                     let size = texture.size_vec2();
-                                    let display_size = egui::vec2(48.0, 48.0)
-                                        .min(size.max(egui::vec2(1.0, 1.0)));
+                                    let display_size =
+                                        egui::vec2(48.0, 48.0).min(size.max(egui::vec2(1.0, 1.0)));
                                     ui.add(egui::Image::new((texture.id(), display_size)));
                                 }
                                 IconVisual::Emoji(text) => {
@@ -960,7 +975,10 @@ impl EguiApp {
     /// interacting with the dropdown never risks an accidental launch.
     fn render_grouped_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         let visual = self.icon_visual(&card.icon);
-        let group_key = card.group_name.clone().unwrap_or_else(|| card.command_id.clone());
+        let group_key = card
+            .group_name
+            .clone()
+            .unwrap_or_else(|| card.command_id.clone());
         let selected_id = self
             .selected_variant
             .get(&group_key)
@@ -1419,8 +1437,7 @@ impl EguiApp {
         // category currently referenced by the form was deleted while the
         // form was open, fall back to "Sans catégorie" instead of showing
         // (or silently keeping) a dangling id.
-        if !form.category.is_empty()
-            && !category_options.iter().any(|(id, _)| id == &form.category)
+        if !form.category.is_empty() && !category_options.iter().any(|(id, _)| id == &form.category)
         {
             form.category = String::new();
         }
@@ -1585,7 +1602,8 @@ impl EguiApp {
                             // rather than delete-with-fallback (deviation from
                             // the originally approved spec, confirmed via
                             // manual click-through).
-                            let remove_button = ui.add_enabled(is_empty, egui::Button::new("Supprimer"));
+                            let remove_button =
+                                ui.add_enabled(is_empty, egui::Button::new("Supprimer"));
                             let remove_button = if is_empty {
                                 remove_button
                             } else {
@@ -1700,11 +1718,8 @@ impl EguiApp {
                                         Some((key.clone(), storage::MoveDirection::Down));
                                 }
                                 if ui.button("Supprimer").clicked() {
-                                    remove_group_request = Some((
-                                        key.clone(),
-                                        group_name.clone(),
-                                        variants.len(),
-                                    ));
+                                    remove_group_request =
+                                        Some((key.clone(), group_name.clone(), variants.len()));
                                 }
                             });
                             if is_expanded {
@@ -1720,21 +1735,14 @@ impl EguiApp {
                                         ui.label(label);
                                         let star_label =
                                             if variant.is_favorite { "★" } else { "☆" };
-                                        if ui
-                                            .button(star_label)
-                                            .on_hover_text("Favori")
-                                            .clicked()
-                                        {
+                                        if ui.button(star_label).on_hover_text("Favori").clicked() {
                                             toggle_favorite_request = Some(variant.id.clone());
                                         }
                                         if ui.button("Modifier").clicked() {
                                             edit_command_request = Some(variant.clone());
                                         }
                                         if ui
-                                            .add_enabled(
-                                                variant_index != 0,
-                                                egui::Button::new("⬆"),
-                                            )
+                                            .add_enabled(variant_index != 0, egui::Button::new("⬆"))
                                             .on_hover_text("Monter")
                                             .clicked()
                                         {
@@ -1757,10 +1765,8 @@ impl EguiApp {
                                             ));
                                         }
                                         if ui.button("Supprimer").clicked() {
-                                            remove_command_request = Some((
-                                                variant.id.clone(),
-                                                variant.name.clone(),
-                                            ));
+                                            remove_command_request =
+                                                Some((variant.id.clone(), variant.name.clone()));
                                         }
                                     });
                                 }
@@ -2068,16 +2074,18 @@ impl EguiApp {
         if settled {
             let command_id = self.action_running.take().unwrap_or_default();
             self.action_rx = None;
-            self.status = Some(match outcome.expect("settled implies a terminal event was seen") {
-                Ok(()) => StatusMessage {
-                    text: format!("'{command_id}' lancé avec succès."),
-                    is_error: false,
+            self.status = Some(
+                match outcome.expect("settled implies a terminal event was seen") {
+                    Ok(()) => StatusMessage {
+                        text: format!("'{command_id}' lancé avec succès."),
+                        is_error: false,
+                    },
+                    Err(err) => StatusMessage {
+                        text: format!("Échec du lancement de '{command_id}': {err}"),
+                        is_error: true,
+                    },
                 },
-                Err(err) => StatusMessage {
-                    text: format!("Échec du lancement de '{command_id}': {err}"),
-                    is_error: true,
-                },
-            });
+            );
         }
     }
 
@@ -2371,7 +2379,15 @@ mod tests {
     #[test]
     fn variant_group_commands_consolidate_into_one_card_with_all_variants() {
         let commands = vec![
-            variant_command("sftp-pro", "sftp-sync", "Synchroniser", "Pro", "sync.sh pro", "system", true),
+            variant_command(
+                "sftp-pro",
+                "sftp-sync",
+                "Synchroniser",
+                "Pro",
+                "sync.sh pro",
+                "system",
+                true,
+            ),
             variant_command(
                 "sftp-perso",
                 "sftp-sync",
@@ -2390,7 +2406,15 @@ mod tests {
                 "system",
                 true,
             ),
-            variant_command("sftp-tout", "sftp-sync", "Synchroniser", "Tout", "sync.sh tout", "system", true),
+            variant_command(
+                "sftp-tout",
+                "sftp-sync",
+                "Synchroniser",
+                "Tout",
+                "sync.sh tout",
+                "system",
+                true,
+            ),
         ];
 
         for show_categories in [true, false] {
@@ -3151,7 +3175,9 @@ mod tests {
 
         harness.get_by_label("nom de l'action").focus();
         harness.run();
-        harness.get_by_label("nom de l'action").type_text("Calculatrice");
+        harness
+            .get_by_label("nom de l'action")
+            .type_text("Calculatrice");
         harness.run();
 
         harness.get_by_label("Exécutable").focus();
@@ -3170,9 +3196,7 @@ mod tests {
 
         // Reassign from the default "Sans catégorie" to the sample
         // config's one real category.
-        harness
-            .get_by_role(egui::accesskit::Role::ComboBox)
-            .click();
+        harness.get_by_role(egui::accesskit::Role::ComboBox).click();
         harness.run();
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Système")
@@ -3188,7 +3212,9 @@ mod tests {
         harness
             .get_all_by_label("Choisir…")
             .nth(1)
-            .expect("action form's icon_picker trigger button should be the second 'Choisir…' button")
+            .expect(
+                "action form's icon_picker trigger button should be the second 'Choisir…' button",
+            )
             .click();
         harness.run();
         harness.get_by_label("🚀").click();
@@ -3285,9 +3311,7 @@ mod tests {
 
         // Reassign to "Sans catégorie" (risk register item 3's flip side —
         // the dropdown must let a currently-categorized action move out).
-        harness
-            .get_by_role(egui::accesskit::Role::ComboBox)
-            .click();
+        harness.get_by_role(egui::accesskit::Role::ComboBox).click();
         harness.run();
         harness
             .get_by_role_and_label(egui::accesskit::Role::Button, "Sans catégorie")
@@ -3417,7 +3441,12 @@ mod tests {
             1,
             "confirming removal must update in-memory state"
         );
-        assert!(!harness.state().config.commands.iter().any(|c| c.id == "cmd"));
+        assert!(!harness
+            .state()
+            .config
+            .commands
+            .iter()
+            .any(|c| c.id == "cmd"));
 
         let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
         assert!(
@@ -3720,12 +3749,11 @@ mod tests {
 
         let mut saw_success = false;
         for _ in 0..200 {
-            saw_success = saw_success
-                || harness
-                    .state()
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| !status.is_error && status.text.contains("echo-card"));
+            saw_success =
+                saw_success
+                    || harness.state().status.as_ref().is_some_and(|status| {
+                        !status.is_error && status.text.contains("echo-card")
+                    });
             if saw_success && harness.state().action_running.is_none() {
                 break;
             }
@@ -3861,10 +3889,11 @@ mod tests {
 
         let mut saw_success = false;
         for _ in 0..200 {
-            saw_success = saw_success
-                || harness.state().status.as_ref().is_some_and(|status| {
-                    !status.is_error && status.text.contains("sync-perso")
-                });
+            saw_success =
+                saw_success
+                    || harness.state().status.as_ref().is_some_and(|status| {
+                        !status.is_error && status.text.contains("sync-perso")
+                    });
             if saw_success && harness.state().action_running.is_none() {
                 break;
             }

@@ -321,7 +321,11 @@ pub fn move_command(
 /// or `Err(CommandError::NotGrouped)` when it exists but has no
 /// `variant_group`. A no-op (returns `Ok(())`) if already first/last within
 /// the group in the requested direction.
-pub fn move_variant(config: &mut Config, id: &str, direction: MoveDirection) -> Result<(), CommandError> {
+pub fn move_variant(
+    config: &mut Config,
+    id: &str,
+    direction: MoveDirection,
+) -> Result<(), CommandError> {
     let pos = config
         .commands
         .iter()
@@ -885,21 +889,30 @@ mod tests {
     fn move_variant_down_swaps_with_next_sibling_only() {
         let mut config = grouped_test_config();
         move_variant(&mut config, "g1a", MoveDirection::Down).expect("move failed");
-        assert_eq!(ids(&config), vec!["g1b", "g1a", "g1c", "s", "g2a", "g2b", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["g1b", "g1a", "g1c", "s", "g2a", "g2b", "o1"]
+        );
     }
 
     #[test]
     fn move_variant_up_on_first_in_group_is_a_no_op() {
         let mut config = grouped_test_config();
         move_variant(&mut config, "g1a", MoveDirection::Up).expect("move failed");
-        assert_eq!(ids(&config), vec!["g1a", "g1b", "g1c", "s", "g2a", "g2b", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["g1a", "g1b", "g1c", "s", "g2a", "g2b", "o1"]
+        );
     }
 
     #[test]
     fn move_variant_down_on_last_in_group_is_a_no_op() {
         let mut config = grouped_test_config();
         move_variant(&mut config, "g1c", MoveDirection::Down).expect("move failed");
-        assert_eq!(ids(&config), vec!["g1a", "g1b", "g1c", "s", "g2a", "g2b", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["g1a", "g1b", "g1c", "s", "g2a", "g2b", "o1"]
+        );
     }
 
     #[test]
@@ -921,7 +934,10 @@ mod tests {
         let mut config = grouped_test_config();
         // "g1" must move past "s" as one block, preserving internal order.
         move_command_group(&mut config, "g1", MoveDirection::Down).expect("move failed");
-        assert_eq!(ids(&config), vec!["s", "g1a", "g1b", "g1c", "g2a", "g2b", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["s", "g1a", "g1b", "g1c", "g2a", "g2b", "o1"]
+        );
     }
 
     #[test]
@@ -929,7 +945,10 @@ mod tests {
         let mut config = grouped_test_config();
         // "g2" must move past "s" as one block, preserving internal order.
         move_command_group(&mut config, "g2", MoveDirection::Up).expect("move failed");
-        assert_eq!(ids(&config), vec!["g1a", "g1b", "g1c", "g2a", "g2b", "s", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["g1a", "g1b", "g1c", "g2a", "g2b", "s", "o1"]
+        );
     }
 
     #[test]
@@ -938,14 +957,20 @@ mod tests {
         move_command_group(&mut config, "g1", MoveDirection::Down).expect("first move failed");
         // g1 is now after "s"; move it again to swap past "g2".
         move_command_group(&mut config, "g1", MoveDirection::Down).expect("second move failed");
-        assert_eq!(ids(&config), vec!["s", "g2a", "g2b", "g1a", "g1b", "g1c", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["s", "g2a", "g2b", "g1a", "g1b", "g1c", "o1"]
+        );
     }
 
     #[test]
     fn move_command_group_up_on_first_group_in_bucket_is_a_no_op() {
         let mut config = grouped_test_config();
         move_command_group(&mut config, "g1", MoveDirection::Up).expect("move failed");
-        assert_eq!(ids(&config), vec!["g1a", "g1b", "g1c", "s", "g2a", "g2b", "o1"]);
+        assert_eq!(
+            ids(&config),
+            vec!["g1a", "g1b", "g1c", "s", "g2a", "g2b", "o1"]
+        );
     }
 
     #[test]
@@ -964,10 +989,7 @@ mod tests {
         // Break "g1"'s contiguity by swapping one member past "s".
         config.commands.swap(1, 3); // g1b <-> s
         let result = move_command_group(&mut config, "g1", MoveDirection::Down);
-        assert_eq!(
-            result,
-            Err(CommandError::NotContiguous("g1".to_string()))
-        );
+        assert_eq!(result, Err(CommandError::NotContiguous("g1".to_string())));
     }
 
     #[test]

@@ -371,7 +371,9 @@ mod tests {
         // silently accepted or hand-escaped.
         let r = rows(&["echo", "say\"hi"]);
         match validate(&r) {
-            Err(ValidationError::RoundTripMismatch { expected, actual, .. }) => {
+            Err(ValidationError::RoundTripMismatch {
+                expected, actual, ..
+            }) => {
                 assert_eq!(expected, r);
                 assert_ne!(actual, r);
             }
@@ -496,10 +498,7 @@ mod tests {
         harness.run();
         harness.get_by_label("Supprimer 2").click();
         harness.step();
-        assert_eq!(
-            harness.state().widget.rows(),
-            &["notepad.exe".to_string()]
-        );
+        assert_eq!(harness.state().widget.rows(), &["notepad.exe".to_string()]);
     }
 
     #[test]

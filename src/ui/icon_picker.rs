@@ -37,18 +37,12 @@ pub const CURATED_ICONS: &[&str] = &[
     // --- Seeded from config/builtin-actions.json ---
     "🔄", "🧪", "💼", "🏠", "🤖", "📬", "🚀", "🛠️", "🏗️", "🎵",
     // --- Seeded from egui_app.rs::fallback_config bundled defaults ---
-    "📝", "💻", "🌐",
-    // --- General-purpose: files/folders ---
-    "📁", "📂", "📄", "📋", "🗂️",
-    // --- General-purpose: web/network ---
-    "🔗", "🌍", "📡", "☁️",
-    // --- General-purpose: terminal/code/settings ---
-    "🖥️", "⚙️", "🔧", "🐚", "⌨️",
-    // --- General-purpose: media ---
-    "🎬", "🎧", "🖼️", "📷", "🎮",
-    // --- General-purpose: communication ---
-    "💬", "📧", "☎️",
-    // --- General-purpose: status/misc ---
+    "📝", "💻", "🌐", // --- General-purpose: files/folders ---
+    "📁", "📂", "📄", "📋", "🗂️", // --- General-purpose: web/network ---
+    "🔗", "🌍", "📡", "☁️", // --- General-purpose: terminal/code/settings ---
+    "🖥️", "⚙️", "🔧", "🐚", "⌨️", // --- General-purpose: media ---
+    "🎬", "🎧", "🖼️", "📷", "🎮", // --- General-purpose: communication ---
+    "💬", "📧", "☎️", // --- General-purpose: status/misc ---
     "🔒", "🔑", "✅", "⚠️", "❓",
 ];
 
@@ -123,9 +117,8 @@ mod tests {
 
     /// Every icon literal grepped from `config/builtin-actions.json`
     /// (Risk register / Phase 1 task 1).
-    const BUILTIN_ACTIONS_ICONS: &[&str] = &[
-        "🔄", "🧪", "💼", "🏠", "🤖", "📬", "🚀", "🛠️", "🏗️", "🎵",
-    ];
+    const BUILTIN_ACTIONS_ICONS: &[&str] =
+        &["🔄", "🧪", "💼", "🏠", "🤖", "📬", "🚀", "🛠️", "🏗️", "🎵"];
 
     /// Every icon literal grepped from `egui_app.rs::fallback_config`'s
     /// bundled default commands (lines ~366/379/392).
@@ -155,7 +148,10 @@ mod tests {
     fn curated_icons_has_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         for icon in CURATED_ICONS {
-            assert!(seen.insert(*icon), "duplicate icon in CURATED_ICONS: {icon:?}");
+            assert!(
+                seen.insert(*icon),
+                "duplicate icon in CURATED_ICONS: {icon:?}"
+            );
         }
     }
 
