@@ -5,6 +5,8 @@
 //! - [`json`]: `load()` / `save()` + [`json::StorageError`].
 //! - [`categories`]: pure category grouping + CRUD API (issue #6).
 //! - [`commands`]: pure favorite-toggle op (issue #7).
+//! - [`slug`]: collision-free id generation from a display name (preferences
+//!   config editor, part 1).
 //! - [`machine_commands`]: per-machine command mapping model + load/save,
 //!   mirroring the `config.json` pattern but persisted to a separate,
 //!   non-synced file (`platform::machine_commands_path()`).
@@ -15,6 +17,7 @@
 //! use crate::storage::{group_commands_by_category, CategoryGroup};
 //! use crate::storage::{add_category, rename_category, remove_category};
 //! use crate::storage::{toggle_favorite, FavoriteError};
+//! use crate::storage::generate_slug;
 //! use crate::storage::{MachineCommands, MachineCommandsError};
 //! use crate::storage::{load_machine_commands_from, save_machine_commands_to};
 //! ```
@@ -28,6 +31,7 @@ pub mod commands;
 pub mod json;
 pub mod machine_commands;
 pub mod models;
+pub mod slug;
 
 pub use categories::{
     add_category, group_commands_by_category, remove_category, rename_category, CategoryError,
@@ -40,3 +44,4 @@ pub use machine_commands::{
     MachineCommands, MachineCommandsError,
 };
 pub use models::{Category, Command, Config, Settings};
+pub use slug::generate_slug;
