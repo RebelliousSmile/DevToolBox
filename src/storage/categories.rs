@@ -27,6 +27,44 @@
 use crate::storage::models::{Category, Command, Config};
 
 // ---------------------------------------------------------------------------
+// Reserved pseudo-category
+// ---------------------------------------------------------------------------
+
+/// Reserved id for the synthetic "Sans catégorie" (Uncategorized) bucket.
+///
+/// This id/name pair has no persisted [`Category`] (the bucket is synthetic,
+/// see [`CategoryGroup`]) — a real category can never legitimately use it, so
+/// `add_category`/`rename_category` reject any candidate that folds to the
+/// same value (case- and accent-insensitively, see [`fold_for_reserved_check`]).
+const RESERVED_CATEGORY_ID: &str = "sans-categorie";
+
+/// Reserved display name for the synthetic "Sans catégorie" (Uncategorized)
+/// bucket. See [`RESERVED_CATEGORY_ID`].
+const RESERVED_CATEGORY_NAME: &str = "Sans catégorie";
+
+/// Fold a string to lowercase ASCII with common French diacritics stripped,
+/// for case- and accent-insensitive comparison against the reserved literals.
+///
+/// This intentionally reuses [`crate::storage::slug::fold_ascii_lower`] so the
+/// reserved-name guard and slug generation agree on what counts as "the same"
+/// letter.
+fn fold_for_reserved_check(value: &str) -> String {
+    crate::storage::slug::fold_ascii_lower(value)
+}
+
+/// Returns `true` if `id` folds to the reserved category id (case- and
+/// accent-insensitive).
+fn is_reserved_id(id: &str) -> bool {
+    fold_for_reserved_check(id) == fold_for_reserved_check(RESERVED_CATEGORY_ID)
+}
+
+/// Returns `true` if `name` folds to the reserved category name (case- and
+/// accent-insensitive).
+fn is_reserved_name(name: &str) -> bool {
+    fold_for_reserved_check(name) == fold_for_reserved_check(RESERVED_CATEGORY_NAME)
+}
+
+// ---------------------------------------------------------------------------
 // CategoryGroup
 // ---------------------------------------------------------------------------
 
@@ -110,6 +148,10 @@ pub enum CategoryError {
     /// No category with this id was found (returned by `rename_category` /
     /// `remove_category`).
     NotFound(String),
+    /// The candidate id/name collides with the reserved "Sans catégorie"
+    /// pseudo-category (case- and accent-insensitive), returned by
+    /// `add_category` / `rename_category`.
+    ReservedName(String),
 }
 
 impl std::fmt::Display for CategoryError {
@@ -120,6 +162,9 @@ impl std::fmt::Display for CategoryError {
             }
             CategoryError::NotFound(id) => {
                 write!(f, "category id '{id}' not found")
+            }
+            CategoryError::ReservedName(value) => {
+                write!(f, "'{value}' is reserved for the Sans catégorie bucket")
             }
         }
     }
@@ -138,12 +183,19 @@ pub fn add_category(
     icon: impl Into<String>,
 ) -> Result<(), CategoryError> {
     let id = id.into();
+    let name = name.into();
+    if is_reserved_id(&id) {
+        return Err(CategoryError::ReservedName(id));
+    }
+    if is_reserved_name(&name) {
+        return Err(CategoryError::ReservedName(name));
+    }
     if config.categories.iter().any(|c| c.id == id) {
         return Err(CategoryError::DuplicateId(id));
     }
     config.categories.push(Category {
         id,
-        name: name.into(),
+        name,
         icon: icon.into(),
     });
     Ok(())
@@ -159,6 +211,9 @@ pub fn rename_category(
     new_name: impl Into<String>,
 ) -> Result<(), CategoryError> {
     let new_name = new_name.into();
+    if is_reserved_name(&new_name) {
+        return Err(CategoryError::ReservedName(new_name));
+    }
     match config.categories.iter_mut().find(|c| c.id == id) {
         Some(cat) => {
             cat.name = new_name;
@@ -166,6 +221,48 @@ pub fn rename_category(
         }
         None => Err(CategoryError::NotFound(id.to_string())),
     }
+}
+
+/// Direction to move a category by one slot, see [`move_category`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
+}
+
+/// Move a category one slot up or down within `config.categories`, swapping
+/// it with its neighbor. Display order (both in Préférences and Actions) is
+/// exactly this vec's order — there is no dedicated ordering field.
+///
+/// A no-op (returns `Ok(())` without mutating anything) if the category is
+/// already at the boundary in the requested direction, so callers don't need
+/// to special-case first/last themselves.
+///
+/// Returns `Err(CategoryError::NotFound)` when no category with `id` exists.
+pub fn move_category(
+    config: &mut Config,
+    id: &str,
+    direction: MoveDirection,
+) -> Result<(), CategoryError> {
+    let pos = config
+        .categories
+        .iter()
+        .position(|c| c.id == id)
+        .ok_or_else(|| CategoryError::NotFound(id.to_string()))?;
+
+    let neighbor = match direction {
+        MoveDirection::Up => pos.checked_sub(1),
+        MoveDirection::Down => {
+            let next = pos + 1;
+            (next < config.categories.len()).then_some(next)
+        }
+    };
+
+    if let Some(neighbor) = neighbor {
+        config.categories.swap(pos, neighbor);
+    }
+
+    Ok(())
 }
 
 /// Remove a category and clear the `category` id of every affected command.
@@ -395,8 +492,87 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // add_category — reserved "Sans catégorie" guard
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn add_category_rejects_reserved_id() {
+        let mut config = three_category_config();
+        let result = add_category(&mut config, "sans-categorie", "Sans catégorie", "");
+        assert_eq!(
+            result,
+            Err(CategoryError::ReservedName("sans-categorie".to_string()))
+        );
+        assert_eq!(
+            config.categories.len(),
+            3,
+            "reserved category must not be added"
+        );
+    }
+
+    #[test]
+    fn add_category_rejects_reserved_id_case_and_accent_variant() {
+        let mut config = three_category_config();
+        // Different case, and "e" instead of "é" — still must fold to the
+        // reserved literal.
+        let result = add_category(&mut config, "SANS-CATEGORIE", "Peu importe", "");
+        assert_eq!(
+            result,
+            Err(CategoryError::ReservedName("SANS-CATEGORIE".to_string()))
+        );
+        assert_eq!(
+            config.categories.len(),
+            3,
+            "reserved category must not be added"
+        );
+    }
+
+    #[test]
+    fn add_category_rejects_reserved_name_case_and_accent_variant() {
+        let mut config = three_category_config();
+        // Accent-free, mixed-case variant of the reserved display name.
+        let result = add_category(&mut config, "peu-importe", "sans CATEGORIE", "");
+        assert_eq!(
+            result,
+            Err(CategoryError::ReservedName("sans CATEGORIE".to_string()))
+        );
+        assert_eq!(
+            config.categories.len(),
+            3,
+            "reserved category must not be added"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // rename_category
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn rename_category_rejects_reserved_name() {
+        let mut config = three_category_config();
+        let result = rename_category(&mut config, "network", "Sans catégorie");
+        assert_eq!(
+            result,
+            Err(CategoryError::ReservedName("Sans catégorie".to_string()))
+        );
+        // Original name unchanged.
+        let cat = config
+            .categories
+            .iter()
+            .find(|c| c.id == "network")
+            .unwrap();
+        assert_eq!(cat.name, "Réseau");
+    }
+
+    #[test]
+    fn rename_category_rejects_reserved_name_case_and_accent_variant() {
+        let mut config = three_category_config();
+        let result = rename_category(&mut config, "network", "sans categorie");
+        assert_eq!(
+            result,
+            Err(CategoryError::ReservedName("sans categorie".to_string()))
+        );
+    }
 
     #[test]
     fn rename_category_renames_in_place() {
@@ -415,6 +591,53 @@ mod tests {
     fn rename_category_returns_error_for_unknown_id() {
         let mut config = three_category_config();
         let result = rename_category(&mut config, "ghost", "Fantôme");
+        assert_eq!(result, Err(CategoryError::NotFound("ghost".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // move_category
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn move_category_up_swaps_with_previous_neighbor() {
+        let mut config = three_category_config();
+        move_category(&mut config, "network", MoveDirection::Up).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["network", "system", "maintenance"]);
+    }
+
+    #[test]
+    fn move_category_down_swaps_with_next_neighbor() {
+        let mut config = three_category_config();
+        move_category(&mut config, "network", MoveDirection::Down).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["system", "maintenance", "network"]);
+    }
+
+    #[test]
+    fn move_category_up_on_first_is_a_no_op() {
+        let mut config = three_category_config();
+        move_category(&mut config, "system", MoveDirection::Up).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["system", "network", "maintenance"]);
+    }
+
+    #[test]
+    fn move_category_down_on_last_is_a_no_op() {
+        let mut config = three_category_config();
+        move_category(&mut config, "maintenance", MoveDirection::Down).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["system", "network", "maintenance"]);
+    }
+
+    #[test]
+    fn move_category_returns_error_for_unknown_id() {
+        let mut config = three_category_config();
+        let result = move_category(&mut config, "ghost", MoveDirection::Up);
         assert_eq!(result, Err(CategoryError::NotFound("ghost".to_string())));
     }
 
