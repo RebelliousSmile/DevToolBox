@@ -25,7 +25,7 @@ argument-hint: N/A
 
 | #   | Plan                                        | File                                     | Status  | Validated |
 | --- | ------------------------------------------- | ---------------------------------------- | ------- | --------- |
-| 1   | winclean JSON client (spawn + model)        | `./2026_08_17-cleanup-view-part-1.md`    | implemented | [ ]   |
+| 1   | winclean JSON client (spawn + model)        | `./2026_08_17-cleanup-view-part-1.md`    | implemented | [x]   |
 | 2   | Cleanup view rendering (pure UI)            | `./2026_08_17-cleanup-view-part-2.md`    | pending | [ ]       |
 | 3   | Integration into EguiApp (rename + wiring)  | `./2026_08_17-cleanup-view-part-3.md`    | pending | [ ]       |
 
@@ -34,7 +34,7 @@ argument-hint: N/A
 ## Validation Protocol
 
 1. Complete Plan 1 (serde model, stdout parser, module aggregation, background spawns), run `cargo test --lib cleanup::`.
-2. [ ] Checkpoint 1: user confirms the JSON client parses a real `clean.py --json --level moderate` run on this machine before any UI builds on it.
+2. [x] Checkpoint 1: user confirms the JSON client parses a real `clean.py --json --level moderate` run on this machine before any UI builds on it. (2026-08-17: real run, 1067 candidates → 11 module rows, sizes/partial flags/sort verified; probe test removed afterwards.)
 3. Unblock Plan 2 (pure render function + row states), run `cargo test --lib ui::cleanup_view::`.
 4. [ ] Checkpoint 2: user confirms row layout/states (greyed moderate rows, badges, error banner) before wiring.
 5. Unblock Plan 3 (tab rename, state/channels, confirmation dialog, concurrency guard), run full `cargo test` + manual click-through.
