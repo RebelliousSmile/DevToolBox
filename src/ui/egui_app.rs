@@ -2356,22 +2356,12 @@ impl EguiApp {
         }
     }
 
-    /// « Nettoyage » view: the installed-apps report on top (unchanged from
-    /// the former Applications view), the « Bibliothèques » section below.
+    /// « Nettoyage » view: the « Bibliothèques » section on top — its rows
+    /// only exist after an explicit Analyser click, so they must own the
+    /// first screenful — the installed-apps report below.
     fn render_cleanup_view(&mut self, ui: &mut egui::Ui) {
-        let refresh = applications_view::render(
-            ui,
-            self.application_report.as_ref(),
-            self.application_error.as_deref(),
-            self.application_loading,
-            &mut self.application_filters,
-            &mut self.application_selected,
-        );
-        if refresh {
-            self.refresh_applications();
-        }
+        ui.heading("DevToolBox — Nettoyage");
 
-        ui.separator();
         let state = CleanupViewState {
             rows: self.cleanup_rows.as_deref(),
             error: self.cleanup_error.as_deref(),
@@ -2386,6 +2376,19 @@ impl EguiApp {
                 CleanupAction::Analyze => self.start_cleanup_analysis(),
                 CleanupAction::Clean(module) => self.request_clean_module(module),
             }
+        }
+
+        ui.separator();
+        let refresh = applications_view::render(
+            ui,
+            self.application_report.as_ref(),
+            self.application_error.as_deref(),
+            self.application_loading,
+            &mut self.application_filters,
+            &mut self.application_selected,
+        );
+        if refresh {
+            self.refresh_applications();
         }
     }
 }

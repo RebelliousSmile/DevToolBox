@@ -135,8 +135,11 @@ pub fn render(ui: &mut egui::Ui, state: &CleanupViewState<'_>) -> Vec<CleanupAct
     // The « Contenu » column carries full filesystem paths, easily wider
     // than a narrow window; grid cells don't wrap, so without a scroll
     // area the overflow would be clipped invisibly on the right.
+    // Capped so the section, now rendered above the installed-apps report,
+    // can't push that report below the window on tall module lists.
     egui::ScrollArea::both()
         .id_salt("cleanup-modules-scroll")
+        .max_height(360.0)
         .show(ui, |ui| {
             egui::Grid::new("cleanup-modules-grid")
                 .striped(true)

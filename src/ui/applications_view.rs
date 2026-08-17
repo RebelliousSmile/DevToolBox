@@ -68,7 +68,10 @@ pub fn render(
 ) -> bool {
     let mut refresh = false;
     ui.horizontal(|ui| {
-        ui.heading("DevToolBox — Nettoyage");
+        // Section heading only — the view-level « DevToolBox — Nettoyage »
+        // heading is drawn by `render_cleanup_view`, which now places the
+        // Bibliothèques section above this report.
+        ui.heading("Applications installées");
         if ui
             .add_enabled(!loading, egui::Button::new("Rafraîchir"))
             .clicked()
