@@ -184,34 +184,35 @@ pub fn render(
     ui.separator();
 
     let candidates = filtered_candidates(report, filters);
-    egui::ScrollArea::vertical()
-        .max_height(330.0)
-        .show(ui, |ui| {
-            egui::Grid::new("applications-grid")
-                .striped(true)
-                .min_col_width(85.0)
-                .show(ui, |ui| {
-                    ui.strong("Priorité");
-                    ui.strong("Application");
-                    ui.strong("Taille");
-                    ui.strong("Dernier usage");
-                    ui.strong("Confiance");
-                    ui.strong("Source");
-                    ui.end_row();
-                    for candidate in candidates {
-                        ui.label(candidate.score.to_string());
-                        let selected_now = selected.as_deref() == Some(candidate.app_id.as_str());
-                        if ui.selectable_label(selected_now, &candidate.name).clicked() {
-                            *selected = Some(candidate.app_id.clone());
-                        }
-                        ui.label(human_size(candidate.size.installed_bytes));
-                        ui.label(usage_label(candidate));
-                        ui.label(&candidate.confidence);
-                        ui.label(&candidate.source);
-                        ui.end_row();
+    // `both()` (not `vertical()`): grid rows don't wrap, so on a narrow
+    // window wide cells would clip past the right edge with no hint that
+    // content exists there — the horizontal scrollbar makes it reachable.
+    egui::ScrollArea::both().max_height(330.0).show(ui, |ui| {
+        egui::Grid::new("applications-grid")
+            .striped(true)
+            .min_col_width(85.0)
+            .show(ui, |ui| {
+                ui.strong("Priorité");
+                ui.strong("Application");
+                ui.strong("Taille");
+                ui.strong("Dernier usage");
+                ui.strong("Confiance");
+                ui.strong("Source");
+                ui.end_row();
+                for candidate in candidates {
+                    ui.label(candidate.score.to_string());
+                    let selected_now = selected.as_deref() == Some(candidate.app_id.as_str());
+                    if ui.selectable_label(selected_now, &candidate.name).clicked() {
+                        *selected = Some(candidate.app_id.clone());
                     }
-                });
-        });
+                    ui.label(human_size(candidate.size.installed_bytes));
+                    ui.label(usage_label(candidate));
+                    ui.label(&candidate.confidence);
+                    ui.label(&candidate.source);
+                    ui.end_row();
+                }
+            });
+    });
 
     if let Some(candidate) = selected.as_deref().and_then(|app_id| {
         report

@@ -132,58 +132,65 @@ pub fn render(ui: &mut egui::Ui, state: &CleanupViewState<'_>) -> Vec<CleanupAct
         );
     }
 
-    egui::Grid::new("cleanup-modules-grid")
-        .striped(true)
-        .min_col_width(85.0)
+    // The « Contenu » column carries full filesystem paths, easily wider
+    // than a narrow window; grid cells don't wrap, so without a scroll
+    // area the overflow would be clipped invisibly on the right.
+    egui::ScrollArea::both()
+        .id_salt("cleanup-modules-scroll")
         .show(ui, |ui| {
-            ui.strong("Bibliothèque");
-            ui.strong("Taille");
-            ui.strong("Contenu");
-            ui.strong("Action");
-            ui.end_row();
-            for row in rows {
-                let last = state.last_runs.get(&row.module);
-                let cleanable = clean_allowed(row);
-                let size = display_size(row, last.map(|run| &run.result));
-                let mut content = match row.paths.first() {
-                    Some(path) if row.paths.len() > 1 => {
-                        format!("{path} (+{} autres)", row.paths.len() - 1)
-                    }
-                    Some(path) => path.clone(),
-                    None => format!("{} élément(s) sans chemin", row.candidate_count),
-                };
-                if row.needs_network {
-                    content.push_str(" · re-téléchargement requis");
-                }
-                if cleanable {
-                    ui.label(&row.module);
-                    ui.label(size);
-                    ui.label(content).on_hover_text(row.paths.join("\n"));
-                } else {
-                    // Greyed row: analysable but not cleanable from here.
-                    ui.weak(format!("{} (niveau {})", row.module, row.level));
-                    ui.weak(size);
-                    ui.weak(content).on_hover_text(row.paths.join("\n"));
-                }
-                ui.horizontal(|ui| {
-                    if cleanable
-                        && ui
-                            .add_enabled(buttons_enabled, egui::Button::new("Nettoyer"))
-                            .clicked()
-                    {
-                        actions.push(CleanupAction::Clean(row.module.clone()));
-                    }
-                    if let Some(run) = last {
-                        let color = if run.interrupted || !run.result.is_success() {
-                            WARNING_COLOR
-                        } else {
-                            SUCCESS_COLOR
+            egui::Grid::new("cleanup-modules-grid")
+                .striped(true)
+                .min_col_width(85.0)
+                .show(ui, |ui| {
+                    ui.strong("Bibliothèque");
+                    ui.strong("Taille");
+                    ui.strong("Contenu");
+                    ui.strong("Action");
+                    ui.end_row();
+                    for row in rows {
+                        let last = state.last_runs.get(&row.module);
+                        let cleanable = clean_allowed(row);
+                        let size = display_size(row, last.map(|run| &run.result));
+                        let mut content = match row.paths.first() {
+                            Some(path) if row.paths.len() > 1 => {
+                                format!("{path} (+{} autres)", row.paths.len() - 1)
+                            }
+                            Some(path) => path.clone(),
+                            None => format!("{} élément(s) sans chemin", row.candidate_count),
                         };
-                        ui.colored_label(color, row_badge(run));
+                        if row.needs_network {
+                            content.push_str(" · re-téléchargement requis");
+                        }
+                        if cleanable {
+                            ui.label(&row.module);
+                            ui.label(size);
+                            ui.label(content).on_hover_text(row.paths.join("\n"));
+                        } else {
+                            // Greyed row: analysable but not cleanable from here.
+                            ui.weak(format!("{} (niveau {})", row.module, row.level));
+                            ui.weak(size);
+                            ui.weak(content).on_hover_text(row.paths.join("\n"));
+                        }
+                        ui.horizontal(|ui| {
+                            if cleanable
+                                && ui
+                                    .add_enabled(buttons_enabled, egui::Button::new("Nettoyer"))
+                                    .clicked()
+                            {
+                                actions.push(CleanupAction::Clean(row.module.clone()));
+                            }
+                            if let Some(run) = last {
+                                let color = if run.interrupted || !run.result.is_success() {
+                                    WARNING_COLOR
+                                } else {
+                                    SUCCESS_COLOR
+                                };
+                                ui.colored_label(color, row_badge(run));
+                            }
+                        });
+                        ui.end_row();
                     }
                 });
-                ui.end_row();
-            }
         });
 
     actions

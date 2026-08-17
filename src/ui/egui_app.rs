@@ -2274,7 +2274,9 @@ impl EguiApp {
         }
         ui.separator();
 
-        egui::ScrollArea::vertical()
+        // `both()`: command output lines don't wrap, so long lines would be
+        // clipped past the right edge without a horizontal scrollbar.
+        egui::ScrollArea::both()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -2325,23 +2327,30 @@ impl EguiApp {
                 ui.label(automations_placeholder_message());
             }
             Some(Ok(rows)) => {
-                egui::Grid::new("automations-grid")
-                    .striped(true)
+                // `both()`: the row count and the TaskPath-style category
+                // column can both exceed the window; grid cells don't wrap,
+                // so without scrollbars the overflow is clipped invisibly.
+                egui::ScrollArea::both()
+                    .id_salt("automations-scroll")
                     .show(ui, |ui| {
-                        ui.strong("Nom");
-                        ui.strong("Catégorie");
-                        ui.strong("Prochaine exécution");
-                        ui.strong("État");
-                        ui.strong("Auteur");
-                        ui.end_row();
-                        for row in rows {
-                            ui.label(&row.name);
-                            ui.label(&row.category);
-                            ui.label(&row.next_run);
-                            ui.label(&row.state);
-                            ui.label(&row.author);
-                            ui.end_row();
-                        }
+                        egui::Grid::new("automations-grid")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Nom");
+                                ui.strong("Catégorie");
+                                ui.strong("Prochaine exécution");
+                                ui.strong("État");
+                                ui.strong("Auteur");
+                                ui.end_row();
+                                for row in rows {
+                                    ui.label(&row.name);
+                                    ui.label(&row.category);
+                                    ui.label(&row.next_run);
+                                    ui.label(&row.state);
+                                    ui.label(&row.author);
+                                    ui.end_row();
+                                }
+                            });
                     });
             }
         }
