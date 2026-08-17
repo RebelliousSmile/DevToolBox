@@ -75,7 +75,7 @@
 //! Search / filter                        | N/A — no such feature in app.rs
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
@@ -93,7 +93,9 @@ use crate::icons::{decode_resize_file, icons_dirs, IconResolution};
 use crate::storage::{self, CommandResolution, Config, MachineCommands, StorageError};
 use crate::ui::applications_view::{self, ApplicationFilters};
 use crate::ui::automations_view::{self, AutomationRow};
+use crate::ui::command_form::CommandFormWidget;
 use crate::ui::dialogs::{self, DialogKind, DialogOutcome};
+use crate::ui::icon_picker;
 use crate::ui::terminal_view::{self, TerminalEvent};
 
 /// A resolved, cached representation of a command/category `icon` field,
@@ -342,6 +344,92 @@ fn build_display_groups(
     }
 }
 
+/// Owned, per-category snapshot of a category (or the synthetic "Sans
+/// catégorie" bucket, `category: None`) plus its commands, used purely for
+/// rendering the unified Préférences view (Part 3 Phase 1) — decoupled from
+/// `storage::Config` for the same reason as `build_display_groups`/
+/// `CardData`: the render loop opens edit/delete requests via click
+/// handlers on `&mut self`, so it must never hold a live borrow of
+/// `self.config` while doing so.
+#[derive(Clone, Debug, PartialEq)]
+struct PreferencesGroup {
+    category: Option<storage::Category>,
+    rows: Vec<PreferencesRow>,
+}
+
+/// A single renderable row inside a [`PreferencesGroup`]: either one
+/// ungrouped command, or a whole variant group collapsed into one row —
+/// mirroring how [`partition_by_variant_group`] collapses the same
+/// commands into a single card in the Actions view. Préférences must show
+/// exactly one line per app (per the user's request), not one per variant;
+/// per-variant editing happens by expanding the row (see
+/// `EguiApp::expanded_groups`).
+#[derive(Clone, Debug, PartialEq)]
+enum PreferencesRow {
+    Single(storage::Command),
+    Group {
+        key: String,
+        group_name: String,
+        icon: String,
+        variants: Vec<storage::Command>,
+    },
+}
+
+/// Partitions `commands` into [`PreferencesRow`]s, preserving first-seen
+/// order — same [`PartitionKey`] bucketing as `partition_by_variant_group`,
+/// adapted to owned `storage::Command` data instead of `CardData`.
+fn partition_preferences_rows(commands: Vec<storage::Command>) -> Vec<PreferencesRow> {
+    let mut order: Vec<PartitionKey> = Vec::new();
+    let mut buckets: HashMap<PartitionKey, Vec<storage::Command>> = HashMap::new();
+    for c in commands {
+        let key = match &c.variant_group {
+            Some(g) => PartitionKey::Group(g.clone()),
+            None => PartitionKey::Single(c.id.clone()),
+        };
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(c);
+    }
+
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let members = buckets.remove(&key)?;
+            match key {
+                PartitionKey::Single(_) => members.into_iter().next().map(PreferencesRow::Single),
+                PartitionKey::Group(group_key) => {
+                    let first = members.first()?;
+                    let group_name =
+                        first.group_name.clone().unwrap_or_else(|| first.name.clone());
+                    let icon = first.icon.clone();
+                    Some(PreferencesRow::Group {
+                        key: group_key,
+                        group_name,
+                        icon,
+                        variants: members,
+                    })
+                }
+            }
+        })
+        .collect()
+}
+
+/// Every declared category (in `config.categories` order) plus a trailing
+/// synthetic "Sans catégorie" bucket when orphan commands exist — mirrors
+/// `storage::group_commands_by_category` exactly, just with owned data,
+/// then collapses variant groups into single rows via
+/// [`partition_preferences_rows`].
+fn preferences_groups(config: &Config) -> Vec<PreferencesGroup> {
+    storage::group_commands_by_category(config)
+        .into_iter()
+        .map(|group| PreferencesGroup {
+            category: group.category.cloned(),
+            rows: partition_preferences_rows(group.commands.into_iter().cloned().collect()),
+        })
+        .collect()
+}
+
 /// Same built-in fallback used by `app.rs::UiHost::new` when `storage::load`
 /// fails (kept in parity so a broken/missing config.json still boots into a
 /// usable window instead of an empty grid).
@@ -421,10 +509,56 @@ struct CategoryForm {
     icon: String,
 }
 
+/// Action-form scratch state (Part 3 Phase 1 task 1) — one form shared by
+/// both creation and editing. `editing_id` is `None` while composing a new
+/// action and `Some(command_id)` while editing an existing one (the id
+/// itself is immutable across an edit — see `EguiApp::try_submit_action_form`).
+/// Covers every editable field: `name`, executable+arguments (via Part 2's
+/// `command_form` widget), `category` (dropdown id, `""` = "Sans
+/// catégorie"), `icon` (via Part 2's `icon_picker` widget), `is_favorite`,
+/// and `shortcut`.
+struct ActionForm {
+    editing_id: Option<String>,
+    name: String,
+    command_widget: CommandFormWidget,
+    category: String,
+    icon: String,
+    is_favorite: bool,
+    shortcut: String,
+}
+
+impl ActionForm {
+    fn new() -> Self {
+        Self {
+            editing_id: None,
+            name: String::new(),
+            command_widget: CommandFormWidget::new(),
+            category: String::new(),
+            icon: String::new(),
+            is_favorite: false,
+            shortcut: String::new(),
+        }
+    }
+
+    /// Prefill from an existing command (Phase 2 task 2 — "Modifier").
+    fn from_command(command: &storage::Command) -> Self {
+        Self {
+            editing_id: Some(command.id.clone()),
+            name: command.name.clone(),
+            command_widget: CommandFormWidget::from_command(&command.command),
+            category: command.category.clone(),
+            icon: command.icon.clone(),
+            is_favorite: command.is_favorite,
+            shortcut: command.shortcut.clone().unwrap_or_default(),
+        }
+    }
+}
+
 enum CategoryAction {
     Add,
     Rename { id: String, new_name: String },
     Remove { id: String },
+    Move { id: String, direction: storage::MoveDirection },
 }
 
 /// Which top-level view the nav row has selected.
@@ -442,6 +576,8 @@ enum ActiveView {
 /// [`EguiApp::resolve_pending_action`] only once the user picks "Oui".
 enum PendingAction {
     RemoveCategory(String),
+    RemoveCommand(String),
+    RemoveCommandGroup(String),
 }
 
 /// The dialog currently blocking the rest of the UI (see `ui_content`'s
@@ -464,6 +600,9 @@ pub struct EguiApp {
     icon_backend: EguiIconBackend,
     icon_cache: HashMap<String, IconVisual>,
     category_form: CategoryForm,
+    /// `None` when no action create/edit form is open — the Préférences
+    /// view then shows only a "+ Nouvelle action" button (Part 3 Phase 1/2).
+    action_form: Option<ActionForm>,
     rename_buffers: HashMap<String, String>,
     status: Option<StatusMessage>,
     active_view: ActiveView,
@@ -487,6 +626,11 @@ pub struct EguiApp {
     /// Lazily defaulted to the group's first variant on first render if
     /// absent.
     selected_variant: HashMap<String, String>,
+    /// `variant_group` keys currently expanded in the Préférences view (Part
+    /// 3 Phase 3) — a collapsed group row shows one line per app; expanding
+    /// it reveals each variant so its options/arguments can be edited
+    /// individually. Session-only, never persisted.
+    expanded_groups: HashSet<String>,
     /// `None` until the Automations view has fetched at least once.
     automations: Option<Result<Vec<AutomationRow>, String>>,
     application_report: Option<RecommendationReport>,
@@ -584,6 +728,7 @@ impl EguiApp {
             icon_backend,
             icon_cache: HashMap::new(),
             category_form: CategoryForm::default(),
+            action_form: None,
             rename_buffers: HashMap::new(),
             status: None,
             active_view: ActiveView::default(),
@@ -595,6 +740,7 @@ impl EguiApp {
             action_rx: None,
             action_running: None,
             selected_variant: HashMap::new(),
+            expanded_groups: HashSet::new(),
             automations: None,
             application_report: None,
             application_error: None,
@@ -727,19 +873,18 @@ impl EguiApp {
     /// Renders one card. The clickable/launch-relevant body (icon + name +
     /// disabled-state message) is scoped inside `ui.add_enabled_ui`, keyed
     /// on `card.is_configured` — `false` only for a `machine_specific: true`
-    /// command with no matching per-machine mapping entry (Part 3). The
-    /// favorite-toggle button is added OUTSIDE that scope so it stays
-    /// clickable regardless of resolution state — toggling favorite status
-    /// is a config edit, not a launch (see this lot's risk register).
-    fn render_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
+    /// command with no matching per-machine mapping entry (Part 3). Favorite
+    /// management lives exclusively in Préférences now, not here — see
+    /// `render_preferences_view`'s per-action favorite toggle.
+    fn render_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         if card.variants.is_empty() {
-            self.render_simple_card(ui, card, toggles);
+            self.render_simple_card(ui, card);
         } else {
-            self.render_grouped_card(ui, card, toggles);
+            self.render_grouped_card(ui, card);
         }
     }
 
-    fn render_simple_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
+    fn render_simple_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         let visual = self.icon_visual(&card.icon);
         let mut body_clicked = false;
         ui.group(|ui| {
@@ -796,15 +941,6 @@ impl EguiApp {
                             .on_hover_text(message.clone());
                     }
                 });
-
-                let star_label = if card.is_favorite {
-                    "★ Favori"
-                } else {
-                    "☆ Favori"
-                };
-                if ui.small_button(star_label).clicked() {
-                    toggles.push(card.command_id.clone());
-                }
             });
         });
 
@@ -822,7 +958,7 @@ impl EguiApp {
     /// explicit "Lancer" button launches the selected variant's resolved
     /// command — unlike a simple card, the body itself is not clickable, so
     /// interacting with the dropdown never risks an accidental launch.
-    fn render_grouped_card(&mut self, ui: &mut egui::Ui, card: &CardData, toggles: &mut Vec<String>) {
+    fn render_grouped_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         let visual = self.icon_visual(&card.icon);
         let group_key = card.group_name.clone().unwrap_or_else(|| card.command_id.clone());
         let selected_id = self
@@ -839,12 +975,10 @@ impl EguiApp {
         let selected_command = selected.command.clone();
         let selected_label = selected.label.clone();
         let selected_is_configured = selected.is_configured;
-        let selected_is_favorite = selected.is_favorite;
         let selected_disabled_message = selected.disabled_message.clone();
 
         let mut requested_variant: Option<String> = None;
         let mut launch_clicked = false;
-        let mut favorite_clicked = false;
 
         ui.group(|ui| {
             ui.set_width(96.0);
@@ -886,15 +1020,6 @@ impl EguiApp {
                         }
                     },
                 );
-
-                let star_label = if selected_is_favorite {
-                    "★ Favori"
-                } else {
-                    "☆ Favori"
-                };
-                if ui.small_button(star_label).clicked() {
-                    favorite_clicked = true;
-                }
             });
         });
 
@@ -903,9 +1028,6 @@ impl EguiApp {
         }
         if launch_clicked && can_launch_card(selected_is_configured, &self.action_running) {
             self.launch_command(&selected_command_id, &selected_command);
-        }
-        if favorite_clicked {
-            toggles.push(selected_command_id);
         }
     }
 
@@ -932,32 +1054,42 @@ impl EguiApp {
         }
     }
 
-    fn apply_favorite_toggles(&mut self, toggles: Vec<String>) {
-        for command_id in toggles {
-            match storage::toggle_favorite(&mut self.config, &command_id) {
-                Ok(new_state) => match self.persist() {
-                    Ok(()) => {
-                        let word = if new_state {
-                            "ajouté aux"
-                        } else {
-                            "retiré des"
-                        };
-                        self.set_status(format!("'{command_id}' {word} favoris."), false);
-                    }
-                    Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
-                },
-                Err(err) => self.set_status(err.to_string(), true),
-            }
+    /// Favorite management lives in Préférences (moved off the Actions
+    /// view's cards per user request) — this is its sole entry point now.
+    fn apply_toggle_favorite(&mut self, command_id: &str) {
+        match storage::toggle_favorite(&mut self.config, command_id) {
+            Ok(new_state) => match self.persist() {
+                Ok(()) => {
+                    let word = if new_state {
+                        "ajouté aux"
+                    } else {
+                        "retiré des"
+                    };
+                    self.set_status(format!("'{command_id}' {word} favoris."), false);
+                }
+                Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+            },
+            Err(err) => self.set_status(err.to_string(), true),
         }
     }
 
     fn apply_category_action(&mut self, action: CategoryAction) {
-        // Removal is destructive (irreversible for the caller — commands in
-        // the category get silently re-bucketed as "Sans catégorie" rather
-        // than deleted, but the category itself is gone) and must go through
-        // a blocking confirm dialog rather than acting immediately (Part 2
-        // plan Risk register item 3 / this phase's acceptance criterion).
+        // Removal must go through a blocking confirm dialog rather than
+        // acting immediately (Part 2 plan Risk register item 3 / this
+        // phase's acceptance criterion). It's only reachable on an empty
+        // category — the "Supprimer" button is disabled otherwise (manual
+        // click-through feedback: no orphan-rebucketing fallback in the UI)
+        // — but this is re-checked here defensively since the UI gate alone
+        // doesn't guarantee every caller of this method goes through it.
         if let CategoryAction::Remove { id } = &action {
+            let has_commands = self.config.commands.iter().any(|c| c.category == *id);
+            if has_commands {
+                self.set_status(
+                    "Impossible de supprimer une catégorie qui contient encore des actions.",
+                    true,
+                );
+                return;
+            }
             let label = self
                 .config
                 .categories
@@ -968,10 +1100,7 @@ impl EguiApp {
             self.active_dialog = Some(ActiveDialog {
                 kind: dialogs::confirm(
                     "Supprimer la catégorie",
-                    format!(
-                        "Supprimer la catégorie « {label} » ? Les commandes qu'elle contient \
-                         seront reclassées dans « Sans catégorie »."
-                    ),
+                    format!("Supprimer la catégorie « {label} » ?"),
                 ),
                 on_confirm: Some(PendingAction::RemoveCategory(id.clone())),
             });
@@ -992,6 +1121,9 @@ impl EguiApp {
             CategoryAction::Rename { id, new_name } => {
                 storage::rename_category(&mut self.config, id, new_name.clone())
             }
+            CategoryAction::Move { id, direction } => {
+                storage::move_category(&mut self.config, id, *direction)
+            }
             CategoryAction::Remove { .. } => unreachable!("handled by the early return above"),
         };
 
@@ -1001,10 +1133,55 @@ impl EguiApp {
                     self.category_form = CategoryForm::default();
                 }
                 match self.persist() {
-                    Ok(()) => self.set_status("Catégorie mise à jour.", false),
+                    Ok(()) => {
+                        let message = if matches!(action, CategoryAction::Move { .. }) {
+                            "Ordre des catégories mis à jour."
+                        } else {
+                            "Catégorie mise à jour."
+                        };
+                        self.set_status(message, false)
+                    }
                     Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
                 }
             }
+            Err(err) => self.set_status(err.to_string(), true),
+        }
+    }
+
+    /// Reorder an action within its category bucket — mirrors
+    /// `apply_category_action`'s `CategoryAction::Move` arm, but there is no
+    /// confirm dialog to guard (moves are always reversible/non-destructive).
+    fn apply_move_command(&mut self, id: &str, direction: storage::MoveDirection) {
+        match storage::move_command(&mut self.config, id, direction) {
+            Ok(()) => match self.persist() {
+                Ok(()) => self.set_status("Ordre des actions mis à jour.", false),
+                Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+            },
+            Err(err) => self.set_status(err.to_string(), true),
+        }
+    }
+
+    /// Move a whole variant group's block (all its variants together)
+    /// relative to sibling categories/groups/singles — mirrors
+    /// `apply_move_command`, delegating to `storage::move_command_group`.
+    fn apply_move_command_group(&mut self, key: &str, direction: storage::MoveDirection) {
+        match storage::move_command_group(&mut self.config, key, direction) {
+            Ok(()) => match self.persist() {
+                Ok(()) => self.set_status("Ordre des actions mis à jour.", false),
+                Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+            },
+            Err(err) => self.set_status(err.to_string(), true),
+        }
+    }
+
+    /// Move a single variant within its own group — mirrors
+    /// `apply_move_command`, delegating to `storage::move_variant`.
+    fn apply_move_variant(&mut self, id: &str, direction: storage::MoveDirection) {
+        match storage::move_variant(&mut self.config, id, direction) {
+            Ok(()) => match self.persist() {
+                Ok(()) => self.set_status("Ordre des variantes mis à jour.", false),
+                Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+            },
             Err(err) => self.set_status(err.to_string(), true),
         }
     }
@@ -1022,71 +1199,637 @@ impl EguiApp {
                     Err(err) => self.set_status(err.to_string(), true),
                 }
             }
+            PendingAction::RemoveCommand(id) => {
+                match storage::remove_command(&mut self.config, &id) {
+                    Ok(()) => match self.persist() {
+                        Ok(()) => {
+                            self.set_status("Action supprimée.", false);
+                            // If the deleted action was open in the edit
+                            // form, close the form rather than leaving it
+                            // pointed at a now-nonexistent id.
+                            if self
+                                .action_form
+                                .as_ref()
+                                .and_then(|form| form.editing_id.as_deref())
+                                == Some(id.as_str())
+                            {
+                                self.action_form = None;
+                            }
+                        }
+                        Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+                    },
+                    Err(err) => self.set_status(err.to_string(), true),
+                }
+            }
+            PendingAction::RemoveCommandGroup(key) => {
+                match storage::remove_command_group(&mut self.config, &key) {
+                    Ok(_removed) => match self.persist() {
+                        Ok(()) => {
+                            self.set_status("Application supprimée.", false);
+                            self.expanded_groups.remove(&key);
+                            // If the deleted group's edit form was open on
+                            // one of its now-removed variants, close it
+                            // rather than leaving it pointed at a
+                            // nonexistent id.
+                            if let Some(editing_id) = self
+                                .action_form
+                                .as_ref()
+                                .and_then(|form| form.editing_id.as_deref())
+                            {
+                                if !self.config.commands.iter().any(|c| c.id == editing_id) {
+                                    self.action_form = None;
+                                }
+                            }
+                        }
+                        Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+                    },
+                    Err(err) => self.set_status(err.to_string(), true),
+                }
+            }
+        }
+    }
+
+    /// Open the blocking confirm dialog guarding an action deletion (Phase 2
+    /// task 3) — mirrors `apply_category_action`'s `CategoryAction::Remove`
+    /// branch. The actual `storage::remove_command` call only happens in
+    /// `resolve_pending_action` once the user picks "Oui".
+    fn request_remove_command(&mut self, id: String, name: String) {
+        self.active_dialog = Some(ActiveDialog {
+            kind: dialogs::confirm(
+                "Supprimer l'action",
+                format!("Supprimer l'action « {name} » ? Cette opération est irréversible."),
+            ),
+            on_confirm: Some(PendingAction::RemoveCommand(id)),
+        });
+    }
+
+    /// Open the blocking confirm dialog guarding a whole variant group's
+    /// deletion — mirrors `request_remove_command`, but removes every
+    /// variant in the group at once via `storage::remove_command_group`.
+    fn request_remove_command_group(&mut self, key: String, group_name: String, count: usize) {
+        self.active_dialog = Some(ActiveDialog {
+            kind: dialogs::confirm(
+                "Supprimer l'application",
+                format!(
+                    "Supprimer « {group_name} » et ses {count} variantes ? Cette opération est irréversible."
+                ),
+            ),
+            on_confirm: Some(PendingAction::RemoveCommandGroup(key)),
+        });
+    }
+
+    /// Validate and submit the current action form (Phase 2 tasks 1/2).
+    ///
+    /// Hard gate (non-optional per plan): `command_widget.is_valid()` is
+    /// checked *first* — if it fails, no `add_command`/`update_command`
+    /// call is made and nothing is written to disk; the widget's own inline
+    /// error (rendered by `command_form::CommandFormWidget::show`) stays
+    /// visible because `form` is simply put back into `self.action_form`
+    /// unchanged. The same "put the form back, never discard in-progress
+    /// input" rule applies to every other failure path below (empty name,
+    /// storage error, persist error) — see this lot's risk register item 2.
+    fn try_submit_action_form(&mut self, form: ActionForm) {
+        if !form.command_widget.is_valid() {
+            self.action_form = Some(form);
+            return;
+        }
+        let Some(command_str) = form.command_widget.recomposed() else {
+            self.action_form = Some(form);
+            return;
+        };
+
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            self.set_status("Le nom de l'action est requis.", true);
+            self.action_form = Some(form);
+            return;
+        }
+
+        let shortcut = {
+            let trimmed = form.shortcut.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+
+        match &form.editing_id {
+            None => {
+                let existing_ids: Vec<String> =
+                    self.config.commands.iter().map(|c| c.id.clone()).collect();
+                let id = storage::generate_slug(&name, &existing_ids);
+                let command = storage::Command {
+                    id,
+                    name,
+                    command: command_str,
+                    category: form.category.clone(),
+                    icon: form.icon.clone(),
+                    is_favorite: form.is_favorite,
+                    shortcut,
+                    variant_group: None,
+                    group_name: None,
+                    variant_label: None,
+                    machine_specific: false,
+                };
+                match storage::add_command(&mut self.config, command) {
+                    Ok(()) => match self.persist() {
+                        Ok(()) => {
+                            self.set_status("Action créée.", false);
+                            self.action_form = None;
+                        }
+                        Err(err) => {
+                            self.set_status(format!("Échec de sauvegarde: {err}"), true);
+                            self.action_form = Some(form);
+                        }
+                    },
+                    Err(err) => {
+                        self.set_status(err.to_string(), true);
+                        self.action_form = Some(form);
+                    }
+                }
+            }
+            Some(id) => {
+                // `update_command` replaces the whole `Command` struct, so
+                // fields not exposed by the form (variant_group/group_name/
+                // variant_label/machine_specific) must be carried over from
+                // the existing command rather than reset to defaults.
+                let Some(existing) = self.config.commands.iter().find(|c| &c.id == id).cloned()
+                else {
+                    self.set_status("Action introuvable.", true);
+                    self.action_form = Some(form);
+                    return;
+                };
+                let updated = storage::Command {
+                    id: id.clone(),
+                    name,
+                    command: command_str,
+                    category: form.category.clone(),
+                    icon: form.icon.clone(),
+                    is_favorite: form.is_favorite,
+                    shortcut,
+                    variant_group: existing.variant_group,
+                    group_name: existing.group_name,
+                    variant_label: existing.variant_label,
+                    machine_specific: existing.machine_specific,
+                };
+                match storage::update_command(&mut self.config, id, updated) {
+                    Ok(()) => match self.persist() {
+                        Ok(()) => {
+                            self.set_status("Action mise à jour.", false);
+                            self.action_form = None;
+                        }
+                        Err(err) => {
+                            self.set_status(format!("Échec de sauvegarde: {err}"), true);
+                            self.action_form = Some(form);
+                        }
+                    },
+                    Err(err) => {
+                        self.set_status(err.to_string(), true);
+                        self.action_form = Some(form);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Renders the action create/edit form (Phase 1 task 1, Phase 2 tasks
+    /// 1/2). Takes full ownership of `self.action_form` for the duration of
+    /// rendering (`Option::take`) so the ui closures below never need to
+    /// borrow `self` as a whole — only `self.config` (read-only, for the
+    /// category dropdown) — leaving `self.try_submit_action_form`/
+    /// `self.action_form = ...` free to run afterwards without a borrow
+    /// conflict.
+    fn render_action_form(&mut self, ui: &mut egui::Ui) {
+        let category_options: Vec<(String, String)> = self
+            .config
+            .categories
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+
+        let Some(mut form) = self.action_form.take() else {
+            if ui.button("+ Nouvelle action").clicked() {
+                self.action_form = Some(ActionForm::new());
+            }
+            return;
+        };
+
+        // Self-healing category dropdown (risk register item 3): if the
+        // category currently referenced by the form was deleted while the
+        // form was open, fall back to "Sans catégorie" instead of showing
+        // (or silently keeping) a dangling id.
+        if !form.category.is_empty()
+            && !category_options.iter().any(|(id, _)| id == &form.category)
+        {
+            form.category = String::new();
+        }
+
+        ui.label(if form.editing_id.is_some() {
+            format!("Modifier l'action « {} »", form.name)
+        } else {
+            "Nouvelle action".to_string()
+        });
+
+        let name_label = ui.label("nom de l'action");
+        ui.text_edit_singleline(&mut form.name)
+            .labelled_by(name_label.id);
+
+        ui.label("Commande");
+        form.command_widget.show(ui);
+
+        ui.horizontal(|ui| {
+            ui.label("Catégorie");
+            let selected_text = category_options
+                .iter()
+                .find(|(id, _)| id == &form.category)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| "Sans catégorie".to_string());
+            egui::ComboBox::from_id_salt("action-form-category")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut form.category, String::new(), "Sans catégorie");
+                    for (id, name) in &category_options {
+                        ui.selectable_value(&mut form.category, id.clone(), name);
+                    }
+                });
+        });
+
+        ui.label("Icône");
+        ui.push_id("action-icon-picker", |ui| {
+            icon_picker::show(ui, &mut form.icon);
+        });
+
+        ui.checkbox(&mut form.is_favorite, "Favori");
+
+        let shortcut_label = ui.label("raccourci");
+        ui.text_edit_singleline(&mut form.shortcut)
+            .labelled_by(shortcut_label.id);
+
+        let mut submit_clicked = false;
+        let mut cancel_clicked = false;
+        ui.horizontal(|ui| {
+            if ui.button("Enregistrer").clicked() {
+                submit_clicked = true;
+            }
+            if ui.button("Annuler").clicked() {
+                cancel_clicked = true;
+            }
+        });
+
+        if cancel_clicked {
+            self.action_form = None;
+        } else if submit_clicked {
+            self.try_submit_action_form(form);
+        } else {
+            self.action_form = Some(form);
         }
     }
 
     /// Dedicated Préférences view — moved out of `render_actions_view` (was
     /// a `CollapsingHeader` at the top of the Actions grid) so category
     /// management no longer eats into the vertical space available for
-    /// action cards.
+    /// action cards. Since Part 3 Phase 1: a unified view listing every
+    /// category (plus the synthetic "Sans catégorie" bucket) with its
+    /// actions inline, each carrying edit/delete controls, followed by the
+    /// existing category-creation form and the action create/edit form.
     fn render_preferences_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Préférences");
         ui.separator();
 
-        let mut actions: Vec<CategoryAction> = Vec::new();
-        let categories_snapshot = self.config.categories.clone();
+        if let Some(status) = &self.status {
+            let color = if status.is_error {
+                egui::Color32::from_rgb(0xC4, 0x2B, 0x1C)
+            } else {
+                egui::Color32::from_rgb(0x1B, 0x5E, 0x20)
+            };
+            ui.colored_label(color, &status.text);
+        }
 
-        ui.label("Catégories");
-        for category in &categories_snapshot {
-            ui.horizontal(|ui| {
-                ui.label(&category.icon);
-                ui.label(&category.name);
-                let buffer = self
-                    .rename_buffers
-                    .entry(category.id.clone())
-                    .or_insert_with(|| category.name.clone());
-                ui.text_edit_singleline(buffer);
-                if ui.button("Renommer").clicked() && !buffer.trim().is_empty() {
-                    actions.push(CategoryAction::Rename {
-                        id: category.id.clone(),
-                        new_name: buffer.clone(),
-                    });
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let mut category_actions: Vec<CategoryAction> = Vec::new();
+            let mut remove_command_request: Option<(String, String)> = None;
+            let mut edit_command_request: Option<storage::Command> = None;
+            let mut move_command_request: Option<(String, storage::MoveDirection)> = None;
+            let mut toggle_favorite_request: Option<String> = None;
+            let mut move_group_request: Option<(String, storage::MoveDirection)> = None;
+            let mut remove_group_request: Option<(String, String, usize)> = None;
+            let mut move_variant_request: Option<(String, storage::MoveDirection)> = None;
+            let mut toggle_group_expand_request: Option<String> = None;
+
+            let groups = preferences_groups(&self.config);
+
+            ui.label("Catégories");
+            for group in &groups {
+                ui.separator();
+                match &group.category {
+                    Some(category) => {
+                        let is_empty = group.rows.is_empty();
+                        // Display order is exactly `self.config.categories`'s
+                        // order (there is no dedicated ordering field) — find
+                        // this category's position to gate the move buttons
+                        // at the boundaries.
+                        let position = self
+                            .config
+                            .categories
+                            .iter()
+                            .position(|c| c.id == category.id);
+                        let is_first = position == Some(0);
+                        let is_last = position == Some(self.config.categories.len() - 1);
+                        ui.horizontal(|ui| {
+                            ui.label(&category.icon);
+                            ui.strong(&category.name);
+                            let buffer = self
+                                .rename_buffers
+                                .entry(category.id.clone())
+                                .or_insert_with(|| category.name.clone());
+                            ui.text_edit_singleline(buffer);
+                            if ui.button("Renommer").clicked() && !buffer.trim().is_empty() {
+                                category_actions.push(CategoryAction::Rename {
+                                    id: category.id.clone(),
+                                    new_name: buffer.clone(),
+                                });
+                            }
+                            // Compact single-glyph move buttons rather than
+                            // full-width "Monter"/"Descendre" text (reported
+                            // as too massive/unreadable). ▲/▼ (U+25B2/25BC)
+                            // aren't covered by egui's Proportional font
+                            // fallback chain (Ubuntu-Light + NotoEmoji +
+                            // emoji-icon-font) and rendered as empty boxes;
+                            // ⬆/⬇ (U+2B06/2B07) are covered by NotoEmoji and
+                            // do render. Hover text keeps the action
+                            // discoverable/accessible.
+                            if ui
+                                .add_enabled(!is_first, egui::Button::new("⬆"))
+                                .on_hover_text("Monter")
+                                .clicked()
+                            {
+                                category_actions.push(CategoryAction::Move {
+                                    id: category.id.clone(),
+                                    direction: storage::MoveDirection::Up,
+                                });
+                            }
+                            if ui
+                                .add_enabled(!is_last, egui::Button::new("⬇"))
+                                .on_hover_text("Descendre")
+                                .clicked()
+                            {
+                                category_actions.push(CategoryAction::Move {
+                                    id: category.id.clone(),
+                                    direction: storage::MoveDirection::Down,
+                                });
+                            }
+                            // Deleting a category is only offered once it holds
+                            // no actions — the user asked to remove the
+                            // orphan-rebucketing path entirely from the UI
+                            // rather than delete-with-fallback (deviation from
+                            // the originally approved spec, confirmed via
+                            // manual click-through).
+                            let remove_button = ui.add_enabled(is_empty, egui::Button::new("Supprimer"));
+                            let remove_button = if is_empty {
+                                remove_button
+                            } else {
+                                remove_button.on_disabled_hover_text(
+                                    "Retirez ou déplacez d'abord les actions de cette catégorie",
+                                )
+                            };
+                            if remove_button.clicked() {
+                                category_actions.push(CategoryAction::Remove {
+                                    id: category.id.clone(),
+                                });
+                            }
+                        });
+                    }
+                    None => {
+                        // Synthetic "Sans catégorie" bucket: no rename/delete
+                        // controls at the category level (Phase 1 task 3), but
+                        // its individual actions below keep the normal controls.
+                        ui.horizontal(|ui| {
+                            ui.label("📂");
+                            ui.strong("Sans catégorie");
+                        });
+                    }
                 }
-                if ui.button("Supprimer").clicked() {
-                    actions.push(CategoryAction::Remove {
-                        id: category.id.clone(),
-                    });
+
+                if group.rows.is_empty() {
+                    ui.label("  (aucune action)");
+                }
+                let last_row_index = group.rows.len().saturating_sub(1);
+                for (row_index, row) in group.rows.iter().enumerate() {
+                    match row {
+                        PreferencesRow::Single(command) => {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                ui.label(&command.icon);
+                                ui.label(&command.name);
+                                // Favorite management lives here now (moved
+                                // off the Actions view's cards per user
+                                // request) — the star itself is the toggle,
+                                // filled when favorite.
+                                let star_label = if command.is_favorite { "★" } else { "☆" };
+                                if ui.button(star_label).on_hover_text("Favori").clicked() {
+                                    toggle_favorite_request = Some(command.id.clone());
+                                }
+                                if ui.button("Modifier").clicked() {
+                                    edit_command_request = Some(command.clone());
+                                }
+                                // Compact single-glyph move buttons, same
+                                // rationale as the category Monter/Descendre
+                                // buttons above.
+                                if ui
+                                    .add_enabled(row_index != 0, egui::Button::new("⬆"))
+                                    .on_hover_text("Monter")
+                                    .clicked()
+                                {
+                                    move_command_request =
+                                        Some((command.id.clone(), storage::MoveDirection::Up));
+                                }
+                                if ui
+                                    .add_enabled(
+                                        row_index != last_row_index,
+                                        egui::Button::new("⬇"),
+                                    )
+                                    .on_hover_text("Descendre")
+                                    .clicked()
+                                {
+                                    move_command_request =
+                                        Some((command.id.clone(), storage::MoveDirection::Down));
+                                }
+                                if ui.button("Supprimer").clicked() {
+                                    remove_command_request =
+                                        Some((command.id.clone(), command.name.clone()));
+                                }
+                            });
+                        }
+                        PreferencesRow::Group {
+                            key,
+                            group_name,
+                            icon,
+                            variants,
+                        } => {
+                            let is_expanded = self.expanded_groups.contains(key);
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                let toggle_label = if is_expanded { "▾" } else { "▸" };
+                                if ui
+                                    .button(toggle_label)
+                                    .on_hover_text("Afficher/masquer les variantes")
+                                    .clicked()
+                                {
+                                    toggle_group_expand_request = Some(key.clone());
+                                }
+                                ui.label(icon.as_str());
+                                ui.strong(group_name.as_str());
+                                if ui
+                                    .add_enabled(row_index != 0, egui::Button::new("⬆"))
+                                    .on_hover_text("Monter")
+                                    .clicked()
+                                {
+                                    move_group_request =
+                                        Some((key.clone(), storage::MoveDirection::Up));
+                                }
+                                if ui
+                                    .add_enabled(
+                                        row_index != last_row_index,
+                                        egui::Button::new("⬇"),
+                                    )
+                                    .on_hover_text("Descendre")
+                                    .clicked()
+                                {
+                                    move_group_request =
+                                        Some((key.clone(), storage::MoveDirection::Down));
+                                }
+                                if ui.button("Supprimer").clicked() {
+                                    remove_group_request = Some((
+                                        key.clone(),
+                                        group_name.clone(),
+                                        variants.len(),
+                                    ));
+                                }
+                            });
+                            if is_expanded {
+                                let last_variant_index = variants.len().saturating_sub(1);
+                                for (variant_index, variant) in variants.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(32.0);
+                                        ui.label(&variant.icon);
+                                        let label = variant
+                                            .variant_label
+                                            .clone()
+                                            .unwrap_or_else(|| variant.name.clone());
+                                        ui.label(label);
+                                        let star_label =
+                                            if variant.is_favorite { "★" } else { "☆" };
+                                        if ui
+                                            .button(star_label)
+                                            .on_hover_text("Favori")
+                                            .clicked()
+                                        {
+                                            toggle_favorite_request = Some(variant.id.clone());
+                                        }
+                                        if ui.button("Modifier").clicked() {
+                                            edit_command_request = Some(variant.clone());
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                variant_index != 0,
+                                                egui::Button::new("⬆"),
+                                            )
+                                            .on_hover_text("Monter")
+                                            .clicked()
+                                        {
+                                            move_variant_request = Some((
+                                                variant.id.clone(),
+                                                storage::MoveDirection::Up,
+                                            ));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                variant_index != last_variant_index,
+                                                egui::Button::new("⬇"),
+                                            )
+                                            .on_hover_text("Descendre")
+                                            .clicked()
+                                        {
+                                            move_variant_request = Some((
+                                                variant.id.clone(),
+                                                storage::MoveDirection::Down,
+                                            ));
+                                        }
+                                        if ui.button("Supprimer").clicked() {
+                                            remove_command_request = Some((
+                                                variant.id.clone(),
+                                                variant.name.clone(),
+                                            ));
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for action in category_actions {
+                self.apply_category_action(action);
+            }
+            if let Some((id, name)) = remove_command_request {
+                self.request_remove_command(id, name);
+            }
+            if let Some(command) = edit_command_request {
+                self.action_form = Some(ActionForm::from_command(&command));
+            }
+            if let Some((id, direction)) = move_command_request {
+                self.apply_move_command(&id, direction);
+            }
+            if let Some(id) = toggle_favorite_request {
+                self.apply_toggle_favorite(&id);
+            }
+            if let Some((key, direction)) = move_group_request {
+                self.apply_move_command_group(&key, direction);
+            }
+            if let Some((key, group_name, count)) = remove_group_request {
+                self.request_remove_command_group(key, group_name, count);
+            }
+            if let Some((id, direction)) = move_variant_request {
+                self.apply_move_variant(&id, direction);
+            }
+            if let Some(key) = toggle_group_expand_request {
+                if !self.expanded_groups.remove(&key) {
+                    self.expanded_groups.insert(key);
+                }
+            }
+
+            ui.separator();
+            let mut add_category_clicked = false;
+            ui.horizontal(|ui| {
+                ui.label("Nouvelle catégorie —");
+
+                let id_label = ui.label("id");
+                ui.text_edit_singleline(&mut self.category_form.id)
+                    .labelled_by(id_label.id)
+                    .on_hover_text("identifiant unique");
+
+                let name_label = ui.label("nom");
+                ui.text_edit_singleline(&mut self.category_form.name)
+                    .labelled_by(name_label.id)
+                    .on_hover_text("nom affiché");
+
+                ui.label("icône");
+                ui.push_id("category-icon-picker", |ui| {
+                    icon_picker::show(ui, &mut self.category_form.icon);
+                });
+                if ui.button("Ajouter").clicked() {
+                    add_category_clicked = true;
                 }
             });
-        }
-
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Nouvelle catégorie —");
-
-            let id_label = ui.label("id");
-            ui.text_edit_singleline(&mut self.category_form.id)
-                .labelled_by(id_label.id)
-                .on_hover_text("identifiant unique");
-
-            let name_label = ui.label("nom");
-            ui.text_edit_singleline(&mut self.category_form.name)
-                .labelled_by(name_label.id)
-                .on_hover_text("nom affiché");
-
-            let icon_label = ui.label("icône");
-            ui.text_edit_singleline(&mut self.category_form.icon)
-                .labelled_by(icon_label.id)
-                .on_hover_text("emoji");
-
-            if ui.button("Ajouter").clicked() {
-                actions.push(CategoryAction::Add);
+            if add_category_clicked {
+                self.apply_category_action(CategoryAction::Add);
             }
-        });
 
-        for action in actions {
-            self.apply_category_action(action);
-        }
+            ui.separator();
+            self.render_action_form(ui);
+        });
     }
 
     /// The actual UI content, factored out of `eframe::App::ui` so it can be
@@ -1198,7 +1941,6 @@ impl EguiApp {
         }
 
         let groups = build_display_groups(&self.config, &self.machine_commands, &self.machine_id);
-        let mut toggles: Vec<String> = Vec::new();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             // `ScrollArea::vertical()` does not clamp its content's width by
@@ -1219,13 +1961,11 @@ impl EguiApp {
                 }
                 ui.horizontal_wrapped(|ui| {
                     for card in &group.cards {
-                        self.render_card(ui, card, &mut toggles);
+                        self.render_card(ui, card);
                     }
                 });
             }
         });
-
-        self.apply_favorite_toggles(toggles);
     }
 
     /// Launch `self.terminal_input` in the background — cross-platform port
@@ -1377,6 +2117,16 @@ impl EguiApp {
 
     fn render_automations_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("DevToolBox — Automatisations");
+        ui.label("Automatisations créées par l'utilisateur ou un logiciel tiers (les tâches/timers fournis par l'OS sont masqués).");
+
+        if let Some(status) = &self.status {
+            let color = if status.is_error {
+                egui::Color32::from_rgb(0xC4, 0x2B, 0x1C)
+            } else {
+                egui::Color32::from_rgb(0x1B, 0x5E, 0x20)
+            };
+            ui.colored_label(color, &status.text);
+        }
 
         if self.automations.is_none() {
             self.automations = Some(automations_view::fetch());
@@ -1385,6 +2135,11 @@ impl EguiApp {
         ui.horizontal(|ui| {
             if ui.button("Rafraîchir").clicked() {
                 self.automations = Some(automations_view::fetch());
+            }
+            if ui.button("Ouvrir l'outil natif").clicked() {
+                if let Err(err) = automations_view::open_native_tool() {
+                    self.set_status(err, true);
+                }
             }
         });
         ui.separator();
@@ -1459,7 +2214,10 @@ impl eframe::App for EguiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::{kittest::Queryable, Harness};
+    use egui_kittest::{
+        kittest::{NodeT, Queryable},
+        Harness,
+    };
     use storage::{Category, Command, Settings};
 
     fn sample_config() -> Config {
@@ -1889,10 +2647,13 @@ mod tests {
                 app,
             );
 
-        // First pass lays out the grid; the "cmd" card's favorite toggle is
-        // rendered with label "☆ Favori" (not yet a favorite).
+        // Favorite management now lives in Préférences (moved off the
+        // Actions view's cards). "cmd" is the only non-favorite command in
+        // `sample_config`, so its toggle is the sole "☆" button on screen.
         harness.run();
-        harness.get_by_label("☆ Favori").click();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        harness.get_by_label("☆").click();
         harness.run();
 
         // Reload from disk exactly like a fresh app boot would.
@@ -1949,9 +2710,13 @@ mod tests {
         harness.get_by_label("nom").type_text("Réseau");
         harness.run();
 
-        harness.get_by_label("icône").focus();
+        // The icon field is no longer free text (Part 3 Phase 1 task 4):
+        // it's the curated `icon_picker` widget, now a popup opened via its
+        // trigger button (shows "Choisir…" while unset) — open it, then
+        // pick a tile by its glyph label.
+        harness.get_by_label("Choisir…").click();
         harness.run();
-        harness.get_by_label("icône").type_text("🌐");
+        harness.get_by_label("🌐").click();
         harness.run();
 
         harness.get_by_label("Ajouter").click_accesskit();
@@ -1962,9 +2727,164 @@ mod tests {
             reloaded
                 .categories
                 .iter()
-                .any(|c| c.id == "net" && c.name == "Réseau"),
+                .any(|c| c.id == "net" && c.name == "Réseau" && c.icon == "🌐"),
             "category added via simulated UI did not persist to disk; categories={:?}",
             reloaded.categories
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_descendre_on_a_category_swaps_it_with_its_next_neighbor_and_persists() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "cat-reorder"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+
+        // Inject a second, empty category so there's a neighbor to swap
+        // with — `sample_config()` only ships "system" on its own.
+        harness.state_mut().config.categories.push(Category {
+            id: "temp".into(),
+            name: "Temporaire".into(),
+            icon: "🗂️".into(),
+        });
+        harness.run();
+
+        assert_eq!(
+            harness
+                .state()
+                .config
+                .categories
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["system", "temp"],
+            "sanity check: system should render before temp"
+        );
+
+        // "system" renders first, so its "⬇" is the first one in the tree.
+        harness
+            .get_all_by_label("⬇")
+            .next()
+            .expect("system category's ⬇ button should be present")
+            .click();
+        harness.run();
+
+        assert_eq!(
+            harness
+                .state()
+                .config
+                .categories
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["temp", "system"],
+            "clicking Descendre on system must swap it past temp"
+        );
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
+        assert_eq!(
+            reloaded
+                .categories
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["temp", "system"],
+            "reordering must persist to disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clicking_descendre_on_an_action_swaps_it_with_its_next_neighbor_in_the_same_category_and_persists(
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "cmd-reorder"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+
+        assert_eq!(
+            harness
+                .state()
+                .config
+                .commands
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notepad", "cmd"],
+            "sanity check: notepad should render before cmd"
+        );
+
+        // Render order for "⬇" labels: [0] the "system" category's own
+        // (disabled, sole category so is_last), [1] notepad's (enabled,
+        // first of two commands), [2] cmd's (disabled, last in its bucket)
+        // — click index 1.
+        harness
+            .get_all_by_label("⬇")
+            .nth(1)
+            .expect("notepad action's ⬇ button should be present")
+            .click();
+        harness.run();
+
+        assert_eq!(
+            harness
+                .state()
+                .config
+                .commands
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmd", "notepad"],
+            "clicking Descendre on notepad must swap it past cmd"
+        );
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
+        assert_eq!(
+            reloaded
+                .commands
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmd", "notepad"],
+            "reordering must persist to disk"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2000,16 +2920,35 @@ mod tests {
                 app,
             );
 
+        // sample_config's only category ("system") holds two commands, so
+        // its "Supprimer" button is disabled (category delete is now
+        // UI-gated to empty categories only — manual click-through
+        // feedback). Push a second, empty category directly into state to
+        // exercise the confirm-dialog flow on a deletable category.
+        harness.state_mut().config.categories.push(Category {
+            id: "temp".into(),
+            name: "Temporaire".into(),
+            icon: "🗂️".into(),
+        });
+
         harness.run();
         harness.get_by_label("Préférences").click();
         harness.run();
-        harness.get_by_label("Supprimer").click();
+
+        // Render order is: "system" category row (disabled Supprimer),
+        // then its two command rows (each with their own enabled
+        // Supprimer), then the empty "temp" category row (enabled
+        // Supprimer) — so the fourth "Supprimer" label is "temp"'s.
+        harness
+            .get_all_by_label("Supprimer")
+            .nth(3)
+            .expect("the empty 'Temporaire' category's Supprimer button should be present")
+            .click();
         harness.run();
 
         // The confirm dialog is now up and should block everything behind
-        // it: the category row's own "Supprimer" button, the Préférences
-        // view's "Catégories" heading — nothing but the dialog itself is
-        // rendered this frame.
+        // it: the Préférences view's "Catégories" heading, its "Renommer"
+        // buttons — nothing but the dialog itself is rendered this frame.
         assert!(
             harness.query_by_label("Oui").is_some(),
             "confirm dialog should be showing an Oui button"
@@ -2019,7 +2958,7 @@ mod tests {
             "confirm dialog should be showing a Non button"
         );
         assert!(
-            harness.query_by_label("Supprimer").is_none(),
+            harness.query_by_label("Renommer").is_none(),
             "background category list must not render while the confirm dialog is active"
         );
         assert!(
@@ -2036,12 +2975,63 @@ mod tests {
         );
         assert_eq!(
             harness.state().config.categories.len(),
-            1,
+            2,
             "canceling the confirm dialog must leave categories unchanged in memory"
         );
         assert!(
             !config_path.exists(),
             "canceling must never write to disk (nothing was persisted before the cancel)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_a_non_empty_category_is_blocked_and_the_supprimer_button_is_disabled() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "cat-remove-non-empty"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+
+        // "system" holds notepad + cmd — its Supprimer button must be
+        // disabled and clicking it must not open the confirm dialog.
+        let system_delete = harness
+            .get_all_by_label("Supprimer")
+            .next()
+            .expect("system category's Supprimer button should be present");
+        assert!(
+            system_delete.accesskit_node().is_disabled(),
+            "Supprimer must be disabled for a category that still has actions"
+        );
+        system_delete.click();
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Oui").is_none(),
+            "clicking a disabled Supprimer must not open the confirm dialog"
+        );
+        assert_eq!(
+            harness.state().config.categories.len(),
+            1,
+            "the category must still be present"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2068,31 +3058,515 @@ mod tests {
                 app,
             );
 
+        // "system" holds commands, so its Supprimer is disabled — push an
+        // empty category directly into state to exercise a real deletion
+        // (see the sibling cancel test's comment for the render-order
+        // rationale behind `.nth(3)`).
+        harness.state_mut().config.categories.push(Category {
+            id: "temp".into(),
+            name: "Temporaire".into(),
+            icon: "🗂️".into(),
+        });
+
         harness.run();
         harness.get_by_label("Préférences").click();
         harness.run();
-        harness.get_by_label("Supprimer").click();
+        harness
+            .get_all_by_label("Supprimer")
+            .nth(3)
+            .expect("the empty 'Temporaire' category's Supprimer button should be present")
+            .click();
         harness.run();
         harness.get_by_label("Oui").click();
         harness.run();
 
+        assert_eq!(
+            harness.state().config.categories.len(),
+            1,
+            "confirming removal must update in-memory state, leaving only 'system'"
+        );
         assert!(
-            harness.state().config.categories.is_empty(),
-            "confirming removal must update in-memory state"
+            harness
+                .state()
+                .config
+                .categories
+                .iter()
+                .any(|c| c.id == "system"),
+            "the non-empty 'system' category must remain untouched"
         );
 
         let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
-        assert!(
-            reloaded.categories.is_empty(),
+        assert_eq!(
+            reloaded.categories.len(),
+            1,
             "confirmed removal via the real UI did not persist to disk; categories={:?}",
             reloaded.categories
         );
-        // remove_category re-buckets rather than deletes commands (see
-        // storage::categories::remove_category_does_not_delete_commands).
+        assert!(!reloaded.categories.iter().any(|c| c.id == "temp"));
         assert_eq!(
             reloaded.commands.len(),
             2,
-            "removing a category must not delete the commands that were in it"
+            "removing an empty category must not affect commands in other categories"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Action CRUD tests (Part 3 Phase 2 acceptance criteria) ---------------
+    //
+    // Drive the REAL unified Préférences view end-to-end: create/edit/delete
+    // an action via the real form widgets (`command_form`/`icon_picker`), the
+    // real confirm-dialog gate on delete, and the real validity gate on
+    // submit. `egui::ComboBox` popups are opened via `Role::ComboBox` (not
+    // `get_by_value`) because the category dropdown's current-value text can
+    // collide with the rename text field's own current value, which is also
+    // exposed as a `value` accesskit attribute.
+
+    #[test]
+    fn creating_an_action_via_the_real_ui_persists_and_appears_immediately_in_actions_view() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "action-create"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        harness.get_by_label("+ Nouvelle action").click();
+        harness.run();
+
+        harness.get_by_label("nom de l'action").focus();
+        harness.run();
+        harness.get_by_label("nom de l'action").type_text("Calculatrice");
+        harness.run();
+
+        harness.get_by_label("Exécutable").focus();
+        harness.run();
+        harness.get_by_label("Exécutable").type_text("calc.exe");
+        harness.run();
+
+        // A space-containing argument, per the Phase 2 manual acceptance
+        // criterion ("a space-containing path argument").
+        harness.get_by_label("+ Argument").click();
+        harness.run();
+        harness.get_by_label("Argument").focus();
+        harness.run();
+        harness.get_by_label("Argument").type_text("start now");
+        harness.run();
+
+        // Reassign from the default "Sans catégorie" to the sample
+        // config's one real category.
+        harness
+            .get_by_role(egui::accesskit::Role::ComboBox)
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Système")
+            .click();
+        harness.run();
+
+        // Two icon_picker widgets exist here (the category-add form's and
+        // the open action form's), both still unset ("Choisir…") — the
+        // action form's trigger button renders second (see
+        // `render_preferences_view` ordering), so it's the second matching
+        // node in tree order. Only one popup is open at a time, so once
+        // it's opened its own "🚀" tile is unambiguous.
+        harness
+            .get_all_by_label("Choisir…")
+            .nth(1)
+            .expect("action form's icon_picker trigger button should be the second 'Choisir…' button")
+            .click();
+        harness.run();
+        harness.get_by_label("🚀").click();
+        harness.run();
+
+        harness.get_by_label("Favori").click();
+        harness.run();
+
+        harness.get_by_label("raccourci").focus();
+        harness.run();
+        harness.get_by_label("raccourci").type_text("Ctrl+K");
+        harness.run();
+
+        harness.get_by_label("Enregistrer").click_accesskit();
+        harness.run();
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
+        let created = reloaded
+            .commands
+            .iter()
+            .find(|c| c.name == "Calculatrice")
+            .expect("new action persisted to disk");
+        assert_eq!(created.command, "calc.exe \"start now\"");
+        assert_eq!(created.category, "system");
+        assert_eq!(created.icon, "🚀");
+        assert!(created.is_favorite);
+        assert_eq!(created.shortcut.as_deref(), Some("Ctrl+K"));
+
+        // Appears immediately in the Actions view, no restart.
+        harness.get_by_label("Actions").click();
+        harness.run();
+        assert!(
+            harness.query_by_label("Calculatrice").is_some(),
+            "newly created action should render immediately in the Actions view"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_an_action_via_the_real_ui_prefills_the_form_and_persists_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "action-edit"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        // Action buttons are plain "Modifier"/"Supprimer" (Part 3 follow-up
+        // — the item name to their left is already visible, so the name
+        // suffix was redundant). "system" lists notepad then cmd, so
+        // notepad's "Modifier" is the first match.
+        harness
+            .get_all_by_label("Modifier")
+            .nth(0)
+            .expect("notepad's Modifier button should be present")
+            .click();
+        harness.run();
+
+        {
+            let form = harness
+                .state()
+                .action_form
+                .as_ref()
+                .expect("edit form should be open after clicking Modifier");
+            assert_eq!(form.editing_id.as_deref(), Some("notepad"));
+            assert_eq!(form.name, "Bloc-notes");
+            assert_eq!(form.command_widget.rows(), &["notepad.exe".to_string()]);
+            assert_eq!(form.category, "system");
+            assert_eq!(form.icon, "📝");
+            assert!(form.is_favorite);
+            assert_eq!(form.shortcut, "");
+        }
+
+        harness.get_by_label("raccourci").focus();
+        harness.run();
+        harness.get_by_label("raccourci").type_text("Ctrl+Shift+N");
+        harness.run();
+
+        // Reassign to "Sans catégorie" (risk register item 3's flip side —
+        // the dropdown must let a currently-categorized action move out).
+        harness
+            .get_by_role(egui::accesskit::Role::ComboBox)
+            .click();
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Sans catégorie")
+            .click();
+        harness.run();
+
+        // Toggle is_favorite off (it started as true — sample_config's
+        // "notepad").
+        harness.get_by_label("Favori").click();
+        harness.run();
+
+        harness.get_by_label("Enregistrer").click_accesskit();
+        harness.run();
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
+        let updated = reloaded
+            .commands
+            .iter()
+            .find(|c| c.id == "notepad")
+            .expect("edited action still present after save");
+        assert_eq!(updated.name, "Bloc-notes");
+        assert_eq!(updated.command, "notepad.exe");
+        assert_eq!(
+            updated.category, "",
+            "reassigning to Sans catégorie must persist as an empty category field"
+        );
+        assert_eq!(updated.shortcut.as_deref(), Some("Ctrl+Shift+N"));
+        assert!(
+            !updated.is_favorite,
+            "toggling favori off via the action form must persist"
+        );
+
+        // Reopening the edit form after persisting must show the just-saved
+        // values, not the stale pre-edit ones. notepad moved to "Sans
+        // catégorie" (rendered after "system"), so cmd's "Modifier" is now
+        // first and notepad's is second.
+        harness
+            .get_all_by_label("Modifier")
+            .nth(1)
+            .expect("notepad's Modifier button should be present after reassignment")
+            .click();
+        harness.run();
+        let reopened = harness
+            .state()
+            .action_form
+            .as_ref()
+            .expect("edit form should reopen");
+        assert_eq!(reopened.shortcut, "Ctrl+Shift+N");
+        assert!(!reopened.is_favorite);
+        assert_eq!(reopened.category, "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_an_action_is_gated_by_a_blocking_confirm_dialog_and_persists_once_confirmed() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "action-remove"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        // Action buttons are plain "Modifier"/"Supprimer" (Part 3
+        // follow-up). "system" lists notepad then cmd; the category's own
+        // (disabled) "Supprimer" is first, notepad's second, cmd's third.
+        harness
+            .get_all_by_label("Supprimer")
+            .nth(2)
+            .expect("cmd's Supprimer button should be present")
+            .click();
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Oui").is_some(),
+            "confirm dialog should be showing an Oui button"
+        );
+        assert!(
+            harness.query_by_label("Non").is_some(),
+            "confirm dialog should be showing a Non button"
+        );
+        assert_eq!(
+            harness.query_all_by_label("Supprimer").count(),
+            0,
+            "background action list must not render while the confirm dialog is active"
+        );
+
+        harness.get_by_label("Non").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().config.commands.len(),
+            2,
+            "canceling the confirm dialog must leave commands unchanged in memory"
+        );
+        assert!(
+            !config_path.exists(),
+            "canceling must never write to disk (nothing was persisted before the cancel)"
+        );
+
+        harness
+            .get_all_by_label("Supprimer")
+            .nth(2)
+            .expect("cmd's Supprimer button should be present")
+            .click();
+        harness.run();
+        harness.get_by_label("Oui").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().config.commands.len(),
+            1,
+            "confirming removal must update in-memory state"
+        );
+        assert!(!harness.state().config.commands.iter().any(|c| c.id == "cmd"));
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
+        assert!(
+            !reloaded.commands.iter().any(|c| c.id == "cmd"),
+            "confirmed removal via the real UI did not persist to disk; commands={:?}",
+            reloaded.commands
+        );
+        assert_eq!(reloaded.commands.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn submitting_an_invalid_command_blocks_the_storage_write_and_preserves_form_input() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "action-invalid"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        harness.get_by_label("+ Nouvelle action").click();
+        harness.run();
+
+        harness.get_by_label("nom de l'action").focus();
+        harness.run();
+        harness.get_by_label("nom de l'action").type_text("Cassée");
+        harness.run();
+
+        harness.get_by_label("Exécutable").focus();
+        harness.run();
+        harness.get_by_label("Exécutable").type_text("echo");
+        harness.run();
+
+        // A row containing a literal `"` can never round-trip through
+        // `terminal_view::tokenize` (see `command_form`'s module docs) —
+        // this must block the storage write entirely.
+        harness.get_by_label("+ Argument").click();
+        harness.run();
+        harness.get_by_label("Argument").focus();
+        harness.run();
+        harness.get_by_label("Argument").type_text("say\"hi");
+        harness.run();
+
+        assert!(
+            !harness
+                .state()
+                .action_form
+                .as_ref()
+                .unwrap()
+                .command_widget
+                .is_valid(),
+            "precondition: the row containing a literal quote must be invalid"
+        );
+
+        harness.get_by_label("Enregistrer").click_accesskit();
+        harness.run();
+
+        assert_eq!(
+            harness.state().config.commands.len(),
+            2,
+            "an invalid command must not be added to the in-memory config"
+        );
+        assert!(
+            !config_path.exists(),
+            "an invalid command must never be written to disk"
+        );
+
+        let form = harness
+            .state()
+            .action_form
+            .as_ref()
+            .expect("form must stay open (not be discarded) on validation failure");
+        assert_eq!(
+            form.name, "Cassée",
+            "in-progress name must be preserved on validation failure"
+        );
+        assert_eq!(
+            form.command_widget.rows(),
+            &["echo".to_string(), "say\"hi".to_string()]
+        );
+
+        // The widget's own inline error stays visible.
+        assert!(harness.query_by_label_contains("guillemet").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn category_forms_icon_picker_preserves_an_out_of_set_value_when_the_view_is_open() {
+        // Phase 1 acceptance criterion 3: an out-of-curated-set icon value
+        // must display unchanged, not be silently reset, when the
+        // category-add form (which now uses `icon_picker` rather than free
+        // text) is rendered.
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "cat-icon-out-of-set"
+        ));
+        let config_path = dir.join("config.json");
+
+        let config = sample_config();
+        let mut app = EguiApp::new_for_test(config, config_path);
+        app.category_form.icon = "🦄".to_string();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+
+        assert_eq!(
+            harness.state().category_form.icon,
+            "🦄",
+            "an out-of-curated-set icon value must not be silently reset when the \
+             Préférences view (and its icon_picker) renders"
+        );
+
+        // The icon_picker is now a popup (fix #2): the "hors liste" note
+        // only renders once the trigger button (labeled with the current
+        // out-of-set value itself) is clicked open.
+        harness.get_by_label("🦄").click();
+        harness.run();
+        assert!(
+            harness
+                .query_by_label_contains("Icône actuelle (hors liste)")
+                .is_some(),
+            "the out-of-set value should still be displayed, per icon_picker's own contract"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2512,17 +3986,17 @@ mod tests {
                 app,
             );
 
+        // Favorite management now lives in Préférences (moved off the
+        // Actions view's cards). A variant group collapses into a single
+        // row (Phase 3), so its variants — and their favorite stars — are
+        // only reachable once the row is expanded. "sync-perso" starts as
+        // the only favorite, so its row is the sole "★" button once expanded.
         harness.run();
-        // "Pro" (not favorite) is the initial selection; switch to "Perso"
-        // (favorite) before toggling.
-        harness.get_by_value("Pro").click();
+        harness.get_by_label("Préférences").click();
         harness.run();
-        harness
-            .get_by_role_and_label(egui::accesskit::Role::Button, "Perso")
-            .click();
+        harness.get_by_label("▸").click();
         harness.run();
-
-        harness.get_by_label("★ Favori").click();
+        harness.get_by_label("★").click();
         harness.run();
 
         let commands = &harness.state().config.commands;
@@ -2540,18 +4014,233 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // -- Préférences variant-group consolidation (Phase 3): a command's
+    // `variant_group` is what makes the Actions view collapse it into one
+    // card (`partition_by_variant_group`) — Préférences must mirror that
+    // exactly, showing one row per app rather than one per variant, per the
+    // user's screenshot request: "pour une même application, il faudrait
+    // que ce soit une seule ligne […] et ensuite dans modifier, pouvoir
+    // gérer les options/arguments." --------------------------------------
+
+    #[test]
+    fn preferences_view_collapses_a_variant_group_into_a_single_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "prefs-group-collapse"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let commands = vec![
+            variant_command(
+                "sync-pro",
+                "sync",
+                "Synchroniser",
+                "Pro",
+                "echo hello-from-pro",
+                "system",
+                false,
+            ),
+            variant_command(
+                "sync-perso",
+                "sync",
+                "Synchroniser",
+                "Perso",
+                "echo hello-from-perso",
+                "system",
+                false,
+            ),
+        ];
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+
+        // A single "Synchroniser" (group_name) row, not one per variant —
+        // the per-variant labels ("Pro"/"Perso") must not appear until the
+        // row is expanded.
+        harness.get_by_label("Synchroniser");
+        assert!(
+            harness.query_by_label("Pro").is_none(),
+            "variant rows must stay hidden until the group row is expanded"
+        );
+        assert!(harness.query_by_label("Perso").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expanding_a_group_row_reveals_each_variant_for_editing() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "prefs-group-expand-edit"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let commands = vec![
+            variant_command(
+                "sync-pro",
+                "sync",
+                "Synchroniser",
+                "Pro",
+                "echo hello-from-pro",
+                "system",
+                false,
+            ),
+            variant_command(
+                "sync-perso",
+                "sync",
+                "Synchroniser",
+                "Perso",
+                "echo hello-from-perso",
+                "system",
+                false,
+            ),
+        ];
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        harness.get_by_label("▸").click();
+        harness.run();
+
+        // Both variants are now visible as their own sub-rows, each with
+        // its own "Modifier" — clicking "Perso"'s must open the edit form
+        // pointed at "sync-perso" specifically (options/arguments editing
+        // per variant, the user's actual ask), not at the group as a whole.
+        harness.get_by_label("Pro");
+        harness.get_by_label("Perso");
+        harness
+            .get_all_by_label("Modifier")
+            .nth(1)
+            .expect("the second Modifier button belongs to the 'Perso' variant row")
+            .click();
+        harness.run();
+
+        assert_eq!(
+            harness
+                .state()
+                .action_form
+                .as_ref()
+                .and_then(|form| form.editing_id.clone()),
+            Some("sync-perso".to_string()),
+            "Modifier on a variant sub-row must open the edit form for that exact variant"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_group_row_removes_every_variant_after_confirmation() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "prefs-group-delete"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let commands = vec![
+            variant_command(
+                "sync-pro",
+                "sync",
+                "Synchroniser",
+                "Pro",
+                "echo hello-from-pro",
+                "system",
+                false,
+            ),
+            variant_command(
+                "sync-perso",
+                "sync",
+                "Synchroniser",
+                "Perso",
+                "echo hello-from-perso",
+                "system",
+                false,
+            ),
+        ];
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        // "system" (the category holding the group) is non-empty, so its
+        // own "Supprimer" is disabled and renders first; the group row's
+        // "Supprimer" is the second match.
+        harness
+            .get_all_by_label("Supprimer")
+            .nth(1)
+            .expect("the group row's Supprimer button should be present")
+            .click();
+        harness.run();
+        harness.get_by_label("Oui").click();
+        harness.run();
+
+        assert!(
+            harness.state().config.commands.is_empty(),
+            "confirming a group deletion must remove every variant, not just one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // -- Automations view smoke test (Phase 3 acceptance criterion, updated
     // for Part 3 Phase 2's real `crate::linux::automations::fetch()` data
-    // source) -----------------------------------------------------------
+    // source, and again for the user-scope filter added afterwards) ------
     //
     // "renders without panicking on Linux" — this drives the real nav
     // switch and asserts the real `automations_view::fetch()` -> render
-    // path completes without panicking. This reference machine has real
-    // systemd timers configured (see `crate::linux::automations`'s own
-    // real-machine tests), so this asserts the populated-grid path (a
-    // real row's name shows up in the rendered UI) rather than the old
-    // "always empty, always show the not-yet-available placeholder" stub
-    // behavior.
+    // path completes without panicking. This reference machine's real
+    // systemd timers are all package-provided (see
+    // `crate::linux::automations`'s own real-machine tests), so after the
+    // user-scope filter the *correct* result here is an empty, filtered
+    // list — this asserts the empty-state placeholder renders instead of
+    // requiring a populated grid, but still exercises the populated-row
+    // render path when rows are present (e.g. on a machine with a real
+    // local timer under `/etc/systemd/system`), so the assertion stays
+    // meaningful either way.
+    //
+    // Deliberately does not click "Ouvrir l'outil natif": on Linux that
+    // spawns a real `gnome-terminal` window (see
+    // `crate::linux::automations::open_native_tool`) — a real side effect
+    // this smoke test shouldn't trigger on every run. Its presence in the
+    // rendered view is asserted instead.
 
     #[test]
     fn automations_view_renders_real_systemd_rows_without_panicking_on_linux() {
@@ -2585,15 +4274,27 @@ mod tests {
             .expect("Automations view must have fetched on first render")
             .as_ref()
             .expect("fetch() must not error out on Linux — real systemctl call");
-        assert!(
-            !rows.is_empty(),
-            "expected real systemd timers on this reference system"
-        );
 
-        let first_name = rows[0].name.clone();
+        if rows.is_empty() {
+            assert!(
+                harness
+                    .query_by_label_contains("Aucune automatisation trouvée")
+                    .is_some(),
+                "expected the empty-state placeholder when the user-scope filter leaves zero rows"
+            );
+        } else {
+            let first_name = rows[0].name.clone();
+            assert!(
+                harness.query_by_label_contains(&first_name).is_some(),
+                "expected the first real timer's name ({first_name:?}) to appear in the rendered grid"
+            );
+        }
+
         assert!(
-            harness.query_by_label_contains(&first_name).is_some(),
-            "expected the first real timer's name ({first_name:?}) to appear in the rendered grid"
+            harness
+                .query_by_label_contains("Ouvrir l'outil natif")
+                .is_some(),
+            "expected the native-tool link button to render"
         );
 
         // Rafraîchir must also not panic on a second real fetch.

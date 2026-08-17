@@ -36,11 +36,12 @@ pub mod models;
 pub mod slug;
 
 pub use categories::{
-    add_category, group_commands_by_category, remove_category, rename_category, CategoryError,
-    CategoryGroup,
+    add_category, group_commands_by_category, move_category, remove_category, rename_category,
+    CategoryError, CategoryGroup, MoveDirection,
 };
 pub use commands::{
-    add_command, remove_command, toggle_favorite, update_command, CommandError, FavoriteError,
+    add_command, move_command, move_command_group, move_variant, remove_command,
+    remove_command_group, toggle_favorite, update_command, CommandError, FavoriteError,
 };
 pub use json::{load, save, StorageError};
 pub use machine_commands::{

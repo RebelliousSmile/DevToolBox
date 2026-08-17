@@ -223,6 +223,48 @@ pub fn rename_category(
     }
 }
 
+/// Direction to move a category by one slot, see [`move_category`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
+}
+
+/// Move a category one slot up or down within `config.categories`, swapping
+/// it with its neighbor. Display order (both in Préférences and Actions) is
+/// exactly this vec's order — there is no dedicated ordering field.
+///
+/// A no-op (returns `Ok(())` without mutating anything) if the category is
+/// already at the boundary in the requested direction, so callers don't need
+/// to special-case first/last themselves.
+///
+/// Returns `Err(CategoryError::NotFound)` when no category with `id` exists.
+pub fn move_category(
+    config: &mut Config,
+    id: &str,
+    direction: MoveDirection,
+) -> Result<(), CategoryError> {
+    let pos = config
+        .categories
+        .iter()
+        .position(|c| c.id == id)
+        .ok_or_else(|| CategoryError::NotFound(id.to_string()))?;
+
+    let neighbor = match direction {
+        MoveDirection::Up => pos.checked_sub(1),
+        MoveDirection::Down => {
+            let next = pos + 1;
+            (next < config.categories.len()).then_some(next)
+        }
+    };
+
+    if let Some(neighbor) = neighbor {
+        config.categories.swap(pos, neighbor);
+    }
+
+    Ok(())
+}
+
 /// Remove a category and clear the `category` id of every affected command.
 ///
 /// Commands are NOT deleted (Decision D3): their `category` id is set to an
@@ -549,6 +591,53 @@ mod tests {
     fn rename_category_returns_error_for_unknown_id() {
         let mut config = three_category_config();
         let result = rename_category(&mut config, "ghost", "Fantôme");
+        assert_eq!(result, Err(CategoryError::NotFound("ghost".to_string())));
+    }
+
+    // -----------------------------------------------------------------------
+    // move_category
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn move_category_up_swaps_with_previous_neighbor() {
+        let mut config = three_category_config();
+        move_category(&mut config, "network", MoveDirection::Up).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["network", "system", "maintenance"]);
+    }
+
+    #[test]
+    fn move_category_down_swaps_with_next_neighbor() {
+        let mut config = three_category_config();
+        move_category(&mut config, "network", MoveDirection::Down).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["system", "maintenance", "network"]);
+    }
+
+    #[test]
+    fn move_category_up_on_first_is_a_no_op() {
+        let mut config = three_category_config();
+        move_category(&mut config, "system", MoveDirection::Up).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["system", "network", "maintenance"]);
+    }
+
+    #[test]
+    fn move_category_down_on_last_is_a_no_op() {
+        let mut config = three_category_config();
+        move_category(&mut config, "maintenance", MoveDirection::Down).expect("move failed");
+
+        let ids: Vec<&str> = config.categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["system", "network", "maintenance"]);
+    }
+
+    #[test]
+    fn move_category_returns_error_for_unknown_id() {
+        let mut config = three_category_config();
+        let result = move_category(&mut config, "ghost", MoveDirection::Up);
         assert_eq!(result, Err(CategoryError::NotFound("ghost".to_string())));
     }
 
