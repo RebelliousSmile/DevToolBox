@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] - 2026-08-18
+
+### Added
+- Nettoyage view: winclean JSON client (model, parser, rows, spawn) wired into a new
+  `ActiveView::Cleanup` tab — module rows with measured-first sizes, safe-only
+  "Nettoyer" buttons, run badges (success/partial failure/interrupted), error banner
+  and stale marker, behind a blocking confirmation dialog and the shared
+  command-busy guard
+- Applications view: `DisplayVersion` is now read from the Windows Uninstall
+  registry (same path as `Publisher`) and surfaced as a new Version column
+
+### Fixed
+- Automations: scheduled-task fetch now filters out `\Microsoft\*` system tasks,
+  matching the view's own "OS tasks hidden" label instead of drowning user tasks in
+  200+ system rows
+- Applications grid, cleanup modules grid, automations grid and Terminal output
+  switch to `ScrollArea::both()` so content wider than the window stays reachable
+  via horizontal scroll instead of being clipped
+- Nettoyage view: the Bibliothèques section now renders above the installed-apps
+  report so a completed analysis is visible without scrolling past the window's
+  bottom edge
+- Nettoyage view: the "Nettoyer" action column now sits right after the size
+  column instead of trailing past wide filesystem paths
+- Automations: `open_native_tool` behind the view button is now implemented
+
 ## [0.4.0] - 2026-08-17
 
 ### Added
