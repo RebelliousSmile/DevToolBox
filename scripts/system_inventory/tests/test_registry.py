@@ -135,6 +135,7 @@ class ReadUninstallMetadataTests(unittest.TestCase):
             "DisplayIcon": 'C:\\Apps\\Editor\\editor.exe,0',
             "UninstallString": '"C:\\Apps\\Editor\\uninstall.exe" /remove',
             "SystemComponent": 1,
+            "DisplayVersion": "4.2.0",
         }
         legacy = _read_uninstall_entry(values)
         metadata = _read_uninstall_metadata(values)
@@ -142,6 +143,11 @@ class ReadUninstallMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["display_icon"], values["DisplayIcon"])
         self.assertEqual(metadata["uninstall_string"], values["UninstallString"])
         self.assertTrue(metadata["system_component"])
+        self.assertEqual(metadata["version"], "4.2.0")
+
+    def test_missing_display_version_is_empty_string_not_none(self):
+        metadata = _read_uninstall_metadata({"DisplayName": "Editor"})
+        self.assertEqual(metadata["version"], "")
 
 
 @unittest.skipUnless(WINREG_AVAILABLE and platform.system() == "Windows", "winreg only available on Windows")

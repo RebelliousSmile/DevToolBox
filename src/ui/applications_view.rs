@@ -42,6 +42,15 @@ fn human_size(bytes: Option<u64>) -> String {
     }
 }
 
+fn version_label(candidate: &ApplicationCandidate) -> &str {
+    candidate
+        .metadata
+        .get("version")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("—")
+}
+
 fn usage_label(candidate: &ApplicationCandidate) -> String {
     match candidate.usage.kind.as_str() {
         "known_last_seen" => candidate
@@ -197,6 +206,7 @@ pub fn render(
             .show(ui, |ui| {
                 ui.strong("Priorité");
                 ui.strong("Application");
+                ui.strong("Version");
                 ui.strong("Taille");
                 ui.strong("Dernier usage");
                 ui.strong("Confiance");
@@ -208,6 +218,7 @@ pub fn render(
                     if ui.selectable_label(selected_now, &candidate.name).clicked() {
                         *selected = Some(candidate.app_id.clone());
                     }
+                    ui.label(version_label(candidate));
                     ui.label(human_size(candidate.size.installed_bytes));
                     ui.label(usage_label(candidate));
                     ui.label(&candidate.confidence);
@@ -340,5 +351,21 @@ mod tests {
     #[test]
     fn unknown_size_is_not_promoted_by_minimum_filter() {
         assert_eq!(human_size(None), "inconnue");
+    }
+
+    #[test]
+    fn version_label_falls_back_when_metadata_is_missing_or_empty() {
+        let mut without_version = candidate("Editor", false);
+        assert_eq!(version_label(&without_version), "—");
+
+        without_version
+            .metadata
+            .insert("version".to_string(), String::new());
+        assert_eq!(version_label(&without_version), "—");
+
+        without_version
+            .metadata
+            .insert("version".to_string(), "4.2.0".to_string());
+        assert_eq!(version_label(&without_version), "4.2.0");
     }
 }
