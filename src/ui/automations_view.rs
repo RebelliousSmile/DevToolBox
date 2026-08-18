@@ -67,8 +67,12 @@ fn fetch_impl() -> Result<Vec<AutomationRow>, String> {
     // `Get-ScheduledTaskInfo`, then `ConvertTo-Json -Compress`), duplicated
     // here per the module doc comment above rather than calling into
     // `app.rs` directly.
+    // Only user/third-party automations are relevant here: everything under
+    // `\Microsoft\*` is OS plumbing the user neither created nor manages, and
+    // it drowns the handful of rows that actually matter (~200+ system tasks
+    // vs a few user ones).
     const SCRIPT: &str = r#"
-$tasks = Get-ScheduledTask | ForEach-Object {
+$tasks = Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' } | ForEach-Object {
     $info = $_ | Get-ScheduledTaskInfo
     [pscustomobject]@{
         Name = $_.TaskName

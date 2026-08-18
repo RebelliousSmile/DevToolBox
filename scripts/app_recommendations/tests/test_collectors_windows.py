@@ -25,6 +25,7 @@ class RegistryCandidatesTests(unittest.TestCase):
         self.assertEqual(editor.command.origin, "publisher_unverified")
         self.assertEqual(editor.command.value, '"C:\\Apps\\Editor\\uninstall.exe" /remove')
         self.assertEqual(editor.executable_hints, ["C:\\Apps\\Editor\\editor.exe"])
+        self.assertEqual(editor.metadata["version"], "4.2.0")
         update = by_name["KB500000"]
         self.assertTrue(update.protection.protected)
         self.assertIsNone(update.command)

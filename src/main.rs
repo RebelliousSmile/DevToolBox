@@ -7,6 +7,7 @@
 //! bootstrap; the full card grid lands in Phase 2.
 
 mod applications;
+mod cleanup;
 mod icons;
 mod linux;
 mod platform;
