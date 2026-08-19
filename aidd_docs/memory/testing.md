@@ -42,4 +42,14 @@ This document outlines the testing strategy for DevToolBox.
   `scripts/system_inventory` beside the binary resources, or set
   `DEVTOOLBOX_HOME` to that root. A missing module must render an unavailable state.
 
+## egui_kittest gotchas
+
+- A spinner (busy state) requests continuous repaint, so `Harness::run()`
+  panics ("still requesting repaints") — use `harness.run_steps(2)` instead
+  when the UI under test can be busy.
+- One-frame-deferred actions (see `DeferredDockerAction` in
+  `src/ui/egui_app.rs`) need an extra `harness.step()` before asserting their
+  effect; tests gate real side effects behind a `docker_actions_enabled`
+  flag (false in tests) and assert on an invocation counter.
+
 > No CI integration yet; tests are run locally.
