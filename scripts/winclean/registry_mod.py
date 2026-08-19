@@ -28,6 +28,7 @@ from scripts.winclean import (  # noqa: E402
     mod_apps,
     mod_dev,
     mod_linux_cache,
+    mod_linux_dev,
     mod_linux_pkg,
     mod_linux_system,
     mod_ollama,
@@ -142,6 +143,17 @@ _REGISTERED: tuple[CleanModule, ...] = (
     # prennent `env`, pas la signature `(module, roots=..., trash_days=...)`
     # que `_cache_module` fige via `functools.partial`.
     CleanModule(
+        name="npm-cache-linux",
+        level=Level.SAFE,
+        requires=(),
+        discover=functools.partial(mod_linux_pkg.discover_cache, "npm-cache-linux"),
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=True,
+        opt_in=False,
+    ),
+    CleanModule(
         name="pip-cache-linux",
         level=Level.SAFE,
         requires=(),
@@ -170,6 +182,17 @@ _REGISTERED: tuple[CleanModule, ...] = (
         level=Level.SAFE,
         requires=(),
         discover=mod_linux_pkg.discover_apt_archives,
+        clean=None,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=True,
+        opt_in=False,
+    ),
+    CleanModule(
+        name="playwright-browsers-linux",
+        level=Level.SAFE,
+        requires=(),
+        discover=mod_linux_dev.discover_playwright_browsers,
         clean=None,
         discovery=DISCOVERY_FIXED,
         proc_guard=None,
@@ -316,6 +339,20 @@ _REGISTERED: tuple[CleanModule, ...] = (
         proc_guard=None,
         needs_network=False,
         opt_in=False,
+    ),
+    # Les anciennes révisions sont normalement conservées pour permettre
+    # `snap revert`. Elles ne participent donc jamais à un niveau large : il
+    # faut nommer ce module explicitement.
+    CleanModule(
+        name="snap-old-revisions",
+        level=Level.AGGRESSIVE,
+        requires=("snap",),
+        discover=mod_linux_system.discover_snap_old_revisions,
+        clean=mod_linux_system.clean_snap_old_revisions,
+        discovery=DISCOVERY_FIXED,
+        proc_guard=None,
+        needs_network=False,
+        opt_in=True,
     ),
     # Modèles utilisateur : jamais inclus par un niveau large. Le CLI exige un
     # nom canonique explicite et l'adaptateur délègue exclusivement à Ollama.

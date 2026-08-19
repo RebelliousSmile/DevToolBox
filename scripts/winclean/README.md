@@ -65,6 +65,12 @@ pour le seul module `package-cache` (voir plus bas) : `--yes` n'y répond pas.
 | `uv-cache` | chemin par utilisateur | **oui** | le cache uv |
 | `nuget-packages` | chemin par utilisateur | **oui** | le dossier de paquets NuGet |
 
+Sous Linux, `npm-cache-linux`, `pip-cache-linux`, `pnpm-store-linux`,
+`apt-cache` et `playwright-browsers-linux` complètent ce niveau. Les trois
+répertoires Playwright connus (`ms-playwright`, `ms-playwright-go`,
+`ms-playwright-mcp`) sont isolés du balayage générique de `~/.cache` : ils
+sont donc proposés en `safe`, comptés une seule fois et omis par `--offline`.
+
 Niveau `moderate` (n'apparaissent qu'avec `--level moderate`) :
 
 | Module | Découverte | Réseau | Ce qu'il propose |
@@ -89,8 +95,18 @@ Niveau `aggressive` (n'apparaissent qu'avec `--level aggressive`) :
 | `recycle-bin` | corbeille par volume | non | les éléments de **votre** corbeille plus vieux que le plancher d'âge |
 | `package-cache` | chemin fixe | non | `%ProgramData%\Package Cache` — **sans retour arrière** |
 | `ollama-models` | API locale, opt-in | **oui** | les seuls modèles nommés exactement avec `--ollama-model` |
+| `snap-old-revisions` | `snap list --all`, opt-in | non | les seules révisions marquées `disabled`, retirées via Snap avec perte du retour arrière |
 
 À ce niveau, les suppressions sont **directes** : `--recycle` est accepté et inerte.
+
+Les anciennes révisions Snap ne sont jamais incluses dans un run large. Elles
+doivent être demandées explicitement, et l'application exige généralement les
+droits administrateur :
+
+```bash
+python3 scripts/winclean/clean.py --level aggressive --only snap-old-revisions
+sudo python3 scripts/winclean/clean.py --level aggressive --only snap-old-revisions --apply --yes
+```
 
 ### Modèles Ollama : sélection explicite uniquement
 

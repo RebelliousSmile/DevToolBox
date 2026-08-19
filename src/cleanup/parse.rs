@@ -5,6 +5,7 @@
 //! plan first, then the merged plan+`run`). The parser therefore splits the
 //! stream into complete documents with a brace-depth scan — never line
 //! heuristics — and deserializes the **last** complete one.
+
 #![allow(dead_code)]
 
 use super::model::{CleanupPlan, RunPayload};

@@ -127,7 +127,18 @@ class UserCacheTest(unittest.TestCase):
         home = tempdir(self)
         mkdirs(
             home / ".cache",
-            ["pip", "google-chrome", "chromium", "BraveSoftware", "vivaldi", "mozilla", "some-app"],
+            [
+                "pip",
+                "ms-playwright",
+                "ms-playwright-go",
+                "ms-playwright-mcp",
+                "google-chrome",
+                "chromium",
+                "BraveSoftware",
+                "vivaldi",
+                "mozilla",
+                "some-app",
+            ],
         )
 
         found = mod_linux_cache.discover_user_cache(env=self._env(home))

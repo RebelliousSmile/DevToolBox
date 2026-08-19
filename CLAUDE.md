@@ -51,6 +51,8 @@ Project docs, memory, specs, and plans live in `aidd_docs/`.
 @aidd_docs/memory/vcs.md
 
 <!-- read on demand, not auto-loaded -->
+- aidd_docs/memory/internal/decisions/automations-user-scope.md
+- aidd_docs/memory/internal/decisions/docker-tab-safety-and-sizes.md
 - aidd_docs/memory/internal/decisions/preferences-dedicated-view.md
 - aidd_docs/memory/internal/decisions/preferences-variant-group-rows.md
 - aidd_docs/memory/internal/decisions/winclean-separate-package.md

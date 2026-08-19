@@ -3,8 +3,9 @@
 //! Only the fields the view consumes are modeled; everything is
 //! `#[serde(default)]`-tolerant and nothing is `deny_unknown_fields`, so
 //! the script may grow fields without breaking this side.
-// Consumed by the « Nettoyage » view in a later part; keep the compiler
-// quiet until then (same convention as `storage::commands` pre-wiring).
+// Some mirrored fields are deserialized but never read by the view yet
+// (plan totals, warnings, per-candidate labels) — kept so the payload
+// shape stays faithful to the script's schema.
 #![allow(dead_code)]
 
 use serde::Deserialize;

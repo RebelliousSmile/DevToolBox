@@ -276,6 +276,25 @@ pub fn launch_captured(command: &str, sender: Sender<ActionEvent>) -> Result<u32
     Ok(pid)
 }
 
+/// Open the Windows Task Scheduler GUI (`taskschd.msc`) — the native tool
+/// for browsing *every* scheduled task, not just the user-created ones the
+/// Automations view scopes to (see `crate::ui::automations_view`). `mmc.exe`
+/// is invoked directly with the snap-in as its argument rather than going
+/// through `cmd /C start`, since MMC accepts `.msc` files as a first-class
+/// argument.
+///
+/// Not compile-verified in this dev environment (no
+/// `x86_64-pc-windows-gnu` rustup target installed here — see
+/// `crate::ui::automations_view`'s module doc for the same caveat on its
+/// Windows-only `fetch_impl`).
+pub fn open_task_scheduler() -> Result<(), String> {
+    std::process::Command::new("mmc")
+        .arg("taskschd.msc")
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Impossible d'ouvrir le Planificateur de tâches: {error}"))
+}
+
 /// Locate the DevToolBox root used to resolve bundled scripts.
 ///
 /// `DEVTOOLBOX_HOME` has priority. Otherwise, ancestors of the current working

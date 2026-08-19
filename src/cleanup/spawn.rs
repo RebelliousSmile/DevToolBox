@@ -1,7 +1,6 @@
 //! Background invocations of `clean.py`, mirroring
 //! `crate::applications::spawn_report`: one thread, one terminal event on a
 //! channel, generation counter checked by the caller's drain loop.
-#![allow(dead_code)]
 
 use super::parse::{parse_output, Payload};
 use crate::python_runtime;
