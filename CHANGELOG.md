@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-08-19
+
+### Added
+- Docker tab (Linux-only, shown when the `docker` binary is installed): local
+  dashboard listing containers (stop/remove with state-based gating), images
+  (used badge, remove by tag or id, never `--force`) and volumes (orphan badge,
+  targeted removal only, no prune); a daemon that is down shows an in-tab
+  retry message instead of hiding the tab
+- Docker tab: removal confirmations state the space reclaimed — container
+  writable layer (`docker ps -a --size`), image size with a sole-tag vs
+  multi-tag distinction, volume size via the on-demand « Calculer les
+  tailles » button (`docker system df -v` merged into the snapshot)
+- winclean: Linux dev-caches module (`mod_linux_dev`), extended Linux
+  system/package modules and registry contract coverage
+
+### Changed
+- Automations view/Linux data source: user-scope filtering refined and the
+  view aligned with the automations-user-scope decision record
+- Scroll bars switch from egui's invisible-until-hover floating style to
+  `ScrollStyle::thin()` so overflowing content is discoverable
+
+### Fixed
+- Docker view scrolls vertically (sections were unreachable below the fold)
+- Post-merge fallout from the Windows/Linux branches: duplicated
+  `open_native_tool` deduplicated, clippy/rustfmt on merged files, stale doc
+  references to the deleted `src/ui/app.rs` dropped
+
 ## [0.5.0] - 2026-08-18
 
 ### Added
