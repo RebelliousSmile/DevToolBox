@@ -23,6 +23,7 @@ pub mod automations_view;
 pub mod cleanup_view;
 pub mod command_form;
 pub mod dialogs;
+pub mod docker_view;
 pub mod egui_app;
 pub mod format;
 pub mod icon_picker;

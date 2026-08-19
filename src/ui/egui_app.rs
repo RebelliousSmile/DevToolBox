@@ -97,6 +97,7 @@ use crate::ui::automations_view::{self, AutomationRow};
 use crate::ui::cleanup_view::{self, CleanupAction, CleanupViewState, LastRun};
 use crate::ui::command_form::CommandFormWidget;
 use crate::ui::dialogs::{self, DialogKind, DialogOutcome};
+use crate::ui::docker_view::{self, DockerAction, DockerSnapshot, DockerViewState};
 use crate::ui::icon_picker;
 use crate::ui::terminal_view::{self, TerminalEvent};
 
@@ -583,6 +584,7 @@ enum ActiveView {
     Terminal,
     Automations,
     Cleanup,
+    Docker,
     Preferences,
 }
 
@@ -600,12 +602,54 @@ enum CleanupJob {
 /// [`EguiApp::resolve_pending_action`] only once the user picks "Oui". Every
 /// variant is destructive by design (this enum only ever gates destructive
 /// actions behind a blocking confirm): the `Remove*` variants delete config
-/// entries, `CleanModule` deletes a cache from disk.
+/// entries, `CleanModule` deletes a cache from disk. The four `Docker`-tab
+/// variants each carry the façade identifier (`id`/`reference`/volume
+/// `name`) alongside a displayable name, since `resolve_pending_action`
+/// needs both: the identifier to call the façade with, the name for the
+/// "in progress" and result status messages.
 enum PendingAction {
     RemoveCategory(String),
     RemoveCommand(String),
     RemoveCommandGroup(String),
     CleanModule(String),
+    StopContainer { id: String, name: String },
+    RemoveContainer { id: String, name: String },
+    RemoveImage { reference: String, name: String },
+    RemoveVolume(String),
+}
+
+/// A confirmed Docker action stored by [`EguiApp::resolve_pending_action`]
+/// instead of being run immediately — see the plan's Phase 3 task 4: a
+/// blocking `docker` call made inline while handling the confirm dialog's
+/// "Oui" click would freeze the UI before that frame's "Arrêt de …"/
+/// "Suppression de …" status text ever reaches the screen (nothing is
+/// presented until the whole frame finishes building). Storing the action
+/// here lets that frame finish rendering (`ui_content` falls through
+/// instead of returning early — see its `DialogOutcome::Accepted` arm) so
+/// the status is actually painted, then [`EguiApp::execute_deferred_docker_action`]
+/// runs the real, potentially slow call at the very start of the next
+/// frame.
+enum DeferredDockerAction {
+    StopContainer {
+        id: String,
+        name: String,
+    },
+    RemoveContainer {
+        id: String,
+        name: String,
+    },
+    RemoveImage {
+        reference: String,
+        name: String,
+    },
+    RemoveVolume {
+        name: String,
+    },
+    /// Not gated by a confirm dialog (it's not destructive) — stashed here
+    /// directly by `render_docker_view` for the same reason as the other
+    /// variants: `docker system df -v` takes ~5s on this machine, and running
+    /// it inline would freeze the UI before the "Calcul…" status text paints.
+    ComputeVolumeSizes,
 }
 
 /// The dialog currently blocking the rest of the UI (see `ui_content`'s
@@ -698,10 +742,43 @@ pub struct EguiApp {
     /// This machine's id, resolved once at startup via `platform::machine_id()`
     /// and reused on every frame instead of re-resolving per `build_display_groups` call.
     machine_id: String,
+    /// `true` when the Docker tab has a data source on this OS/machine at
+    /// all — set once at startup via `docker_view::available()` and drives
+    /// whether the "Docker" nav button is rendered at all (risk register:
+    /// "tab button rendered only when `docker_available`"). Forced directly
+    /// (private field, same module tree) in tests that need the tab either
+    /// present or absent deterministically.
+    docker_available: bool,
+    /// `None` before the first fetch (successful or not) since the tab was
+    /// last activated.
+    docker: Option<Result<DockerSnapshot, String>>,
+    /// A confirmed Docker action awaiting execution at the start of the next
+    /// frame — see [`DeferredDockerAction`]'s doc comment. Also drives
+    /// `DockerViewState::busy` while it is `Some`.
+    deferred_docker_action: Option<DeferredDockerAction>,
+    /// Same test-gating pattern as `cleanup_spawning_enabled`: kittest
+    /// harness tests never run a real `docker` command. Unlike
+    /// `cleanup_spawning_enabled` (which only skips the process *spawn*),
+    /// this also skips the post-action refetch, since that would be a real
+    /// `docker` call too.
+    docker_actions_enabled: bool,
+    /// Counts every [`EguiApp::execute_deferred_docker_action`] call that
+    /// found a deferred action to run, real call or not — the kittest
+    /// assertion "Oui triggers exactly one façade call" reads this rather
+    /// than trying to intercept `docker_view`'s free functions.
+    docker_action_invocations: u32,
 }
 
 impl EguiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // egui's default scroll bars (`ScrollStyle::floating()`) are fully
+        // transparent until the pointer hovers the scroll area's edge, so a
+        // view taller than the window gives no visual hint that more content
+        // exists below. `thin()` keeps a narrow bar visible whenever content
+        // overflows, expanding on hover.
+        cc.egui_ctx.all_styles_mut(|style| {
+            style.spacing.scroll = egui::style::ScrollStyle::thin();
+        });
         let config = storage::load().unwrap_or_else(|err| {
             log::warn!("storage::load failed ({err}); falling back to built-in defaults");
             fallback_config()
@@ -730,6 +807,7 @@ impl EguiApp {
             machine_id,
             Some(usage_service),
             true,
+            docker_view::available(),
         );
         app.refresh_applications();
         app
@@ -746,6 +824,12 @@ impl EguiApp {
     /// never depends on whatever happens to be on the machine it runs on;
     /// none of the existing harness tests use `machine_specific: true`
     /// commands, so this has no effect on them.
+    /// `docker_available` is hardcoded `false` here rather than resolved via
+    /// `docker_view::available()` (unlike `new`) so the test suite's default
+    /// behavior never depends on whether the machine running it happens to
+    /// have `docker` installed — tests that need the Docker tab present
+    /// force `app.docker_available = true` directly afterward (private
+    /// field, same module tree as this `impl` block).
     #[cfg(test)]
     fn new_for_test(config: Config, config_path: PathBuf) -> Self {
         Self::from_parts(
@@ -756,9 +840,14 @@ impl EguiApp {
             "test-machine".to_string(),
             None,
             false,
+            false,
         )
     }
 
+    // Internal construction helper called from exactly 2 sites (`new`,
+    // `new_for_test`), not part of any public API — same rationale as the
+    // `variant_command` test builder's identical allow above.
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         config: Config,
         config_path: Option<PathBuf>,
@@ -767,6 +856,7 @@ impl EguiApp {
         machine_id: String,
         usage_service: Option<UsageService>,
         report_spawning_enabled: bool,
+        docker_available: bool,
     ) -> Self {
         let (application_tx, application_rx) = std::sync::mpsc::channel();
         let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel();
@@ -811,6 +901,11 @@ impl EguiApp {
             cleanup_spawning_enabled: report_spawning_enabled,
             machine_commands,
             machine_id,
+            docker_available,
+            docker: None,
+            deferred_docker_action: None,
+            docker_actions_enabled: report_spawning_enabled,
+            docker_action_invocations: 0,
         }
     }
 
@@ -1415,7 +1510,271 @@ impl EguiApp {
                     cleanup::spawn_clean(&module, self.cleanup_generation, self.cleanup_tx.clone());
                 }
             }
+            // Docker actions never run here — a plain `docker stop` can
+            // block for several seconds, and this function runs inline
+            // while resolving the confirm dialog's "Oui" click, before that
+            // frame has finished being built. Instead: stash the action for
+            // `execute_deferred_docker_action` (which runs at the very
+            // start of the next frame) and set the "in progress" status
+            // text now — `ui_content`'s `DialogOutcome::Accepted` arm lets
+            // this frame finish rendering instead of returning early
+            // whenever a Docker action was just deferred, so this status
+            // text is genuinely painted before the next frame's freeze.
+            PendingAction::StopContainer { id, name } => {
+                let message = format!("Arrêt de {name}…");
+                self.deferred_docker_action =
+                    Some(DeferredDockerAction::StopContainer { id, name });
+                self.set_status(message, false);
+            }
+            PendingAction::RemoveContainer { id, name } => {
+                let message = format!("Suppression de {name}…");
+                self.deferred_docker_action =
+                    Some(DeferredDockerAction::RemoveContainer { id, name });
+                self.set_status(message, false);
+            }
+            PendingAction::RemoveImage { reference, name } => {
+                let message = format!("Suppression de {name}…");
+                self.deferred_docker_action =
+                    Some(DeferredDockerAction::RemoveImage { reference, name });
+                self.set_status(message, false);
+            }
+            PendingAction::RemoveVolume(name) => {
+                let message = format!("Suppression de {name}…");
+                self.deferred_docker_action = Some(DeferredDockerAction::RemoveVolume { name });
+                self.set_status(message, false);
+            }
         }
+    }
+
+    /// Runs a [`DeferredDockerAction`] stashed by `resolve_pending_action`'s
+    /// docker arms — called at the very start of every frame (see
+    /// `ui_content`), so a frame has already rendered the "in progress"
+    /// status text before this potentially blocking call happens (the plan's
+    /// Phase 3 task 4 freeze mitigation). Does nothing when there is nothing
+    /// deferred, which makes it safe to call unconditionally every frame.
+    ///
+    /// `docker_action_invocations` is incremented unconditionally so
+    /// kittest tests can assert "exactly one façade call" without needing
+    /// to intercept `docker_view`'s free functions; the real façade call
+    /// (and the success refetch, itself a real `docker` call) only happen
+    /// when `docker_actions_enabled` is `true` — `false` in every test
+    /// harness, mirroring `cleanup_spawning_enabled`.
+    fn execute_deferred_docker_action(&mut self) {
+        let Some(action) = self.deferred_docker_action.take() else {
+            return;
+        };
+        self.docker_action_invocations = self.docker_action_invocations.saturating_add(1);
+        if !self.docker_actions_enabled {
+            return;
+        }
+        // `ComputeVolumeSizes` returns a different shape (a name/size list,
+        // not `Result<(), String>`) and merges into the existing snapshot
+        // instead of refetching (a refetch would just re-fill every size
+        // back to `None`, since `docker volume ls` never reports it) — handle
+        // it separately from the other, uniformly-shaped destructive actions.
+        if matches!(action, DeferredDockerAction::ComputeVolumeSizes) {
+            match docker_view::volume_sizes() {
+                Ok(sizes) => {
+                    let sizes: HashMap<String, String> = sizes.into_iter().collect();
+                    if let Some(Ok(snapshot)) = self.docker.as_mut() {
+                        for volume in &mut snapshot.volumes {
+                            if let Some(size) = sizes.get(&volume.name) {
+                                volume.size = Some(size.clone());
+                            }
+                        }
+                    }
+                    self.set_status("Tailles des volumes calculées.", false);
+                }
+                Err(err) => self.set_status(err, true),
+            }
+            return;
+        }
+        let result = match &action {
+            DeferredDockerAction::StopContainer { id, .. } => docker_view::stop_container(id),
+            DeferredDockerAction::RemoveContainer { id, .. } => docker_view::remove_container(id),
+            DeferredDockerAction::RemoveImage { reference, .. } => {
+                docker_view::remove_image(reference)
+            }
+            DeferredDockerAction::RemoveVolume { name } => docker_view::remove_volume(name),
+            DeferredDockerAction::ComputeVolumeSizes => unreachable!("handled above"),
+        };
+        match result {
+            Ok(()) => {
+                let message = match &action {
+                    DeferredDockerAction::StopContainer { name, .. } => {
+                        format!("Conteneur {name} arrêté.")
+                    }
+                    DeferredDockerAction::RemoveContainer { name, .. } => {
+                        format!("Conteneur {name} supprimé.")
+                    }
+                    DeferredDockerAction::RemoveImage { name, .. } => {
+                        format!("Image {name} supprimée.")
+                    }
+                    DeferredDockerAction::RemoveVolume { name } => {
+                        format!("Volume {name} supprimé.")
+                    }
+                    DeferredDockerAction::ComputeVolumeSizes => unreachable!("handled above"),
+                };
+                self.set_status(message, false);
+                self.docker = Some(docker_view::fetch());
+            }
+            Err(err) => self.set_status(err, true),
+        }
+    }
+
+    /// Builds the confirm-dialog title/message for a destructive
+    /// `DockerAction` and opens it as the [`ActiveDialog`] — the actual
+    /// façade call is deferred (see `resolve_pending_action` and
+    /// `execute_deferred_docker_action`). Looks up the target row in the
+    /// last-fetched `self.docker` snapshot for its displayable name (and,
+    /// for images, to distinguish an untag from a definitive deletion via
+    /// `ImageEntry::is_untagged`) — falls back to the raw identifier if the
+    /// snapshot doesn't have it (should not normally happen: the action was
+    /// just emitted from that very snapshot's render).
+    fn open_docker_confirm(&mut self, action: DockerAction) {
+        let snapshot = self.docker.as_ref().and_then(|result| result.as_ref().ok());
+        let (title, message, on_confirm) = match action {
+            DockerAction::Refresh | DockerAction::Retry | DockerAction::ComputeVolumeSizes => {
+                unreachable!("Refresh/Retry/ComputeVolumeSizes are handled directly in render_docker_view, never opened as a confirm dialog")
+            }
+            DockerAction::StopContainer(id) => {
+                let name = snapshot
+                    .and_then(|snapshot| snapshot.containers.iter().find(|c| c.id == id))
+                    .map(|container| {
+                        if container.name.is_empty() {
+                            container.id.clone()
+                        } else {
+                            container.name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| id.clone());
+                (
+                    "Arrêter le conteneur".to_string(),
+                    format!("Le conteneur « {name} » va être arrêté (docker stop). Continuer ?"),
+                    PendingAction::StopContainer { id, name },
+                )
+            }
+            DockerAction::RemoveContainer(id) => {
+                let container =
+                    snapshot.and_then(|snapshot| snapshot.containers.iter().find(|c| c.id == id));
+                let name = container
+                    .map(|container| {
+                        if container.name.is_empty() {
+                            container.id.clone()
+                        } else {
+                            container.name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| id.clone());
+                let mut message = format!(
+                    "Le conteneur « {name} » va être définitivement supprimé (docker rm). Continuer ?"
+                );
+                // `rw_size` is empty when the CLI didn't report a size (should
+                // not normally happen with `--size`, but must not crash or
+                // print a bogus "Libérera environ ." if it ever does).
+                if let Some(rw_size) = container
+                    .map(|c| c.rw_size.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    message.push_str(&format!(
+                        " Libérera environ {rw_size} (couche d'écriture du conteneur)."
+                    ));
+                }
+                (
+                    "Supprimer le conteneur".to_string(),
+                    message,
+                    PendingAction::RemoveContainer { id, name },
+                )
+            }
+            DockerAction::RemoveImage(reference) => {
+                let image = snapshot.and_then(|snapshot| {
+                    snapshot
+                        .images
+                        .iter()
+                        .find(|i| i.rmi_reference == reference)
+                });
+                // A tagged image is only *untagged* by `docker rmi repo:tag`
+                // when other tags still point at the same image id; when this
+                // is its sole tag the image is genuinely deleted and its space
+                // reclaimed, so the wording (and the size shown) depends on
+                // how many snapshot entries share this id.
+                let other_tags_remain = image.is_some_and(|image| {
+                    snapshot.is_some_and(|snapshot| {
+                        snapshot.images.iter().filter(|i| i.id == image.id).count() > 1
+                    })
+                });
+                let (name, mut message) = match image {
+                    Some(image) if image.is_untagged() => (
+                        image.id.clone(),
+                        format!(
+                            "L'image « {} » (non taguée) va être définitivement supprimée (docker rmi). Continuer ?",
+                            image.id
+                        ),
+                    ),
+                    Some(image) if other_tags_remain => (
+                        image.identity.clone(),
+                        format!(
+                            "Le tag « {} » va être retiré de cette image (docker rmi) — elle ne sera pas supprimée car d'autres tags pointent encore vers elle. Continuer ?",
+                            image.identity
+                        ),
+                    ),
+                    Some(image) => (
+                        image.identity.clone(),
+                        format!(
+                            "L'image « {} » va être définitivement supprimée (docker rmi). Continuer ?",
+                            image.identity
+                        ),
+                    ),
+                    None => (
+                        reference.clone(),
+                        format!(
+                            "L'image « {reference} » va être supprimée (docker rmi). Continuer ?"
+                        ),
+                    ),
+                };
+                match image {
+                    Some(_) if other_tags_remain => {
+                        message.push_str(
+                            " Aucun espace ne sera libéré tant que les autres tags subsistent.",
+                        );
+                    }
+                    Some(image) => {
+                        message.push_str(&format!(
+                            " Libérera jusqu'à {} (les couches partagées avec d'autres images ne sont pas comptées).",
+                            image.size
+                        ));
+                    }
+                    None => {}
+                }
+                (
+                    "Supprimer l'image".to_string(),
+                    message,
+                    PendingAction::RemoveImage { reference, name },
+                )
+            }
+            DockerAction::RemoveVolume(name) => {
+                let volume =
+                    snapshot.and_then(|snapshot| snapshot.volumes.iter().find(|v| v.name == name));
+                let mut message = format!(
+                    "Le volume orphelin « {name} » va être définitivement supprimé (docker volume rm). Continuer ?"
+                );
+                match volume.and_then(|v| v.size.as_deref()) {
+                    Some(size) => message.push_str(&format!(" Libérera {size}.")),
+                    None => message.push_str(
+                        " Taille inconnue — le bouton « Calculer les tailles » permet de l'estimer.",
+                    ),
+                }
+                (
+                    "Supprimer le volume".to_string(),
+                    message,
+                    PendingAction::RemoveVolume(name),
+                )
+            }
+        };
+        self.active_dialog = Some(ActiveDialog {
+            kind: dialogs::confirm(title, message),
+            on_confirm: Some(on_confirm),
+        });
     }
 
     /// Open the blocking confirm dialog guarding an action deletion (Phase 2
@@ -1999,22 +2358,40 @@ impl EguiApp {
     /// top of `egui::Modal`'s own backdrop-click blocking. See
     /// `src/ui/dialogs.rs`'s module docs for the full rationale.
     fn ui_content(&mut self, ui: &mut egui::Ui) {
+        // Runs any Docker action deferred by last frame's confirm dialog
+        // *before* anything else this frame builds — see
+        // `execute_deferred_docker_action`'s doc comment. A no-op on every
+        // other frame (the common case).
+        self.execute_deferred_docker_action();
+
         if let Some(dialog) = self.active_dialog.take() {
             match dialogs::show(ui.ctx(), &dialog.kind) {
                 DialogOutcome::Pending => {
                     self.active_dialog = Some(dialog);
+                    return;
                 }
                 DialogOutcome::Accepted => {
                     if let Some(action) = dialog.on_confirm {
                         self.resolve_pending_action(action);
                     }
+                    if self.deferred_docker_action.is_none() {
+                        return;
+                    }
+                    // A Docker action was just deferred: fall through and
+                    // render the rest of this frame instead of the usual
+                    // early return, so the "in progress" status text
+                    // `resolve_pending_action` just set is actually painted
+                    // before `execute_deferred_docker_action` blocks at the
+                    // start of the next frame. `request_repaint` guarantees
+                    // that next frame happens even without further input.
+                    ui.ctx().request_repaint();
                 }
                 DialogOutcome::Dismissed => {
                     // Cancel — the pending action (if any) is simply dropped;
                     // nothing was mutated by opening the dialog.
+                    return;
                 }
             }
-            return;
         }
 
         self.drain_terminal_events();
@@ -2051,6 +2428,12 @@ impl EguiApp {
                 "Automatisations",
             );
             ui.selectable_value(&mut self.active_view, ActiveView::Cleanup, "Nettoyage");
+            // Hidden entirely (not just disabled) when the `docker` binary
+            // isn't on PATH — risk register: "tab button rendered only when
+            // `docker_available`".
+            if self.docker_available {
+                ui.selectable_value(&mut self.active_view, ActiveView::Docker, "Docker");
+            }
             ui.selectable_value(
                 &mut self.active_view,
                 ActiveView::Preferences,
@@ -2073,6 +2456,7 @@ impl EguiApp {
             ActiveView::Terminal => self.render_terminal_view(ui),
             ActiveView::Automations => self.render_automations_view(ui),
             ActiveView::Cleanup => self.render_cleanup_view(ui),
+            ActiveView::Docker => self.render_docker_view(ui),
             ActiveView::Preferences => self.render_preferences_view(ui),
         }
     }
@@ -2389,6 +2773,57 @@ impl EguiApp {
         );
         if refresh {
             self.refresh_applications();
+        }
+    }
+
+    /// « Docker » view: lazy first fetch on tab activation (Automations
+    /// pattern at `render_automations_view`), consuming `docker_view::
+    /// render`'s emitted `Vec<DockerAction>` the same way `render_cleanup_view`
+    /// consumes `Vec<CleanupAction>` — `Refresh`/`Retry` refetch directly
+    /// (read-only, never blocks meaningfully), the four destructive
+    /// variants go through `open_docker_confirm` instead of running
+    /// immediately.
+    fn render_docker_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("DevToolBox — Docker");
+
+        if let Some(status) = &self.status {
+            let color = if status.is_error {
+                egui::Color32::from_rgb(0xC4, 0x2B, 0x1C)
+            } else {
+                egui::Color32::from_rgb(0x1B, 0x5E, 0x20)
+            };
+            ui.colored_label(color, &status.text);
+        }
+
+        if self.docker.is_none() {
+            self.docker = Some(docker_view::fetch());
+        }
+
+        let (snapshot, error) = match &self.docker {
+            Some(Ok(snapshot)) => (Some(snapshot), None),
+            Some(Err(err)) => (None, Some(err.as_str())),
+            None => unreachable!("populated just above if it was None"),
+        };
+        let state = DockerViewState {
+            snapshot,
+            error,
+            busy: self.deferred_docker_action.is_some(),
+        };
+        let actions = docker_view::render(ui, &state);
+        for action in actions {
+            match action {
+                DockerAction::Refresh | DockerAction::Retry => {
+                    self.docker = Some(docker_view::fetch());
+                }
+                // Not destructive — must never go through open_docker_confirm
+                // (no confirm dialog), unlike the four Remove*/Stop* actions.
+                DockerAction::ComputeVolumeSizes => {
+                    self.deferred_docker_action = Some(DeferredDockerAction::ComputeVolumeSizes);
+                    self.set_status("Calcul des tailles des volumes…", false);
+                    ui.ctx().request_repaint();
+                }
+                destructive => self.open_docker_confirm(destructive),
+            }
         }
     }
 }
@@ -4880,6 +5315,127 @@ mod tests {
         assert!(app.cleanup_rows.is_some());
         assert!(app.cleanup_stale);
         assert_eq!(app.cleanup_error.as_deref(), Some("python introuvable"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// One removable-only container (`Exited`: `is_removable() == true`,
+    /// `is_stoppable() == false`) and nothing else, so the harness sees
+    /// exactly one enabled « Supprimer » button and no « Arrêter » — no
+    /// ambiguity about which button a bare `get_by_label` click hits.
+    fn sample_docker_snapshot() -> DockerSnapshot {
+        DockerSnapshot {
+            containers: vec![docker_view::ContainerEntry {
+                id: "c1".to_string(),
+                name: "web".to_string(),
+                image: "nginx:alpine".to_string(),
+                state: docker_view::ContainerState::Exited,
+                status: "Exited (0) 2 hours ago".to_string(),
+                rw_size: "767kB".to_string(),
+            }],
+            images: vec![],
+            volumes: vec![],
+        }
+    }
+
+    #[test]
+    fn docker_tab_hidden_when_unavailable_and_shown_when_available() {
+        let (mut app, dir) = cleanup_test_app("docker-visibility-off");
+        app.docker_available = false;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+        harness.run();
+        assert!(harness.query_by_label("Docker").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+
+        let (mut app, dir) = cleanup_test_app("docker-visibility-on");
+        app.docker_available = true;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+        harness.run();
+        assert!(harness.query_by_label("Docker").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn docker_destructive_action_confirms_and_executes_exactly_once() {
+        let (mut app, dir) = cleanup_test_app("docker-dialog");
+        app.docker_available = true;
+        // Pre-populated so the lazy `if self.docker.is_none()` fetch in
+        // `render_docker_view` never fires — the harness must not shell out
+        // to a real `docker` binary (Phase 3 acceptance criteria).
+        app.docker = Some(Ok(sample_docker_snapshot()));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Supprimer").click();
+        harness.run_steps(2);
+        assert!(matches!(
+            harness.state().active_dialog,
+            Some(ActiveDialog {
+                on_confirm: Some(PendingAction::RemoveContainer { .. }),
+                ..
+            })
+        ));
+        assert_eq!(harness.state().docker_action_invocations, 0);
+
+        // « Non » closes the dialog and executes nothing.
+        harness.get_by_label("Non").click();
+        harness.run_steps(2);
+        assert!(harness.state().active_dialog.is_none());
+        assert_eq!(harness.state().docker_action_invocations, 0);
+
+        // « Oui » only defers the action (`deferred_docker_action`) on its
+        // own frame — the same frame that paints the "Suppression de …"
+        // status — and `execute_deferred_docker_action` only actually runs
+        // it at the very start of the *next* frame (see that method's doc
+        // comment). `run_steps(1)` processes the Oui click's frame alone;
+        // the extra `harness.step()` processes the following frame where
+        // the deferred action is executed.
+        harness.get_by_label("Supprimer").click();
+        harness.run_steps(2);
+        harness.get_by_label("Oui").click();
+        harness.run_steps(1);
+        assert_eq!(harness.state().docker_action_invocations, 0);
+        harness.step();
+        assert_eq!(harness.state().docker_action_invocations, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compute_volume_sizes_never_opens_a_dialog_and_executes_exactly_once() {
+        let (mut app, dir) = cleanup_test_app("docker-compute-volume-sizes");
+        app.docker_available = true;
+        app.docker = Some(Ok(sample_docker_snapshot()));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Calculer les tailles").click();
+        // Unlike the destructive-action flow (which defers only once the
+        // user confirms a dialog, itself a later click), the click here
+        // directly stashes `deferred_docker_action` on its own frame — so a
+        // single `run_steps(1)` is enough to process that frame and still
+        // observe zero executions; the *following* frame is the one that
+        // actually runs it (see `execute_deferred_docker_action`'s doc
+        // comment: it always runs at the very start of the next frame).
+        harness.run_steps(1);
+        assert!(
+            harness.state().active_dialog.is_none(),
+            "ComputeVolumeSizes must never open a confirm dialog — it isn't destructive"
+        );
+        assert_eq!(harness.state().docker_action_invocations, 0);
+        harness.step();
+        assert_eq!(harness.state().docker_action_invocations, 1);
+        assert!(harness.state().active_dialog.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
