@@ -149,7 +149,26 @@ into `Vec<AutomationRow>`.
   that message when diagnosing a "réponse PowerShell inattendue" error;
   reproduce the raw JSON directly instead.
 
-## Per-machine command resolution
+## Docker CLI bridge (Docker tab, Linux-only)
+
+Three layers, same shape as the Automations view: `src/linux/docker.rs`
+(CLI data source, `#[cfg(target_os = "linux")]` via `src/linux/mod.rs`) →
+`src/ui/docker_view.rs` (OS-neutral shared types + cfg-gated façade + pure
+"data in, actions out" render) → `src/ui/egui_app.rs` (tab, lazy fetch,
+confirm modals). Key mechanics:
+
+- Listings use `docker ... --format '{{json .}}'` (NDJSON, one object per
+  line, tolerant parser) — **except** `docker system df -v`, which emits one
+  single JSON object with `Volumes`/`Images` arrays.
+- `run_docker(args, OperationClass)`: `Listing` (~5 s) vs `Action` (~30 s)
+  timeouts; a listing timeout/`cannot connect`/`permission denied` maps to
+  `DaemonUnreachable` (in-tab retry message), an action timeout never does.
+- **Blocking work is deferred by one frame**: clicking "Oui" (or "Calculer
+  les tailles") stores a `DeferredDockerAction` + status + repaint; the next
+  `update` executes it, so the busy status paints before the UI freezes.
+- Volume sizes are merged into the existing snapshot **by name, without a
+  refetch** — a refetch would drop them (`docker volume ls` always reports
+  `Size:"N/A"`).
 
 Some commands need a different literal launch string per machine (e.g. a
 path or app name that only exists on one host). `Command.machine_specific:
