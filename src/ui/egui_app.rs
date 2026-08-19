@@ -3479,7 +3479,7 @@ mod tests {
         // notepad's "Modifier" is the first match.
         harness
             .get_all_by_label("Modifier")
-            .nth(0)
+            .next()
             .expect("notepad's Modifier button should be present")
             .click();
         harness.run();

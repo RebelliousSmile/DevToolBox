@@ -21,19 +21,11 @@
 //! to duplicate that native tool wholesale. See
 //! `aidd_docs/memory/internal/decisions/automations-user-scope.md`.
 //!
-//! # Why this duplicates PowerShell-fetch logic instead of reusing
-//! `src/ui/app.rs::load_scheduled_tasks`
-//!
-//! That function (and `crate::windows::process::ScheduledTask`, whose shape
-//! [`AutomationRow`] mirrors field-for-field) lives in code this phase
-//! deliberately leaves untouched: `app.rs` is slated for deletion in Phase 4
-//! and is Windows-only, and this session has no `x86_64-pc-windows-gnu`
-//! rustup target installed (`rustup target add` timed out — no/slow network),
-//! so no edit to Windows-only code paths can be compile-verified here.
-//! Duplicating the small, self-contained fetch script into this new,
-//! from-scratch file keeps the (already Windows-only, already
-//! compile-unverifiable) blast radius limited to code nothing else depends
-//! on, rather than risking a working file.
+//! The PowerShell fetch script here was originally duplicated from
+//! `src/ui/app.rs::load_scheduled_tasks` (Win32 UI, deleted in Phase 4);
+//! this module is now its only home. The Windows-only paths remain
+//! compile-unverifiable on this Linux dev machine (no
+//! `x86_64-pc-windows-gnu` rustup target installed).
 
 use serde::Deserialize;
 
@@ -117,11 +109,6 @@ fn open_native_tool_impl() -> Result<(), String> {
 
 #[cfg(windows)]
 fn fetch_impl() -> Result<Vec<AutomationRow>, String> {
-    // Mirrors `src/ui/app.rs::load_scheduled_tasks`'s script shape (build a
-    // `[pscustomobject]` per task from `Get-ScheduledTask` +
-    // `Get-ScheduledTaskInfo`, then `ConvertTo-Json -Compress`), duplicated
-    // here per the module doc comment above rather than calling into
-    // `app.rs` directly.
     // Only user/third-party automations are relevant here: everything under
     // `\Microsoft\*` is OS plumbing the user neither created nor manages, and
     // it drowns the handful of rows that actually matter (~200+ system tasks
@@ -178,32 +165,6 @@ fn fetch_impl() -> Result<Vec<AutomationRow>, String> {
     Ok(Vec::new())
 }
 
-/// Open the OS-native scheduling tool: the Task Scheduler snap-in on
-/// Windows, a terminal running `systemctl list-timers` on Linux
-/// (`crate::linux::automations::open_native_tool`).
-pub fn open_native_tool() -> Result<(), String> {
-    open_native_tool_impl()
-}
-
-#[cfg(windows)]
-fn open_native_tool_impl() -> Result<(), String> {
-    std::process::Command::new("mmc")
-        .arg("taskschd.msc")
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("impossible d'ouvrir le Planificateur de tâches: {error}"))
-}
-
-#[cfg(target_os = "linux")]
-fn open_native_tool_impl() -> Result<(), String> {
-    crate::linux::automations::open_native_tool()
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-fn open_native_tool_impl() -> Result<(), String> {
-    Err("aucun outil natif de planification n'est disponible sur cet OS".to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -242,12 +203,16 @@ mod tests {
 
     #[test]
     fn builtin_windows_task_under_microsoft_folder_is_detected() {
-        assert!(is_builtin_windows_task("\\Microsoft\\Windows\\.NET Framework\\"));
+        assert!(is_builtin_windows_task(
+            "\\Microsoft\\Windows\\.NET Framework\\"
+        ));
     }
 
     #[test]
     fn builtin_windows_task_detection_is_case_insensitive() {
-        assert!(is_builtin_windows_task("\\MICROSOFT\\Windows\\UpdateOrchestrator\\"));
+        assert!(is_builtin_windows_task(
+            "\\MICROSOFT\\Windows\\UpdateOrchestrator\\"
+        ));
     }
 
     #[test]

@@ -4,7 +4,6 @@
 //! view shows one row per module. No module name is ever hardcoded — rows
 //! echo whatever names the script emits, so the same code serves the
 //! Windows and Linux module sets.
-#![allow(dead_code)]
 
 use super::model::CleanupPlan;
 use std::collections::HashMap;

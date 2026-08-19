@@ -4,7 +4,6 @@
 //! zero access to `EguiApp` state. The integration layer (Part 3) owns the
 //! channels, the confirmation dialog, and the single-command-slot guard —
 //! this module only draws and reports intents.
-#![allow(dead_code)]
 
 use eframe::egui;
 use std::collections::HashMap;
