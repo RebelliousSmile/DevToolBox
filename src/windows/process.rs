@@ -325,7 +325,9 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, LaunchError>
     }
     let working_directory = script_path.parent().map(Path::to_path_buf);
     let python = crate::python_runtime::python_for_script(&script_path);
-    let mut resolved_args = vec![script_path.display().to_string()];
+    // `-u`: unbuffered stdout/stderr — piped output is otherwise
+    // block-buffered by Python and arrives only at process exit.
+    let mut resolved_args = vec!["-u".to_string(), script_path.display().to_string()];
     resolved_args.extend(script_args.iter().cloned());
     Ok(ActionSpec {
         program: python,
@@ -478,8 +480,9 @@ mod tests {
             &temp,
         )
         .unwrap();
-        assert_eq!(spec.args[0], script.display().to_string());
-        assert_eq!(&spec.args[1..], ["config.yaml", "--only", "pro"]);
+        assert_eq!(spec.args[0], "-u");
+        assert_eq!(spec.args[1], script.display().to_string());
+        assert_eq!(&spec.args[2..], ["config.yaml", "--only", "pro"]);
         assert_eq!(spec.working_directory, Some(script_dir));
 
         let _ = std::fs::remove_dir_all(temp);

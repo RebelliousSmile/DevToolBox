@@ -24,6 +24,7 @@ pub mod cleanup_view;
 pub mod command_form;
 pub mod dialogs;
 pub mod egui_app;
+pub mod fonts;
 pub mod format;
 pub mod icon_picker;
 pub mod terminal_view;

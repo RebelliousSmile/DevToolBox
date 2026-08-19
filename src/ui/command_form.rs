@@ -246,14 +246,17 @@ impl CommandFormWidget {
                 }
 
                 // Row indices are baked into these labels (rather than
-                // reusing a bare "↑"/"↓"/"Supprimer" per row) so each
+                // reusing a bare "⬆"/"⬇"/"Supprimer" per row) so each
                 // control has a unique accessible name — both for
                 // egui_kittest's `get_by_label` in tests below and so an
-                // assistive-tech user can tell rows apart.
-                if i > 0 && ui.button(format!("↑ {}", i + 1)).clicked() {
+                // assistive-tech user can tell rows apart. ⬆/⬇ (U+2B06/2B07)
+                // rather than ↑/↓ (U+2191/2193): the plain arrows are covered
+                // by no font in the chain (see `crate::ui::fonts`) and
+                // rendered as tofu.
+                if i > 0 && ui.button(format!("⬆ {}", i + 1)).clicked() {
                     swap = Some((i, i - 1));
                 }
-                if i + 1 < len && ui.button(format!("↓ {}", i + 1)).clicked() {
+                if i + 1 < len && ui.button(format!("⬇ {}", i + 1)).clicked() {
                     swap = Some((i, i + 1));
                 }
                 // The executable row (index 0) is implicit and mandatory

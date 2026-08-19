@@ -10,16 +10,26 @@
 //! their output identically on Linux. This file re-implements the same
 //! shape (tokenize → resolve `@python` actions → spawn with piped
 //! stdout/stderr → stream lines → finished/failed) using plain
-//! `std::process::Command`, with no Windows-only spawn flags (the
-//! original's `CREATE_NO_WINDOW` suppresses a stray console window on
-//! Windows only; omitting it here is a cosmetic-only difference, not a
-//! functional one, and out of this phase's scope).
+//! `std::process::Command`. On Windows the spawn still needs
+//! `CREATE_NO_WINDOW` (`#[cfg(windows)]`-gated below): without it, a
+//! console subsystem child (python.exe…) spawned from this GUI app opens
+//! its own empty console window, and closing that window kills the child
+//! with `STATUS_CONTROL_C_EXIT` (0xC000013A) — not cosmetic, since all
+//! output is already captured by the integrated terminal.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::Sender;
+
+/// `CREATE_NO_WINDOW` — same constant as `crate::windows::process`: keeps a
+/// console-subsystem child from opening its own console window (its output
+/// is piped into the integrated terminal instead).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Buffer caps — same thresholds as `app.rs`'s `MAX_TERMINAL_LINES` /
 /// `TRIMMED_TERMINAL_LINES`.
@@ -146,7 +156,10 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, String> {
     }
     let working_directory = script_path.parent().map(Path::to_path_buf);
     let python = crate::python_runtime::python_for_script(&script_path);
-    let mut resolved_args = vec![script_path.display().to_string()];
+    // `-u`: unbuffered stdout/stderr. Piped (non-tty) output is otherwise
+    // block-buffered by Python, so a long-running script would show nothing
+    // in the integrated terminal until it exits.
+    let mut resolved_args = vec!["-u".to_string(), script_path.display().to_string()];
     resolved_args.extend(script_args.iter().cloned());
     Ok(ActionSpec {
         program: python,
@@ -201,6 +214,8 @@ pub fn launch_captured(command: &str, sender: Sender<TerminalEvent>) -> Result<u
         .args(&spec.args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    process.creation_flags(CREATE_NO_WINDOW);
     if let Some(directory) = &spec.working_directory {
         process.current_dir(directory);
     }
@@ -392,8 +407,12 @@ mod tests {
             &temp,
         )
         .unwrap();
-        assert_eq!(spec.args[0], script.display().to_string());
-        assert_eq!(&spec.args[1..], ["config.yaml", "--only", "pro"]);
+        assert_eq!(spec.args[0], "-u");
+        // Path comparison (component-wise) rather than string comparison:
+        // this resolver keeps the config's `/` separators as-is, so on
+        // Windows the resolved string mixes `\` and `/`.
+        assert_eq!(Path::new(&spec.args[1]), script.as_path());
+        assert_eq!(&spec.args[2..], ["config.yaml", "--only", "pro"]);
         assert_eq!(spec.working_directory, Some(script_dir));
         assert!(
             spec.program == "python3" || spec.program == "python",

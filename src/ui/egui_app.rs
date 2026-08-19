@@ -702,6 +702,10 @@ pub struct EguiApp {
 
 impl EguiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Extend the default font fallback chain with the full Noto Emoji
+        // font so user-picked action/category icons (🧹, 🏗️, …) don't
+        // render as tofu — see `crate::ui::fonts`.
+        crate::ui::fonts::install(&cc.egui_ctx);
         let config = storage::load().unwrap_or_else(|err| {
             log::warn!("storage::load failed ({err}); falling back to built-in defaults");
             fallback_config()
@@ -1839,7 +1843,12 @@ impl EguiApp {
                             let is_expanded = self.expanded_groups.contains(key);
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
-                                let toggle_label = if is_expanded { "▾" } else { "▸" };
+                                // ⏵/⏷ (U+23F5/23F7, emoji-icon-font) rather
+                                // than ▸/▾ (U+25B8/25BE): the small triangles
+                                // aren't covered by any font in the chain
+                                // (see `crate::ui::fonts`) and rendered as
+                                // tofu.
+                                let toggle_label = if is_expanded { "⏷" } else { "⏵" };
                                 if ui
                                     .button(toggle_label)
                                     .on_hover_text("Afficher/masquer les variantes")
@@ -4217,7 +4226,7 @@ mod tests {
         harness.run();
         harness.get_by_label("Préférences").click();
         harness.run();
-        harness.get_by_label("▸").click();
+        harness.get_by_label("⏵").click();
         harness.run();
         harness.get_by_label("★").click();
         harness.run();
@@ -4349,7 +4358,7 @@ mod tests {
         harness.run();
         harness.get_by_label("Préférences").click();
         harness.run();
-        harness.get_by_label("▸").click();
+        harness.get_by_label("⏵").click();
         harness.run();
 
         // Both variants are now visible as their own sub-rows, each with
