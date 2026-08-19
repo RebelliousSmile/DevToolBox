@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -104,6 +105,74 @@ class CleanJournalVacuumTest(unittest.TestCase):
         with mock.patch.object(mod_linux_system, "_run", return_value=None):
             with self.assertRaises(OSError):
                 mod_linux_system.clean_journal_vacuum()
+
+
+SNAP_LIST = """Name Version Rev Tracking Publisher Notes
+discord 1.0.152 302 latest/stable snapcrafters disabled
+discord 1.0.153 303 latest/stable snapcrafters -
+glab 1.112.0 6431 latest/stable gitlab-cli classic,disabled
+code 1.2.3 253 latest/stable vscode classic
+"""
+
+
+class SnapOldRevisionsTest(unittest.TestCase):
+    def test_parser_keeps_only_disabled_revisions(self) -> None:
+        self.assertEqual(
+            [("discord", "302"), ("glab", "6431")],
+            mod_linux_system.parse_disabled_snap_revisions(SNAP_LIST),
+        )
+
+    def test_discovery_prices_the_snap_files(self) -> None:
+        completed = _completed(0, SNAP_LIST)
+        with tempfile.TemporaryDirectory() as raw:
+            package_dir = Path(raw)
+            (package_dir / "discord_302.snap").write_bytes(b"x" * 20)
+            (package_dir / "glab_6431.snap").write_bytes(b"x" * 30)
+            with mock.patch.object(mod_linux_system.shutil, "which", return_value="/usr/bin/snap"):
+                with mock.patch.object(mod_linux_system, "_run_snap", return_value=completed):
+                    with mock.patch.object(mod_linux_system, "SNAP_PACKAGE_DIR", package_dir):
+                        found = mod_linux_system.discover_snap_old_revisions()
+        self.assertEqual([c.resource_id for c in found], ["discord@302", "glab@6431"])
+        self.assertEqual([c.estimated_bytes for c in found], [20, 30])
+        self.assertTrue(all(c.level is Level.AGGRESSIVE and c.no_undo for c in found))
+
+    def test_clean_uses_revision_and_purge_for_each_candidate(self) -> None:
+        candidates = [
+            mod_linux_system.CleanCandidate(
+                module="snap-old-revisions",
+                path=None,
+                label="old",
+                estimated_bytes=None,
+                level=Level.AGGRESSIVE,
+                reason="old",
+                resource_id="discord@302",
+            )
+        ]
+        with mock.patch.object(mod_linux_system, "_run_snap", return_value=_completed(0)) as run:
+            result = mod_linux_system.clean_snap_old_revisions(candidates=candidates)
+        run.assert_called_once_with(
+            ("snap", "remove", "discord", "--revision=302", "--purge")
+        )
+        self.assertEqual([r.resource_id for r in result.completed_resources], ["discord@302"])
+
+    def test_clean_reports_a_revision_failure_without_stopping_the_batch(self) -> None:
+        candidates = [
+            mod_linux_system.CleanCandidate(
+                module="snap-old-revisions",
+                path=None,
+                label="old",
+                estimated_bytes=None,
+                level=Level.AGGRESSIVE,
+                reason="old",
+                resource_id="discord@302",
+            )
+        ]
+        with mock.patch.object(
+            mod_linux_system, "_run_snap", return_value=_completed(1, stderr="permission denied")
+        ):
+            result = mod_linux_system.clean_snap_old_revisions(candidates=candidates)
+        self.assertEqual(result.operation_failures[0].resource_id, "discord@302")
+        self.assertIn("permission denied", result.operation_failures[0].reason)
 
 
 if __name__ == "__main__":  # pragma: no cover

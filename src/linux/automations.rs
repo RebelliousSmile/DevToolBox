@@ -25,6 +25,17 @@
 //! dependency; timestamp formatting is done by hand (a standard
 //! days-since-epoch civil-calendar conversion) rather than adding a
 //! date/time crate, consistent with this Part's Stack section.
+//!
+//! # User scope
+//!
+//! `fetch()` drops timers whose unit file is package-provided
+//! (`FragmentPath` under `/usr/lib/systemd/system` or its Debian/Ubuntu
+//! `/lib` symlink alias — see [`is_package_provided_category`]) — the
+//! Linux side of the same "user-created automations only" scope as
+//! `automations_view::is_builtin_windows_task` on Windows. A unit hand-
+//! placed under `/etc/systemd/system` (the conventional local-admin/
+//! user-added location) is kept. See
+//! `aidd_docs/memory/internal/decisions/automations-user-scope.md`.
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -77,7 +88,37 @@ pub fn fetch() -> Result<Vec<AutomationRow>, String> {
     let entries: Vec<TimerEntry> = serde_json::from_str(trimmed)
         .map_err(|error| format!("réponse systemctl inattendue: {error}"))?;
 
-    Ok(entries.into_iter().map(build_row).collect())
+    Ok(entries
+        .into_iter()
+        .map(build_row)
+        .filter(|row| !is_package_provided_category(&row.category))
+        .collect())
+}
+
+/// `true` when `category` (the parent directory of a unit's `FragmentPath`,
+/// e.g. `/lib/systemd/system`) is a package-managed systemd unit directory
+/// rather than the conventional local/admin-added one
+/// (`/etc/systemd/system`). Pure string logic, no `systemctl` call — kept
+/// separate from [`build_row`] so it stays directly unit-testable with
+/// synthetic paths, independent of what units actually exist on the host
+/// running the tests.
+pub(crate) fn is_package_provided_category(category: &str) -> bool {
+    category.starts_with("/usr/lib/systemd/system") || category.starts_with("/lib/systemd/system")
+}
+
+/// Open a terminal pre-loaded with `systemctl list-timers --all` — the
+/// closest Linux has to Windows' Task Scheduler GUI for browsing *every*
+/// timer (not just the user-created ones `fetch()` scopes to). Spawns
+/// `gnome-terminal` directly, matching this codebase's existing convention
+/// for the bundled "Terminal" action (`config/default.linux.json`'s
+/// `terminal` command) rather than probing a fallback chain of terminal
+/// emulators that may not be installed.
+pub fn open_native_tool() -> Result<(), String> {
+    std::process::Command::new("gnome-terminal")
+        .args(["--", "bash", "-c", "systemctl list-timers --all; exec bash"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Impossible d'ouvrir gnome-terminal: {error}"))
 }
 
 fn build_row(entry: TimerEntry) -> AutomationRow {
@@ -362,42 +403,71 @@ mod tests {
     // shows `apt-daily.timer` on this Ubuntu 22.04.5 LTS system, and
     // `systemctl show apt-daily.timer -p Description,ActiveState,SubState`
     // returns "Daily apt download activities" / "active" / "waiting".
+    //
+    // This drives `build_row` directly rather than the public `fetch()`:
+    // apt-daily.timer is package-provided
+    // (`/lib/systemd/system/apt-daily.timer` on this system) and is now
+    // deliberately filtered out of `fetch()`'s user-scoped results (see the
+    // module doc's "User scope" section and the test below) — the
+    // enrichment behavior this test guards (real field population from
+    // `systemctl show`) is orthogonal to that filter.
 
     #[test]
-    fn real_systemctl_fetch_lists_apt_daily_timer_with_populated_fields() {
+    fn real_build_row_populates_fields_for_apt_daily_timer() {
+        let row = build_row(TimerEntry {
+            unit: "apt-daily.timer".to_string(),
+            next: None,
+            last: None,
+            activates: "apt-daily.service".to_string(),
+        });
+
+        assert_eq!(row.name, "apt-daily.timer");
+        assert!(
+            row.state.contains("active"),
+            "expected an active/waiting state, got {:?}",
+            row.state
+        );
+        assert!(
+            row.author.to_lowercase().contains("apt"),
+            "expected apt-daily.timer's Description to mention apt, got {:?}",
+            row.author
+        );
+        assert!(
+            is_package_provided_category(&row.category),
+            "expected apt-daily.timer's category ({:?}) to be package-provided",
+            row.category
+        );
+    }
+
+    // --- User-scope filtering (real machine) -------------------------------
+
+    #[test]
+    fn is_package_provided_category_classifies_known_prefixes() {
+        assert!(is_package_provided_category(
+            "/usr/lib/systemd/system"
+        ));
+        assert!(is_package_provided_category("/lib/systemd/system"));
+        assert!(!is_package_provided_category("/etc/systemd/system"));
+        assert!(!is_package_provided_category(""));
+    }
+
+    #[test]
+    fn real_fetch_excludes_apt_daily_timer_as_package_provided() {
         let rows = fetch().expect(
             "systemctl must be present and list-timers --output=json must succeed on this \
              Ubuntu 22.04.5 LTS reference system",
         );
         assert!(
-            !rows.is_empty(),
-            "expected at least one real systemd timer, got zero rows"
-        );
-
-        let apt_daily = rows
-            .iter()
-            .find(|row| row.name == "apt-daily.timer")
-            .unwrap_or_else(|| {
-                panic!(
-                    "expected 'apt-daily.timer' among real fetched rows: {:?}",
-                    rows.iter().map(|r| &r.name).collect::<Vec<_>>()
-                )
-            });
-
-        assert_ne!(apt_daily.next_run, "", "next_run must be populated");
-        assert_ne!(
-            apt_daily.next_run, "n/a",
-            "apt-daily.timer has a real next run"
+            !rows.iter().any(|row| row.name == "apt-daily.timer"),
+            "apt-daily.timer is package-provided and must be filtered out of fetch()"
         );
         assert!(
-            apt_daily.state.contains("active"),
-            "expected an active/waiting state, got {:?}",
-            apt_daily.state
-        );
-        assert!(
-            apt_daily.author.to_lowercase().contains("apt"),
-            "expected apt-daily.timer's Description to mention apt, got {:?}",
-            apt_daily.author
+            rows.iter()
+                .all(|row| !is_package_provided_category(&row.category)),
+            "fetch() must never return a package-provided automation: {:?}",
+            rows.iter()
+                .map(|r| (&r.name, &r.category))
+                .collect::<Vec<_>>()
         );
     }
 

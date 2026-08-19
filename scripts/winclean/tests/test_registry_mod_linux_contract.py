@@ -36,7 +36,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import mod_linux_pkg, platform_paths, registry_mod  # noqa: E402
+from scripts.winclean import (  # noqa: E402
+    mod_linux_dev,
+    mod_linux_pkg,
+    platform_paths,
+    registry_mod,
+)
 from scripts.winclean.common import (  # noqa: E402
     DISCOVERY_FIXED,
     DISCOVERY_PATHLESS,
@@ -45,38 +50,47 @@ from scripts.winclean.common import (  # noqa: E402
 
 _LINUX_MODULE_GLOB = "mod_linux_*.py"
 
-#: Les six modules Linux enregistrés en Phase 2/3. Comparée par égalité
+#: Les modules Linux enregistrés. Comparée par égalité
 #: stricte à `set(registry_mod.MODULES)` restreint à ces noms - une table
 #: vide ou partielle validerait vacuously n'importe quel enregistrement.
 EXPECTED_DISCOVERY_LINUX: dict[str, str] = {
+    "npm-cache-linux": DISCOVERY_FIXED,
     "pip-cache-linux": DISCOVERY_FIXED,
     "pnpm-store-linux": DISCOVERY_FIXED,
     "apt-cache": DISCOVERY_FIXED,
+    "playwright-browsers-linux": DISCOVERY_FIXED,
     "browser-cache-linux": DISCOVERY_FIXED,
     "user-cache-linux": DISCOVERY_FIXED,
     # Seul module Linux `pathless` : sa commande de suppression ne porte pas
     # sur un chemin, comme `docker-light` côté Windows.
     "journal-vacuum": DISCOVERY_PATHLESS,
+    "snap-old-revisions": DISCOVERY_FIXED,
 }
 
 EXPECTED_PROC_GUARD_LINUX: dict[str, str | None] = {
+    "npm-cache-linux": None,
     "pip-cache-linux": None,
     "pnpm-store-linux": None,
     "apt-cache": None,
+    "playwright-browsers-linux": None,
     # `warn-only`, pas `warn-and-skip` : un navigateur ouvert tient ses
     # fichiers de cache ouverts, il ne réécrit pas l'arbre supprimé.
     "browser-cache-linux": PROC_GUARD_WARN_ONLY,
     "user-cache-linux": None,
     "journal-vacuum": None,
+    "snap-old-revisions": None,
 }
 
 EXPECTED_NEEDS_NETWORK_LINUX: dict[str, bool] = {
+    "npm-cache-linux": True,
     "pip-cache-linux": True,
     "pnpm-store-linux": True,
     "apt-cache": True,
+    "playwright-browsers-linux": True,
     "browser-cache-linux": False,
     "user-cache-linux": False,
     "journal-vacuum": False,
+    "snap-old-revisions": False,
 }
 
 
@@ -177,19 +191,23 @@ class TestLinuxNeedsNetworkNeverSelfStamped(unittest.TestCase):
     def test_a_linux_discover_function_never_sets_the_field_itself(self) -> None:
         home = _tempdir(self)
         (home / ".cache" / "pip").mkdir(parents=True)
+        (home / ".npm").mkdir()
         (home / ".local" / "share" / "pnpm" / "store").mkdir(parents=True)
+        (home / ".cache" / "ms-playwright").mkdir()
         env = {"HOME": str(home)}
 
         with mock.patch.object(mod_linux_pkg, "which", return_value=None):
             pip_found = mod_linux_pkg.discover_cache("pip-cache-linux", env=env)
+            npm_found = mod_linux_pkg.discover_cache("npm-cache-linux", env=env)
             pnpm_found = mod_linux_pkg.discover_cache("pnpm-store-linux", env=env)
+        playwright_found = mod_linux_dev.discover_playwright_browsers(env=env)
 
         archives = _tempdir(self)
         (archives / "some.deb").write_bytes(b"x")
         with mock.patch.object(platform_paths, "APT_ARCHIVES_DIR", archives):
             apt_found = mod_linux_pkg.discover_apt_archives()
 
-        found = pip_found + pnpm_found + apt_found
+        found = npm_found + pip_found + pnpm_found + playwright_found + apt_found
         self.assertTrue(found, "aucun candidat rendu - le test ne réfute rien")
         for candidate in found:
             with self.subTest(module=candidate.module):

@@ -84,12 +84,15 @@ EXPECTED_DISCOVERY: dict[str, str] = {
     # documenté, et reste `fixed` : le critère est que `--root` ne le borne pas.
     "recycle-bin": DISCOVERY_FIXED,
     "package-cache": DISCOVERY_FIXED,
+    "npm-cache-linux": DISCOVERY_FIXED,
     "pip-cache-linux": DISCOVERY_FIXED,
     "pnpm-store-linux": DISCOVERY_FIXED,
     "apt-cache": DISCOVERY_FIXED,
+    "playwright-browsers-linux": DISCOVERY_FIXED,
     "browser-cache-linux": DISCOVERY_FIXED,
     "user-cache-linux": DISCOVERY_FIXED,
     "journal-vacuum": DISCOVERY_PATHLESS,
+    "snap-old-revisions": DISCOVERY_FIXED,
     "ollama-models": DISCOVERY_PATHLESS,
 }
 
@@ -115,12 +118,15 @@ EXPECTED_PROC_GUARD: dict[str, str | None] = {
     # corbeille n'a pas de propriétaire nommé qu'on saurait interroger.
     "recycle-bin": None,
     "package-cache": None,
+    "npm-cache-linux": None,
     "pip-cache-linux": None,
     "pnpm-store-linux": None,
     "apt-cache": None,
+    "playwright-browsers-linux": None,
     "browser-cache-linux": PROC_GUARD_WARN_ONLY,
     "user-cache-linux": None,
     "journal-vacuum": None,
+    "snap-old-revisions": None,
     "ollama-models": None,
 }
 
@@ -148,17 +154,21 @@ EXPECTED_NEEDS_NETWORK: dict[str, bool] = {
     # ne se recharge automatiquement, donc `--offline` n'a rien à protéger ici.
     "recycle-bin": False,
     "package-cache": False,
+    "npm-cache-linux": True,
     "pip-cache-linux": True,
     "pnpm-store-linux": True,
     "apt-cache": True,
+    "playwright-browsers-linux": True,
     "browser-cache-linux": False,
     "user-cache-linux": False,
     "journal-vacuum": False,
+    "snap-old-revisions": False,
     "ollama-models": True,
 }
 
 EXPECTED_OPT_IN: dict[str, bool] = {
-    name: name == "ollama-models" for name in EXPECTED_DISCOVERY
+    name: name in {"ollama-models", "snap-old-revisions"}
+    for name in EXPECTED_DISCOVERY
 }
 
 

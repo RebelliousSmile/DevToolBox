@@ -34,7 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.winclean import platform_paths, procs  # noqa: E402
+from scripts.winclean import mod_linux_dev, platform_paths, procs  # noqa: E402
 from scripts.winclean.common import (  # noqa: E402
     CleanCandidate,
     Level,
@@ -214,6 +214,7 @@ def discover_browser_cache(
 ALREADY_COVERED_CACHE_NAMES: frozenset[str] = frozenset(
     {
         "pip",
+        *mod_linux_dev.PLAYWRIGHT_CACHE_NAMES,
         "google-chrome",
         "chromium",
         "BraveSoftware",

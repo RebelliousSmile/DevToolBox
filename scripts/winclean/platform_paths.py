@@ -1,8 +1,9 @@
 """Résolution de chemins Linux, partagée par les modules `mod_linux_*.py`.
 
-Unique site de résolution XDG pour ce paquet : les quatre modules Linux
-(`mod_linux_pkg.py`, `mod_linux_cache.py`, `mod_linux_system.py`,
-`trash_linux.py`) lisent `cache_home()`/`data_home()`/`trash_*_dir()` d'ici
+Unique site de résolution XDG pour ce paquet : les modules Linux
+(`mod_linux_dev.py`, `mod_linux_pkg.py`, `mod_linux_cache.py`,
+`mod_linux_system.py`, `trash_linux.py`) lisent
+`cache_home()`/`data_home()`/`trash_*_dir()` d'ici
 plutôt que de relire `$XDG_*`/`$HOME` chacun de son côté - la même raison qui a
 fait de `registry_mod.py` l'unique site de vérité des trois tables déclarées de
 la partie Windows.

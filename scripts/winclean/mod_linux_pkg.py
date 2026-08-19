@@ -83,6 +83,14 @@ class CacheSpec:
 
 
 CACHE_SPECS: dict[str, CacheSpec] = {
+    "npm-cache-linux": CacheSpec(
+        module="npm-cache-linux",
+        label="cache npm",
+        reason="re-téléchargé par `npm install`",
+        tool=("npm", "config", "get", "cache"),
+        fallback_base=platform_paths.home,
+        fallback_suffix=".npm",
+    ),
     "pip-cache-linux": CacheSpec(
         module="pip-cache-linux",
         label="cache pip",

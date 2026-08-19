@@ -74,6 +74,14 @@ class TestResolveCachePath(unittest.TestCase):
             )
         self.assertEqual(resolved, Path("/home/someone/.local/share/pnpm/store"))
 
+    def test_npm_falls_back_to_its_home_dot_directory(self) -> None:
+        spec = mod_linux_pkg.CACHE_SPECS["npm-cache-linux"]
+        with mock.patch.object(mod_linux_pkg, "_ask_tool", return_value=None):
+            resolved = mod_linux_pkg.resolve_cache_path(
+                spec, env={"HOME": "/home/someone"}
+            )
+        self.assertEqual(resolved, Path("/home/someone/.npm"))
+
     def test_no_base_at_all_yields_no_path(self) -> None:
         spec = mod_linux_pkg.CACHE_SPECS["pip-cache-linux"]
         with mock.patch.object(mod_linux_pkg, "_ask_tool", return_value=None):
