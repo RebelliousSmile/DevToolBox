@@ -85,6 +85,7 @@ use eframe::egui;
 use crate::applications::{
     self, RecommendationReport, ReportEvent, SystemProcessProvider, UsageService,
 };
+use crate::cleanup::{self, CleanupEvent, ModuleRow, Payload};
 use crate::icons::backend::IconBackend;
 use crate::icons::egui_backend::EguiIconBackend;
 #[cfg(not(target_os = "linux"))]
@@ -93,6 +94,7 @@ use crate::icons::{decode_resize_file, icons_dirs, IconResolution};
 use crate::storage::{self, CommandResolution, Config, MachineCommands, StorageError};
 use crate::ui::applications_view::{self, ApplicationFilters};
 use crate::ui::automations_view::{self, AutomationRow};
+use crate::ui::cleanup_view::{self, CleanupAction, CleanupViewState, LastRun};
 use crate::ui::command_form::CommandFormWidget;
 use crate::ui::dialogs::{self, DialogKind, DialogOutcome};
 use crate::ui::icon_picker;
@@ -196,12 +198,13 @@ fn resolution_fields(
 }
 
 /// Pure click-handling guard for a card body click: a card can only launch
-/// if it is configured and no other card launch is already in flight (one
-/// card launch at a time — see the `action_running` field doc). Kept as a
-/// free function, independent of `EguiApp`, so the concurrency guard is
-/// directly unit-testable without building a full app/harness.
-fn can_launch_card(is_configured: bool, action_running: &Option<String>) -> bool {
-    is_configured && action_running.is_none()
+/// if it is configured and no other command is already in flight — card
+/// launch, Terminal command or cleanup run alike (one command at a time,
+/// see [`EguiApp::command_busy`]). Kept as a free function, independent of
+/// `EguiApp`, so the concurrency guard is directly unit-testable without
+/// building a full app/harness.
+fn can_launch_card(is_configured: bool, command_busy: bool) -> bool {
+    is_configured && !command_busy
 }
 
 /// Groups commands for [`partition_by_variant_group`]: every command with a
@@ -579,20 +582,30 @@ enum ActiveView {
     Actions,
     Terminal,
     Automations,
-    Applications,
+    Cleanup,
     Preferences,
+}
+
+/// What the background `clean.py` thread is currently doing, if anything —
+/// `Analyze` drives the Bibliothèques spinner, `Clean` names the module so
+/// a failure message can cite it. Either state makes [`EguiApp::command_busy`]
+/// true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CleanupJob {
+    Analyze,
+    Clean(String),
 }
 
 /// An action deferred behind a confirm dialog — applied by
 /// [`EguiApp::resolve_pending_action`] only once the user picks "Oui". Every
-/// variant is a removal by design (this enum only ever gates destructive
-/// actions behind a blocking confirm), so the shared `Remove` prefix is
-/// intentional, not a naming smell.
-#[allow(clippy::enum_variant_names)]
+/// variant is destructive by design (this enum only ever gates destructive
+/// actions behind a blocking confirm): the `Remove*` variants delete config
+/// entries, `CleanModule` deletes a cache from disk.
 enum PendingAction {
     RemoveCategory(String),
     RemoveCommand(String),
     RemoveCommandGroup(String),
+    CleanModule(String),
 }
 
 /// The dialog currently blocking the rest of the UI (see `ui_content`'s
@@ -658,6 +671,25 @@ pub struct EguiApp {
     application_selected: Option<String>,
     usage_service: Option<UsageService>,
     report_spawning_enabled: bool,
+    /// `None` when no `clean.py` run is in flight; see [`CleanupJob`].
+    cleanup_job: Option<CleanupJob>,
+    /// `None` before the first successful analysis.
+    cleanup_rows: Option<Vec<ModuleRow>>,
+    cleanup_error: Option<String>,
+    /// Rows survive a failed re-analysis but are flagged as coming from the
+    /// last successful plan.
+    cleanup_stale: bool,
+    /// Guards against a stale thread's event overwriting a newer run's
+    /// state — same pattern as `application_generation`.
+    cleanup_generation: u64,
+    cleanup_tx: Sender<CleanupEvent>,
+    cleanup_rx: Receiver<CleanupEvent>,
+    /// Last `--apply` outcome per module name, feeding the row badges and
+    /// the measured-size refresh (no full re-analysis after a clean).
+    cleanup_last_runs: HashMap<String, LastRun>,
+    /// Same test-gating pattern as `report_spawning_enabled`: kittest
+    /// harness tests never spawn a real python process.
+    cleanup_spawning_enabled: bool,
     /// Per-machine command overrides, loaded once at startup (Part 3) via
     /// `storage::load_machine_commands_from(platform::machine_commands_path())`.
     /// A missing file or load error both fall back to an empty map — this
@@ -737,6 +769,7 @@ impl EguiApp {
         report_spawning_enabled: bool,
     ) -> Self {
         let (application_tx, application_rx) = std::sync::mpsc::channel();
+        let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel();
         Self {
             config,
             config_path,
@@ -767,8 +800,113 @@ impl EguiApp {
             application_selected: None,
             usage_service,
             report_spawning_enabled,
+            cleanup_job: None,
+            cleanup_rows: None,
+            cleanup_error: None,
+            cleanup_stale: false,
+            cleanup_generation: 0,
+            cleanup_tx,
+            cleanup_rx,
+            cleanup_last_runs: HashMap::new(),
+            cleanup_spawning_enabled: report_spawning_enabled,
             machine_commands,
             machine_id,
+        }
+    }
+
+    /// The single-command-slot guard (brief decision: one external command
+    /// at a time, whatever launched it — Actions card, Terminal, or a
+    /// `clean.py` run).
+    fn command_busy(&self) -> bool {
+        self.action_running.is_some() || self.terminal_running || self.cleanup_job.is_some()
+    }
+
+    fn start_cleanup_analysis(&mut self) {
+        self.cleanup_generation = self.cleanup_generation.saturating_add(1);
+        self.cleanup_job = Some(CleanupJob::Analyze);
+        if self.cleanup_spawning_enabled {
+            cleanup::spawn_analyze(self.cleanup_generation, self.cleanup_tx.clone());
+        }
+    }
+
+    /// Opens the blocking confirm dialog for `Nettoyer` on a module row —
+    /// the spawn itself only happens in `resolve_pending_action` on "Oui".
+    fn request_clean_module(&mut self, module: String) {
+        let Some(row) = self
+            .cleanup_rows
+            .as_ref()
+            .and_then(|rows| rows.iter().find(|row| row.module == module))
+        else {
+            return;
+        };
+        let size = cleanup_view::display_size(
+            row,
+            self.cleanup_last_runs.get(&module).map(|last| &last.result),
+        );
+        let mut message = format!("Supprimer le cache « {} » ({size}) ?", row.module);
+        const MAX_PATHS: usize = 3;
+        for path in row.paths.iter().take(MAX_PATHS) {
+            message.push_str("\n• ");
+            message.push_str(path);
+        }
+        if row.paths.len() > MAX_PATHS {
+            message.push_str(&format!(
+                "\n… et {} autres chemins",
+                row.paths.len() - MAX_PATHS
+            ));
+        }
+        if row.needs_network {
+            message.push_str("\nRe-téléchargement requis pour reconstituer ce cache.");
+        }
+        self.active_dialog = Some(ActiveDialog {
+            kind: dialogs::confirm("Nettoyer ce module ?", message),
+            on_confirm: Some(PendingAction::CleanModule(module)),
+        });
+    }
+
+    fn drain_cleanup_events(&mut self) {
+        let mut events = Vec::new();
+        while let Ok(event) = self.cleanup_rx.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            if event.generation != self.cleanup_generation {
+                continue;
+            }
+            let finished_job = self.cleanup_job.take();
+            match event.result {
+                Ok(Payload::Plan(plan)) => {
+                    self.cleanup_rows = Some(cleanup::module_rows(&plan));
+                    self.cleanup_error = None;
+                    self.cleanup_stale = false;
+                }
+                Ok(Payload::Applied { run, .. }) => {
+                    let interrupted = run.is_interrupted();
+                    for result in run.results {
+                        self.cleanup_last_runs.insert(
+                            result.module.clone(),
+                            LastRun {
+                                result,
+                                interrupted,
+                            },
+                        );
+                    }
+                    if interrupted {
+                        self.set_status("Nettoyage interrompu avant la fin.", true);
+                    }
+                }
+                Err(error) => match finished_job {
+                    Some(CleanupJob::Clean(module)) => {
+                        self.set_status(format!("Échec du nettoyage de {module} : {error}"), true);
+                    }
+                    _ => {
+                        self.cleanup_error = Some(error);
+                        if self.cleanup_rows.is_some() {
+                            self.cleanup_stale = true;
+                        }
+                    }
+                },
+            }
         }
     }
 
@@ -963,7 +1101,7 @@ impl EguiApp {
         // unconfigured card, so `card.is_configured` is redundant with
         // `body_clicked` here — kept explicit as the same guard
         // `can_launch_card` exposes for its pure unit test.
-        if body_clicked && can_launch_card(card.is_configured, &self.action_running) {
+        if body_clicked && can_launch_card(card.is_configured, self.command_busy()) {
             self.launch_command(&card.command_id, &card.command);
         }
     }
@@ -1031,7 +1169,7 @@ impl EguiApp {
                 }
 
                 ui.add_enabled_ui(
-                    can_launch_card(selected_is_configured, &self.action_running),
+                    can_launch_card(selected_is_configured, self.command_busy()),
                     |ui| {
                         if ui.button("Lancer").clicked() {
                             launch_clicked = true;
@@ -1044,7 +1182,7 @@ impl EguiApp {
         if let Some(variant_id) = requested_variant {
             self.selected_variant.insert(group_key, variant_id);
         }
-        if launch_clicked && can_launch_card(selected_is_configured, &self.action_running) {
+        if launch_clicked && can_launch_card(selected_is_configured, self.command_busy()) {
             self.launch_command(&selected_command_id, &selected_command);
         }
     }
@@ -1262,6 +1400,19 @@ impl EguiApp {
                         Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
                     },
                     Err(err) => self.set_status(err.to_string(), true),
+                }
+            }
+            PendingAction::CleanModule(module) => {
+                // Re-check the single-command slot: another command may have
+                // started while the dialog was open (risk register, part 3).
+                if self.command_busy() {
+                    self.set_status("Une autre commande est en cours — nettoyage annulé.", true);
+                    return;
+                }
+                self.cleanup_generation = self.cleanup_generation.saturating_add(1);
+                self.cleanup_job = Some(CleanupJob::Clean(module.clone()));
+                if self.cleanup_spawning_enabled {
+                    cleanup::spawn_clean(&module, self.cleanup_generation, self.cleanup_tx.clone());
                 }
             }
         }
@@ -1869,6 +2020,13 @@ impl EguiApp {
         self.drain_terminal_events();
         self.drain_action_events();
         self.drain_application_events();
+        self.drain_cleanup_events();
+        if self.cleanup_job.is_some() {
+            // Same polling rationale as `terminal_running` below: the
+            // cleanup thread's events only land on a repaint.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if self.terminal_running {
             // Keep polling for output while a command is in flight, even if
             // the user has switched away from the Terminal view.
@@ -1892,11 +2050,7 @@ impl EguiApp {
                 ActiveView::Automations,
                 "Automatisations",
             );
-            ui.selectable_value(
-                &mut self.active_view,
-                ActiveView::Applications,
-                "Applications",
-            );
+            ui.selectable_value(&mut self.active_view, ActiveView::Cleanup, "Nettoyage");
             ui.selectable_value(
                 &mut self.active_view,
                 ActiveView::Preferences,
@@ -1918,7 +2072,7 @@ impl EguiApp {
             ActiveView::Actions => self.render_actions_view(ui),
             ActiveView::Terminal => self.render_terminal_view(ui),
             ActiveView::Automations => self.render_automations_view(ui),
-            ActiveView::Applications => self.render_applications_view(ui),
+            ActiveView::Cleanup => self.render_cleanup_view(ui),
             ActiveView::Preferences => self.render_preferences_view(ui),
         }
     }
@@ -2098,19 +2252,31 @@ impl EguiApp {
                 .labelled_by(command_label.id);
 
             if ui
-                .add_enabled(!self.terminal_running, egui::Button::new("Lancer"))
+                .add_enabled(!self.command_busy(), egui::Button::new("Lancer"))
                 .clicked()
             {
                 self.launch_terminal_command();
             }
-
-            if self.terminal_running {
-                ui.label("(en cours…)");
-            }
         });
+
+        // Busy indicator on its own line, in the same green as success
+        // status messages so it stands out from the form. Both launch paths
+        // land their output here, so both drive it: `terminal_running`
+        // (input field above) and `action_running` (Actions card).
+        if self.terminal_running || self.action_running.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.colored_label(
+                    egui::Color32::from_rgb(0x1B, 0x5E, 0x20),
+                    "commande en cours d'exécution…",
+                );
+            });
+        }
         ui.separator();
 
-        egui::ScrollArea::vertical()
+        // `both()`: command output lines don't wrap, so long lines would be
+        // clipped past the right edge without a horizontal scrollbar.
+        egui::ScrollArea::both()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -2161,29 +2327,58 @@ impl EguiApp {
                 ui.label(automations_placeholder_message());
             }
             Some(Ok(rows)) => {
-                egui::Grid::new("automations-grid")
-                    .striped(true)
+                // `both()`: the row count and the TaskPath-style category
+                // column can both exceed the window; grid cells don't wrap,
+                // so without scrollbars the overflow is clipped invisibly.
+                egui::ScrollArea::both()
+                    .id_salt("automations-scroll")
                     .show(ui, |ui| {
-                        ui.strong("Nom");
-                        ui.strong("Catégorie");
-                        ui.strong("Prochaine exécution");
-                        ui.strong("État");
-                        ui.strong("Auteur");
-                        ui.end_row();
-                        for row in rows {
-                            ui.label(&row.name);
-                            ui.label(&row.category);
-                            ui.label(&row.next_run);
-                            ui.label(&row.state);
-                            ui.label(&row.author);
-                            ui.end_row();
-                        }
+                        egui::Grid::new("automations-grid")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Nom");
+                                ui.strong("Catégorie");
+                                ui.strong("Prochaine exécution");
+                                ui.strong("État");
+                                ui.strong("Auteur");
+                                ui.end_row();
+                                for row in rows {
+                                    ui.label(&row.name);
+                                    ui.label(&row.category);
+                                    ui.label(&row.next_run);
+                                    ui.label(&row.state);
+                                    ui.label(&row.author);
+                                    ui.end_row();
+                                }
+                            });
                     });
             }
         }
     }
 
-    fn render_applications_view(&mut self, ui: &mut egui::Ui) {
+    /// « Nettoyage » view: the « Bibliothèques » section on top — its rows
+    /// only exist after an explicit Analyser click, so they must own the
+    /// first screenful — the installed-apps report below.
+    fn render_cleanup_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("DevToolBox — Nettoyage");
+
+        let state = CleanupViewState {
+            rows: self.cleanup_rows.as_deref(),
+            error: self.cleanup_error.as_deref(),
+            analyzing: matches!(self.cleanup_job, Some(CleanupJob::Analyze)),
+            busy: self.command_busy(),
+            last_runs: &self.cleanup_last_runs,
+            stale: self.cleanup_stale,
+        };
+        let actions = cleanup_view::render(ui, &state);
+        for action in actions {
+            match action {
+                CleanupAction::Analyze => self.start_cleanup_analysis(),
+                CleanupAction::Clean(module) => self.request_clean_module(module),
+            }
+        }
+
+        ui.separator();
         let refresh = applications_view::render(
             ui,
             self.application_report.as_ref(),
@@ -3688,19 +3883,18 @@ mod tests {
     // -- Card click-to-launch tests (this phase's acceptance criteria) -------
 
     #[test]
-    fn can_launch_card_blocks_any_click_while_another_launch_is_in_flight() {
-        let another_launch = Some("some-other-command".to_string());
+    fn can_launch_card_blocks_any_click_while_another_command_is_in_flight() {
         assert!(
-            !can_launch_card(true, &another_launch),
-            "a configured card must not be launchable while a different launch is running"
+            !can_launch_card(true, true),
+            "a configured card must not be launchable while another command is running"
         );
         assert!(
-            can_launch_card(true, &None),
-            "a configured card must be launchable when no launch is in flight"
+            can_launch_card(true, false),
+            "a configured card must be launchable when no command is in flight"
         );
         assert!(
-            !can_launch_card(false, &None),
-            "an unconfigured card must never be launchable, even with no launch in flight"
+            !can_launch_card(false, false),
+            "an unconfigured card must never be launchable, even with no command in flight"
         );
     }
 
@@ -4408,7 +4602,7 @@ mod tests {
             .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
 
         harness.run();
-        harness.get_by_label("Applications").click();
+        harness.get_by_label("Nettoyage").click();
         harness.run();
         assert!(harness.query_by_label_contains("Editor").is_some());
 
@@ -4432,6 +4626,260 @@ mod tests {
         harness.run_steps(1);
         assert_eq!(harness.state().application_generation, 1);
         assert!(harness.state().application_loading);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // -- Part 3: cleanup wiring ---------------------------------------------
+
+    fn sample_cleanup_plan() -> crate::cleanup::CleanupPlan {
+        crate::cleanup::CleanupPlan {
+            level: "moderate".into(),
+            apply: false,
+            candidates: vec![
+                crate::cleanup::Candidate {
+                    module: "npm".into(),
+                    path: Some("C:/Users/x/AppData/Local/npm-cache".into()),
+                    label: "cache npm".into(),
+                    estimated_bytes: Some(4_600_000_000),
+                    level: "safe".into(),
+                    needs_network: true,
+                },
+                crate::cleanup::Candidate {
+                    module: "recycle".into(),
+                    path: None,
+                    label: "corbeille".into(),
+                    estimated_bytes: Some(1_000_000),
+                    level: "moderate".into(),
+                    needs_network: false,
+                },
+            ],
+            total_estimated_bytes: Some(4_601_000_000),
+            unpriced_modules: vec![],
+            warnings: vec![],
+        }
+    }
+
+    fn cleanup_test_app(name: &str) -> (EguiApp, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("devtoolbox-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = EguiApp::new_for_test(sample_config(), dir.join("config.json"));
+        (app, dir)
+    }
+
+    #[test]
+    fn analyser_sets_job_and_drains_plan_event_into_rows() {
+        let (app, dir) = cleanup_test_app("cleanup-analyze");
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Nettoyage").click();
+        harness.run();
+        harness.get_by_label("Analyser").click();
+        harness.run_steps(1);
+        assert_eq!(harness.state().cleanup_job, Some(CleanupJob::Analyze));
+        assert_eq!(harness.state().cleanup_generation, 1);
+
+        // A stale event from a previous generation must be ignored.
+        harness
+            .state()
+            .cleanup_tx
+            .send(CleanupEvent {
+                generation: 0,
+                result: Err("stale".into()),
+            })
+            .unwrap();
+        harness.run_steps(1);
+        assert_eq!(harness.state().cleanup_job, Some(CleanupJob::Analyze));
+        assert!(harness.state().cleanup_error.is_none());
+
+        harness
+            .state()
+            .cleanup_tx
+            .send(CleanupEvent {
+                generation: 1,
+                result: Ok(Payload::Plan(sample_cleanup_plan())),
+            })
+            .unwrap();
+        harness.run();
+        assert!(harness.state().cleanup_job.is_none());
+        let rows = harness.state().cleanup_rows.as_ref().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(harness.query_by_label("npm").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_opens_dialog_and_spawns_only_on_oui() {
+        let (mut app, dir) = cleanup_test_app("cleanup-dialog");
+        app.cleanup_rows = Some(cleanup::module_rows(&sample_cleanup_plan()));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Nettoyage").click();
+        harness.run();
+        // One Nettoyer button: only the safe npm row gets one, the moderate
+        // recycle row is greyed without a button (part 2 contract).
+        harness.get_by_label("Nettoyer").click();
+        harness.run_steps(2);
+        assert!(matches!(
+            harness.state().active_dialog,
+            Some(ActiveDialog {
+                on_confirm: Some(PendingAction::CleanModule(_)),
+                ..
+            })
+        ));
+        assert!(harness.state().cleanup_job.is_none());
+
+        // « Non » closes the dialog without starting anything.
+        harness.get_by_label("Non").click();
+        harness.run_steps(2);
+        assert!(harness.state().active_dialog.is_none());
+        assert!(harness.state().cleanup_job.is_none());
+        assert_eq!(harness.state().cleanup_generation, 0);
+
+        // « Oui » starts the clean job (spawning gated off in tests).
+        harness.get_by_label("Nettoyer").click();
+        harness.run_steps(2);
+        harness.get_by_label("Oui").click();
+        harness.run_steps(1);
+        assert_eq!(
+            harness.state().cleanup_job,
+            Some(CleanupJob::Clean("npm".to_string()))
+        );
+        assert_eq!(harness.state().cleanup_generation, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn command_busy_gates_all_launch_paths_mutually() {
+        let (mut app, dir) = cleanup_test_app("cleanup-busy");
+        assert!(!app.command_busy());
+        app.terminal_running = true;
+        assert!(app.command_busy());
+        app.terminal_running = false;
+        app.action_running = Some("cmd".into());
+        assert!(app.command_busy());
+        app.action_running = None;
+        app.cleanup_job = Some(CleanupJob::Analyze);
+        assert!(app.command_busy());
+
+        // Dialog confirm re-checks the slot: a command that started while
+        // the dialog was open refuses the clean instead of double-running.
+        app.cleanup_rows = Some(cleanup::module_rows(&sample_cleanup_plan()));
+        app.cleanup_job = None;
+        app.terminal_running = true;
+        app.resolve_pending_action(PendingAction::CleanModule("npm".into()));
+        assert!(app.cleanup_job.is_none());
+        assert!(app.status.as_ref().is_some_and(|s| s.is_error));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_failure_apply_event_lands_in_last_runs_with_measured_size() {
+        let (mut app, dir) = cleanup_test_app("cleanup-partial");
+        app.cleanup_rows = Some(cleanup::module_rows(&sample_cleanup_plan()));
+        app.cleanup_generation = 2;
+        app.cleanup_job = Some(CleanupJob::Clean("npm".into()));
+        app.cleanup_tx
+            .send(CleanupEvent {
+                generation: 2,
+                result: Ok(Payload::Applied {
+                    plan: sample_cleanup_plan(),
+                    run: crate::cleanup::RunPayload {
+                        status: "completed".into(),
+                        results: vec![crate::cleanup::ModuleResult {
+                            module: "npm".into(),
+                            estimated: Some(4_600_000_000),
+                            freed: Some(4_000_000_000),
+                            failed: Some(600_000_000),
+                            measured: Some(600_000_000),
+                            locked_paths: vec!["C:/locked".into()],
+                            operation_failures: vec![],
+                        }],
+                    },
+                }),
+            })
+            .unwrap();
+
+        app.drain_cleanup_events();
+
+        assert!(app.cleanup_job.is_none());
+        let last = app.cleanup_last_runs.get("npm").unwrap();
+        assert!(!last.interrupted);
+        assert!(!last.result.is_success());
+        assert_eq!(last.result.failure_count(), 1);
+        // The refreshed size shown for the row comes from `measured`.
+        let row = app
+            .cleanup_rows
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|row| row.module == "npm")
+            .unwrap();
+        assert_eq!(
+            cleanup_view::display_size(row, Some(&last.result)),
+            "572.2 Mio"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interrupted_run_is_never_a_success() {
+        let (mut app, dir) = cleanup_test_app("cleanup-interrupted");
+        app.cleanup_generation = 1;
+        app.cleanup_job = Some(CleanupJob::Clean("npm".into()));
+        app.cleanup_tx
+            .send(CleanupEvent {
+                generation: 1,
+                result: Ok(Payload::Applied {
+                    plan: sample_cleanup_plan(),
+                    run: crate::cleanup::RunPayload {
+                        status: "interrupted".into(),
+                        results: vec![crate::cleanup::ModuleResult {
+                            module: "npm".into(),
+                            estimated: Some(1),
+                            freed: Some(1),
+                            failed: None,
+                            measured: Some(0),
+                            locked_paths: vec![],
+                            operation_failures: vec![],
+                        }],
+                    },
+                }),
+            })
+            .unwrap();
+
+        app.drain_cleanup_events();
+
+        let last = app.cleanup_last_runs.get("npm").unwrap();
+        assert!(last.interrupted);
+        assert!(app.status.as_ref().is_some_and(|s| s.is_error));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_reanalysis_keeps_rows_and_marks_them_stale() {
+        let (mut app, dir) = cleanup_test_app("cleanup-stale");
+        app.cleanup_rows = Some(cleanup::module_rows(&sample_cleanup_plan()));
+        app.cleanup_generation = 3;
+        app.cleanup_job = Some(CleanupJob::Analyze);
+        app.cleanup_tx
+            .send(CleanupEvent {
+                generation: 3,
+                result: Err("python introuvable".into()),
+            })
+            .unwrap();
+
+        app.drain_cleanup_events();
+
+        assert!(app.cleanup_rows.is_some());
+        assert!(app.cleanup_stale);
+        assert_eq!(app.cleanup_error.as_deref(), Some("python introuvable"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

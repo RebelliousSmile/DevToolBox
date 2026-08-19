@@ -36,21 +36,19 @@ pub fn filtered_candidates<'a>(
 }
 
 fn human_size(bytes: Option<u64>) -> String {
-    let Some(bytes) = bytes else {
-        return "inconnue".to_string();
-    };
-    const UNITS: [&str; 5] = ["o", "Kio", "Mio", "Gio", "Tio"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
+    match bytes {
+        Some(bytes) => super::format::human_size(bytes),
+        None => "inconnue".to_string(),
     }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+}
+
+fn version_label(candidate: &ApplicationCandidate) -> &str {
+    candidate
+        .metadata
+        .get("version")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("—")
 }
 
 fn usage_label(candidate: &ApplicationCandidate) -> String {
@@ -79,7 +77,10 @@ pub fn render(
 ) -> bool {
     let mut refresh = false;
     ui.horizontal(|ui| {
-        ui.heading("DevToolBox — Applications");
+        // Section heading only — the view-level « DevToolBox — Nettoyage »
+        // heading is drawn by `render_cleanup_view`, which now places the
+        // Bibliothèques section above this report.
+        ui.heading("Applications installées");
         if ui
             .add_enabled(!loading, egui::Button::new("Rafraîchir"))
             .clicked()
@@ -195,34 +196,37 @@ pub fn render(
     ui.separator();
 
     let candidates = filtered_candidates(report, filters);
-    egui::ScrollArea::vertical()
-        .max_height(330.0)
-        .show(ui, |ui| {
-            egui::Grid::new("applications-grid")
-                .striped(true)
-                .min_col_width(85.0)
-                .show(ui, |ui| {
-                    ui.strong("Priorité");
-                    ui.strong("Application");
-                    ui.strong("Taille");
-                    ui.strong("Dernier usage");
-                    ui.strong("Confiance");
-                    ui.strong("Source");
-                    ui.end_row();
-                    for candidate in candidates {
-                        ui.label(candidate.score.to_string());
-                        let selected_now = selected.as_deref() == Some(candidate.app_id.as_str());
-                        if ui.selectable_label(selected_now, &candidate.name).clicked() {
-                            *selected = Some(candidate.app_id.clone());
-                        }
-                        ui.label(human_size(candidate.size.installed_bytes));
-                        ui.label(usage_label(candidate));
-                        ui.label(&candidate.confidence);
-                        ui.label(&candidate.source);
-                        ui.end_row();
+    // `both()` (not `vertical()`): grid rows don't wrap, so on a narrow
+    // window wide cells would clip past the right edge with no hint that
+    // content exists there — the horizontal scrollbar makes it reachable.
+    egui::ScrollArea::both().max_height(330.0).show(ui, |ui| {
+        egui::Grid::new("applications-grid")
+            .striped(true)
+            .min_col_width(85.0)
+            .show(ui, |ui| {
+                ui.strong("Priorité");
+                ui.strong("Application");
+                ui.strong("Version");
+                ui.strong("Taille");
+                ui.strong("Dernier usage");
+                ui.strong("Confiance");
+                ui.strong("Source");
+                ui.end_row();
+                for candidate in candidates {
+                    ui.label(candidate.score.to_string());
+                    let selected_now = selected.as_deref() == Some(candidate.app_id.as_str());
+                    if ui.selectable_label(selected_now, &candidate.name).clicked() {
+                        *selected = Some(candidate.app_id.clone());
                     }
-                });
-        });
+                    ui.label(version_label(candidate));
+                    ui.label(human_size(candidate.size.installed_bytes));
+                    ui.label(usage_label(candidate));
+                    ui.label(&candidate.confidence);
+                    ui.label(&candidate.source);
+                    ui.end_row();
+                }
+            });
+    });
 
     if let Some(candidate) = selected.as_deref().and_then(|app_id| {
         report
@@ -347,5 +351,21 @@ mod tests {
     #[test]
     fn unknown_size_is_not_promoted_by_minimum_filter() {
         assert_eq!(human_size(None), "inconnue");
+    }
+
+    #[test]
+    fn version_label_falls_back_when_metadata_is_missing_or_empty() {
+        let mut without_version = candidate("Editor", false);
+        assert_eq!(version_label(&without_version), "—");
+
+        without_version
+            .metadata
+            .insert("version".to_string(), String::new());
+        assert_eq!(version_label(&without_version), "—");
+
+        without_version
+            .metadata
+            .insert("version".to_string(), "4.2.0".to_string());
+        assert_eq!(version_label(&without_version), "4.2.0");
     }
 }

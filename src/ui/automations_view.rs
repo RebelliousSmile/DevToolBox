@@ -122,8 +122,12 @@ fn fetch_impl() -> Result<Vec<AutomationRow>, String> {
     // `Get-ScheduledTaskInfo`, then `ConvertTo-Json -Compress`), duplicated
     // here per the module doc comment above rather than calling into
     // `app.rs` directly.
+    // Only user/third-party automations are relevant here: everything under
+    // `\Microsoft\*` is OS plumbing the user neither created nor manages, and
+    // it drowns the handful of rows that actually matter (~200+ system tasks
+    // vs a few user ones).
     const SCRIPT: &str = r#"
-$tasks = Get-ScheduledTask | ForEach-Object {
+$tasks = Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' } | ForEach-Object {
     $info = $_ | Get-ScheduledTaskInfo
     [pscustomobject]@{
         Name = $_.TaskName
@@ -172,6 +176,32 @@ fn fetch_impl() -> Result<Vec<AutomationRow>, String> {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn fetch_impl() -> Result<Vec<AutomationRow>, String> {
     Ok(Vec::new())
+}
+
+/// Open the OS-native scheduling tool: the Task Scheduler snap-in on
+/// Windows, a terminal running `systemctl list-timers` on Linux
+/// (`crate::linux::automations::open_native_tool`).
+pub fn open_native_tool() -> Result<(), String> {
+    open_native_tool_impl()
+}
+
+#[cfg(windows)]
+fn open_native_tool_impl() -> Result<(), String> {
+    std::process::Command::new("mmc")
+        .arg("taskschd.msc")
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("impossible d'ouvrir le Planificateur de tâches: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn open_native_tool_impl() -> Result<(), String> {
+    crate::linux::automations::open_native_tool()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn open_native_tool_impl() -> Result<(), String> {
+    Err("aucun outil natif de planification n'est disponible sur cet OS".to_string())
 }
 
 // ---------------------------------------------------------------------------

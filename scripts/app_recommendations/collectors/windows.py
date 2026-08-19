@@ -100,6 +100,7 @@ def registry_candidates(records: Iterable[dict[str, object]]) -> list[Candidate]
             "hive": str(record.get("hive", "")),
             "view": str(record.get("view", "")),
             "publisher": str(record.get("publisher", "")),
+            "version": str(record.get("version", "")),
         }
         dedupe = _dedupe_key(name, location)
         if dedupe:

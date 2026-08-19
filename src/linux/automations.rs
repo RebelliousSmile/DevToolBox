@@ -121,6 +121,17 @@ pub fn open_native_tool() -> Result<(), String> {
         .map_err(|error| format!("Impossible d'ouvrir gnome-terminal: {error}"))
 }
 
+/// Open the closest thing Linux has to a native scheduling tool: a
+/// `gnome-terminal` window running `systemctl list-timers --all`, kept
+/// open afterwards so the user can read the output.
+pub fn open_native_tool() -> Result<(), String> {
+    Command::new("gnome-terminal")
+        .args(["--", "bash", "-c", "systemctl list-timers --all; exec bash"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("gnome-terminal introuvable: {error}"))
+}
+
 fn build_row(entry: TimerEntry) -> AutomationRow {
     let details = unit_show_details(&entry.unit);
 

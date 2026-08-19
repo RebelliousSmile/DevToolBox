@@ -8,6 +8,7 @@
     "install_location": "C:\\Apps\\Editor",
     "display_icon": "\"C:\\Apps\\Editor\\editor.exe\",0",
     "publisher": "Example",
+    "version": "4.2.0",
     "uninstall_string": "\"C:\\Apps\\Editor\\uninstall.exe\" /remove",
     "system_component": false,
     "no_remove": false,
