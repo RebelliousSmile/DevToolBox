@@ -300,11 +300,23 @@ mod tests {
         }
     }
 
+    /// The thread name is what keeps two concurrently running tests from
+    /// sharing a file, but under the libtest harness it is the *full test
+    /// path* (`applications::usage::tests::…`). The `:` in it is illegal in
+    /// a Windows filename, so the raw name has to be reduced to characters
+    /// every platform accepts before it lands in a path — otherwise every
+    /// write here fails with `ERROR_INVALID_NAME` (OS error 123).
     fn temp_path(label: &str) -> PathBuf {
+        let thread = std::thread::current();
+        let scope: String = thread
+            .name()
+            .unwrap_or("test")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
         std::env::temp_dir().join(format!(
-            "devtoolbox-usage-{label}-{}-{}.json",
+            "devtoolbox-usage-{label}-{}-{scope}.json",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
         ))
     }
 

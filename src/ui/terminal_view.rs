@@ -119,8 +119,11 @@ fn exists_on_path(name: &str) -> bool {
 /// Resolve `@python <script> [args...]` into a real program/args/cwd,
 /// mirroring `crate::windows::process::resolve_action`'s cascade (frozen
 /// master-plan decision 10) adapted for Linux:
-/// 1. `<script-dir>/.venv/bin/python` (POSIX venv layout — not
-///    `.venv\Scripts\python.exe`).
+/// 1. The script directory's local venv interpreter, in the host
+///    platform's layout — `.venv/bin/python` on POSIX,
+///    `.venv\Scripts\python.exe` on Windows. Both are handled by
+///    `crate::python_runtime::python_for_script`, which this cascade
+///    delegates to.
 /// 2. `DEVTOOLBOX_PYTHON` env var.
 /// 3. `python3` on `PATH`.
 /// 4. `python` on `PATH` — extra fallback for minimal distros that don't
@@ -432,13 +435,29 @@ mod tests {
         let script_dir = temp.join("scripts").join("sample");
         std::fs::create_dir_all(&script_dir).unwrap();
         std::fs::write(script_dir.join("sample.py"), "print('ok')").unwrap();
-        let venv_bin = script_dir.join(".venv").join("bin");
+        // `python_for_script` looks for the interpreter in the host
+        // platform's venv layout, so the fixture has to be laid out the same
+        // way or the cascade falls through to the `PATH` interpreter and the
+        // assertion below compares a bare `python3` against a full path.
+        // Only `is_file()` is checked, so the contents are irrelevant —
+        // nothing is executed here.
+        #[cfg(windows)]
+        let (venv_bin, interpreter) = (script_dir.join(".venv").join("Scripts"), "python.exe");
+        #[cfg(not(windows))]
+        let (venv_bin, interpreter) = (script_dir.join(".venv").join("bin"), "python");
         std::fs::create_dir_all(&venv_bin).unwrap();
-        let venv_python = venv_bin.join("python");
+        let venv_python = venv_bin.join(interpreter);
         std::fs::write(&venv_python, "#!/bin/sh\n").unwrap();
 
         let spec = resolve_action("@python scripts/sample/sample.py", &temp).unwrap();
-        assert_eq!(spec.program, venv_python.display().to_string());
+        // Compared as paths, not as strings: `resolve_action` builds the
+        // script path by joining the command's own `scripts/sample/…`
+        // spelling onto `root`, so on Windows the result keeps those forward
+        // slashes while `venv_python` was assembled with `join` and carries
+        // backslashes. Both name the same file, and `Path`'s comparison
+        // (component-wise, and `/` is a separator on Windows too) says so
+        // while a string comparison would not.
+        assert_eq!(Path::new(&spec.program), venv_python.as_path());
 
         let _ = std::fs::remove_dir_all(temp);
     }
