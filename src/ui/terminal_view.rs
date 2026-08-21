@@ -19,17 +19,9 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::Sender;
-
-/// `CREATE_NO_WINDOW` — same constant as `crate::windows::process`: keeps a
-/// console-subsystem child from opening its own console window (its output
-/// is piped into the integrated terminal instead).
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Buffer caps — same thresholds as `app.rs`'s `MAX_TERMINAL_LINES` /
 /// `TRIMMED_TERMINAL_LINES`.
@@ -249,8 +241,7 @@ pub fn launch_captured_program(
     // Kept from the Windows branch through the compose extraction: without
     // it a console-subsystem child opens its own window, and closing that
     // window kills the child (see this module's header).
-    #[cfg(windows)]
-    process.creation_flags(CREATE_NO_WINDOW);
+    crate::process_flags::hide_console_window(&mut process);
     if let Some(directory) = working_dir {
         process.current_dir(directory);
     }

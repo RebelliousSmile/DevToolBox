@@ -10,11 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::process_flags::hide_console_window;
 
 /// Walking every cache root can take minutes on a cold disk — far beyond
 /// the 35 s the applications report allows itself. Deletion (`--apply`)
@@ -84,8 +80,7 @@ fn clean_command_from_root(root: PathBuf, arguments: &[&str]) -> Result<Command,
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    hide_console_window(&mut command);
     Ok(command)
 }
 

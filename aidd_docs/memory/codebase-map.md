@@ -14,12 +14,15 @@ flowchart TD
 
     subgraph Native["Native modules"]
         WINMOD["src/windows/ - registry, task_scheduler, process"]
-        LINMOD["src/linux/ - automations, autostart, icon_theme, docker, compose (all cfg target_os = linux)"]
+        LINMOD["src/linux/ - automations, autostart, icon_theme (all cfg target_os = linux)"]
+        DOCKMOD["src/docker/ - engine, compose (cross-platform: docker CLI only)"]
         UIMOD["src/ui/ - egui app, terminal, applications view, docker view, compose view, icon_picker, command_form, ports"]
         STOREMOD["src/storage/ - models, json, categories, commands, slug, machine_commands"]
         ASSETS["src/assets/ - custom icons"]
         APPMOD["src/applications/ - process matching and usage history"]
         PYRUN["src/python_runtime.rs - bundled Python resolution"]
+        RUNNER["src/command_runner.rs - spawn/capture/timeout, shared by docker + net"]
+        NETMOD["src/net.rs - host listening ports (netstat / ss)"]
     end
 
     MAIN --> WINMOD

@@ -161,13 +161,54 @@ into `Vec<AutomationRow>`.
   that message when diagnosing a "réponse PowerShell inattendue" error;
   reproduce the raw JSON directly instead.
 
-## Docker CLI bridge (Docker tab, Linux-only)
+## Docker CLI bridge (Docker tab, all OSes)
 
-Three layers, same shape as the Automations view: `src/linux/docker.rs`
-(CLI data source, `#[cfg(target_os = "linux")]` via `src/linux/mod.rs`) →
-`src/ui/docker_view.rs` (OS-neutral shared types + cfg-gated façade + pure
-"data in, actions out" render) → `src/ui/egui_app.rs` (tab, lazy fetch,
-confirm modals). Key mechanics:
+Three layers, same shape as the Automations view: `src/docker/engine.rs`
+(CLI data source, **no `cfg(target_os)` gate**) → `src/ui/docker_view.rs`
+(OS-neutral shared types + unconditional façade + pure "data in, actions
+out" render) → `src/ui/egui_app.rs` (tab, lazy fetch, confirm modals).
+
+The backend lived under `src/linux/` until the Windows port, and the tab was
+hidden off Linux. It moved to `src/docker/` unchanged in substance: nothing
+in it ever touched the socket, `std::os::unix` or `libc` — it only spawns
+the `docker` CLI, which Docker Desktop provides on Windows over
+`npipe:////./pipe/dockerDesktopLinuxEngine`. The three points where the OS
+does differ are handled inside `engine.rs`:
+
+- `DOCKER_BINARY` is `docker.exe` on Windows. `PATH` entries are joined with
+  a literal file name, and the suffix-less `docker` does not exist there, so
+  without this the CLI reads as absent on a machine running Docker Desktop.
+- Spawns go through `crate::process_flags::hide_console_window`
+  (`CREATE_NO_WINDOW`), or every listing refresh flashes a console window.
+  The spawn/poll/kill loop itself lives in `src/command_runner.rs`
+  (`run_capturing`), shared with the host-port scan; `engine.rs` keeps only
+  the Docker-specific part — what a non-zero exit or a timeout *means*.
+- `classify_stderr` also matches `error during connect` and `//./pipe/`,
+  Docker Desktop's "no daemon" wording. It deliberately does **not** match
+  the bare `the system cannot find the file specified`, which a reachable
+  daemon returns too (missing build context, bad `--file`).
+
+### Host-port scan (`src/net.rs`)
+
+The allocation table in the Ports tab only knows what Docker declares; a port
+held by IIS, a local Postgres or a hand-started `node` is invisible to it.
+`net::scan()` fills that gap — `netstat -ano` + `tasklist /FO CSV /NH` on
+Windows, `ss -lntuHp` elsewhere — and `ui::ports::host_listener` /
+`listeners_outside_docker` cross-reference it with the table. Three points
+worth keeping:
+
+- **Never parse the state word.** `LISTENING` is English even on a French
+  Windows, but that is not a contract. A TCP row is a listener when its
+  *remote* endpoint port is 0; UDP rows always are.
+- Both parsers compile and are unit-tested on every OS (only `scan()` is
+  `#[cfg]`-gated), against captured real output — a Windows-only parser could
+  never be covered by a Linux CI run.
+- `DockerAction::ScanHostPorts` is deferred like `ComputeVolumeSizes` and its
+  result is **not** invalidated by `refetch_docker`: a `docker rm` does not
+  change the host's sockets, and re-running `netstat` per action would cost a
+  second each time.
+
+Key mechanics:
 
 - Listings use `docker ... --format '{{json .}}'` (NDJSON, one object per
   line, tolerant parser) — **except** `docker system df -v`, which emits one
@@ -261,14 +302,41 @@ target instead of producing an unactionable failure. Contracts worth keeping:
   a dismissal. Multi-line dialog messages also keep the modal narrower than
   the window.
 
-### Compose stacks (Stacks section, Linux-only)
+### Compose stacks (Stacks section, all OSes)
 
-Same three layers as above: `src/linux/compose.rs` (CLI + `walkdir`) →
+Same three layers as above: `src/docker/compose.rs` (CLI + `walkdir`) →
 `src/ui/compose_view.rs` (every OS-neutral type, façade, pure render) →
 `src/ui/egui_app.rs` (state, worker threads, dispatch). `StackConfig` /
 `StackService` / `ScanOutcome` live in `compose_view.rs`, **not** in the
-Linux module, because `src/ui/` is compiled on Windows too — the Linux module
-only converts its private `ConfigWire` into them. Measured contracts:
+backend module — a split kept from when the backend was Linux-gated and
+`src/ui/` was the only half compiled on Windows.
+
+The discovery half is pure `walkdir` + filesystem and needed no porting at
+all; the scan root already fell back `HOME` → `USERPROFILE`. One measured
+trap surfaced on Windows: `ScanOutcome.files` holds **native** separators, so
+a test asserting `files[0].ends_with("app/docker-compose.yml")` (that is
+`str::ends_with`) only ever passed on Linux. Compare as a `Path`, whose
+`ends_with` is component-wise.
+
+`is_compose_file_name` accepts the four canonical names **and** the
+`<stem>.<middle>.<ext>` variants (`docker-compose.dev.yml`,
+`compose.prod.yaml`), minus `override`. Rationale: ignoring a variant does
+not keep its stack out of the list, it makes it arrive without a file — a
+container started from `docker-compose.dev.yml` carries that path in
+`config_files`, so the row appeared as « hors scan » with no services, no
+declared ports, no conflict detection and a disabled action button
+(measured: `suddenly`, 3 containers). `override` is the one excluded middle
+segment because compose loads it automatically with the canonical file, so
+it is a fragment by definition and would only duplicate a row. Whether a
+variant is standalone is **not** decided by the name — the `config` call
+after discovery already decides it and stores the error on the row.
+
+Consequence to expect: a directory holding both a canonical file and a
+variant now yields **two rows**, one per launchable stack. On this machine
+`suddenly/_code/app` shows `docker-compose.yml` (7 services) and
+`docker-compose.dev.yml` (3 services), and only the second one has runs.
+
+Measured contracts:
 
 - `docker compose -f <file> config --format json` needs **no daemon** and
   costs ~89 ms, which is why DevToolBox parses no YAML itself. It is not the

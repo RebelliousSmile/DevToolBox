@@ -3,7 +3,7 @@
 //! `aidd_docs/tasks/2026_08/2026_08_19-docker-tab.md`, Phase 1/2): the row
 //! shapes returned to the UI are OS-neutral and declared here so every
 //! build (including Windows/macOS, which have no Docker data source yet)
-//! keeps compiling, while `crate::linux::docker` (Linux-only, compiles to
+//! keeps compiling, while `crate::docker::engine` (Linux-only, compiles to
 //! nothing elsewhere) is the only module that knows how to *produce* them
 //! by mapping its private wire-format serde structs onto these types.
 //!
@@ -20,7 +20,10 @@ use std::collections::HashSet;
 
 use eframe::egui;
 
-use crate::ui::ports::{self, OwnerKind, PortBinding, PortConflict, PortOwner};
+use std::collections::BTreeSet;
+
+use crate::net::ListeningPort;
+use crate::ui::ports::{self, OwnerKind, PortAllocation, PortBinding, PortConflict, PortOwner};
 
 /// One row of the Docker tab's "Conteneurs" section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +41,7 @@ pub struct ContainerEntry {
     /// carries detail no enum variant captures.
     pub status: String,
     /// The container's writable-layer size (e.g. `"767kB"`), already
-    /// stripped of the `(virtual …)` suffix by `crate::linux::docker`'s
+    /// stripped of the `(virtual …)` suffix by `crate::docker::engine`'s
     /// `extract_rw_size` — what `docker rm` actually frees. Empty when
     /// unknown (should not normally happen: `docker ps -a --size` always
     /// fills this field on this reference machine, but a future CLI shape
@@ -46,10 +49,25 @@ pub struct ContainerEntry {
     /// formatting).
     pub rw_size: String,
     /// Published host bindings, parsed from `docker ps -a`'s `Ports` field.
-    /// Always empty for a stopped container — Docker publishes nothing until
-    /// the container runs — which is why Part 1 only ever detects collisions
-    /// between *running* containers.
+    ///
+    /// **Not** empty for a stopped container, contrary to what this field's
+    /// first version assumed: `docker ps -a` keeps printing the bindings of
+    /// the last run. Reading them as current claims is what made four stopped
+    /// `mysql` containers, none of which declares a host port, all report
+    /// `0.0.0.0:32768->3306/tcp` and flag each other. [`declared_host_ports`]
+    /// is the field that tells the two cases apart.
+    ///
+    /// [`declared_host_ports`]: ContainerEntry::declared_host_ports
     pub ports: Vec<PortBinding>,
+    /// `(host_port, protocol)` the container explicitly requested, from
+    /// `HostConfig.PortBindings`. A binding of [`ports`] missing here was
+    /// picked by docker at start-up and will be picked again, differently, at
+    /// the next one. Empty when the inspect pass came back without the
+    /// container — which degrades to "nothing declared", never to a
+    /// fabricated conflict.
+    ///
+    /// [`ports`]: ContainerEntry::ports
+    pub declared_host_ports: BTreeSet<(u16, String)>,
     /// RFC3339 date of the container's last activity: `.State.FinishedAt`
     /// when it is not the `0001-01-01T00:00:00Z` zero value, otherwise
     /// `.Created` (a `created` container has never run). `None` when the
@@ -71,6 +89,13 @@ pub struct ContainerEntry {
     /// labels with `,` while this value is itself a `,`-separated list, so a
     /// multi-file project cannot be recovered from it unambiguously.
     pub compose_files: Vec<String>,
+    /// `com.docker.compose.service`. With [`compose_files`] it names the
+    /// declaration this container instantiates; two containers sharing both
+    /// come from one `ports:` line and are a duplicate project, not a port
+    /// collision.
+    ///
+    /// [`compose_files`]: ContainerEntry::compose_files
+    pub compose_service: Option<String>,
     /// The container's exit code, parsed out of [`ContainerEntry::status`] by
     /// [`parse_exit_code`]. `None` for anything that is not exited, and for a
     /// status shape this parse does not recognize.
@@ -93,7 +118,7 @@ pub fn parse_exit_code(status: &str) -> Option<i32> {
 }
 
 /// A container's lifecycle state, mapped from Docker's free-text `State`
-/// field (see `crate::linux::docker`'s `ContainerState::from_raw`) into a
+/// field (see `crate::docker::engine`'s `ContainerState::from_raw`) into a
 /// closed set the view can match on to decide which actions are offered.
 /// `Unknown` is the conservative default for any value this mapping wasn't
 /// built to recognize — Phase 2 gates both stop and remove off for it (per
@@ -189,7 +214,7 @@ pub struct VolumeEntry {
     /// This volume's on-disk size, or `None` when it hasn't been computed
     /// yet — `docker volume ls` never reports it (always `"N/A"`, confirmed
     /// on this machine); it's only known once `DockerAction::ComputeVolumeSizes`
-    /// has run `crate::linux::docker::volume_sizes` (a `docker system df -v`
+    /// has run `crate::docker::engine::volume_sizes` (a `docker system df -v`
     /// disk scan) and `EguiApp` has merged the result into the snapshot by
     /// name.
     pub size: Option<String>,
@@ -230,14 +255,8 @@ pub fn available() -> bool {
     available_impl()
 }
 
-#[cfg(target_os = "linux")]
 fn available_impl() -> bool {
-    crate::linux::docker::binary_available()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn available_impl() -> bool {
-    false
+    crate::docker::engine::binary_available()
 }
 
 /// Fetch the current Docker snapshot (containers/images/volumes) for this
@@ -250,32 +269,19 @@ pub fn fetch() -> Result<DockerSnapshot, String> {
     fetch_impl()
 }
 
-#[cfg(target_os = "linux")]
 fn fetch_impl() -> Result<DockerSnapshot, String> {
-    crate::linux::docker::fetch().map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn fetch_impl() -> Result<DockerSnapshot, String> {
-    Err("Docker n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::engine::fetch().map_err(|error| error.to_string())
 }
 
 /// Stop a running/paused/restarting container by `id`. Plain `docker stop`
-/// on Linux (`crate::linux::docker::stop_container`), no `--force`
+/// on Linux (`crate::docker::engine::stop_container`), no `--force`
 /// equivalent, ever.
 pub fn stop_container(id: &str) -> Result<(), String> {
     stop_container_impl(id)
 }
 
-#[cfg(target_os = "linux")]
 fn stop_container_impl(id: &str) -> Result<(), String> {
-    crate::linux::docker::stop_container(id).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn stop_container_impl(id: &str) -> Result<(), String> {
-    let _ = id;
-    Err("Docker n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::engine::stop_container(id).map_err(|error| error.to_string())
 }
 
 /// Remove a stopped/created/dead container by `id`. Plain `docker rm`, no
@@ -284,15 +290,8 @@ pub fn remove_container(id: &str) -> Result<(), String> {
     remove_container_impl(id)
 }
 
-#[cfg(target_os = "linux")]
 fn remove_container_impl(id: &str) -> Result<(), String> {
-    crate::linux::docker::remove_container(id).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn remove_container_impl(id: &str) -> Result<(), String> {
-    let _ = id;
-    Err("Docker n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::engine::remove_container(id).map_err(|error| error.to_string())
 }
 
 /// Remove an unused image by `reference` — the caller passes
@@ -302,15 +301,8 @@ pub fn remove_image(reference: &str) -> Result<(), String> {
     remove_image_impl(reference)
 }
 
-#[cfg(target_os = "linux")]
 fn remove_image_impl(reference: &str) -> Result<(), String> {
-    crate::linux::docker::remove_image(reference).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn remove_image_impl(reference: &str) -> Result<(), String> {
-    let _ = reference;
-    Err("Docker n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::engine::remove_image(reference).map_err(|error| error.to_string())
 }
 
 /// Remove an orphan (dangling) volume by `name`. Plain `docker volume rm`,
@@ -319,15 +311,8 @@ pub fn remove_volume(name: &str) -> Result<(), String> {
     remove_volume_impl(name)
 }
 
-#[cfg(target_os = "linux")]
 fn remove_volume_impl(name: &str) -> Result<(), String> {
-    crate::linux::docker::remove_volume(name).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn remove_volume_impl(name: &str) -> Result<(), String> {
-    let _ = name;
-    Err("Docker n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::engine::remove_volume(name).map_err(|error| error.to_string())
 }
 
 /// Compute every volume's on-disk size via `docker system df -v` — a slow
@@ -338,14 +323,8 @@ pub fn volume_sizes() -> Result<Vec<(String, String)>, String> {
     volume_sizes_impl()
 }
 
-#[cfg(target_os = "linux")]
 fn volume_sizes_impl() -> Result<Vec<(String, String)>, String> {
-    crate::linux::docker::volume_sizes().map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn volume_sizes_impl() -> Result<Vec<(String, String)>, String> {
-    Err("Docker n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::engine::volume_sizes().map_err(|error| error.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -492,21 +471,51 @@ pub fn volume_is_dormant(entry: &VolumeEntry, cutoff: i64) -> bool {
     entry.orphan && is_dormant(entry.created_iso.as_deref(), cutoff)
 }
 
-/// The running containers of a snapshot, as port owners ready for
-/// [`ports::find_conflicts`]. Part 2 appends its `DeclaredStack` owners to the
-/// same slice before calling it.
+/// The identity of the compose declaration a container instantiates, or
+/// `None` when it was not created by compose (a hand-rolled `docker run`, or
+/// a project whose labels were stripped).
+///
+/// The `\u{1f}` separator is a unit separator rather than a path character: a
+/// compose file path can contain almost anything, and joining on `:` or `#`
+/// would let two different (file, service) pairs collapse into one key.
+fn compose_declaration(entry: &ContainerEntry) -> Option<String> {
+    let service = entry.compose_service.as_deref()?;
+    if entry.compose_files.is_empty() {
+        return None;
+    }
+    Some(format!("{}\u{1f}{service}", entry.compose_files.join(",")))
+}
+
+/// Every container of a snapshot that publishes something, as port owners
+/// ready for [`ports::find_conflicts`]. `compose_view::declared_owners`
+/// appends its `DeclaredStack` owners to the same slice before the call.
+///
+/// Stopped containers are included but tagged [`OwnerKind::StoppedContainer`]
+/// and carry their declared set, so the detector can drop the dynamic ports
+/// they merely *used* to hold.
 pub fn container_port_owners(snapshot: &DockerSnapshot) -> Vec<PortOwner> {
     snapshot
         .containers
         .iter()
         .filter(|entry| !entry.ports.is_empty())
         .map(|entry| {
-            PortOwner::new(
+            let kind = if entry.state.is_stoppable() {
+                OwnerKind::RunningContainer
+            } else {
+                OwnerKind::StoppedContainer
+            };
+            let mut owner = PortOwner::new(
                 entry.id.clone(),
                 entry.name.clone(),
-                OwnerKind::RunningContainer,
+                kind,
                 entry.ports.clone(),
             )
+            .with_declared(entry.declared_host_ports.clone())
+            .with_source(entry.compose_files.join(", "));
+            if let Some(declaration) = compose_declaration(entry) {
+                owner = owner.with_declaration(declaration);
+            }
+            owner
         })
         .collect()
 }
@@ -908,19 +917,11 @@ pub fn remove_batch(targets: &[BatchTarget]) -> Vec<BatchOutcome> {
     remove_batch_impl(targets)
 }
 
-#[cfg(target_os = "linux")]
 fn remove_batch_impl(targets: &[BatchTarget]) -> Vec<BatchOutcome> {
     remove_batch_with(targets, |target| match target.key.kind {
         ResourceKind::Container => remove_container(&target.key.id),
         ResourceKind::Image => remove_image(&target.key.id),
         ResourceKind::Volume => remove_volume(&target.key.id),
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn remove_batch_impl(targets: &[BatchTarget]) -> Vec<BatchOutcome> {
-    remove_batch_with(targets, |_| {
-        Err("Docker n'est pas pris en charge sur cet OS.".to_string())
     })
 }
 
@@ -969,6 +970,9 @@ pub enum DockerList {
     Containers,
     Images,
     Volumes,
+    /// The host-port allocation table. Read-only and derived: it owns no
+    /// resource, so it takes no part in the selection or the batch deletion.
+    Ports,
 }
 
 /// Everything `render` needs to draw one frame of the Docker tab. Owned and
@@ -1016,6 +1020,14 @@ pub struct DockerViewState<'a> {
     /// selection counts must stay visible, otherwise a batch spanning several
     /// lists becomes half-invisible.
     pub active_list: DockerList,
+    /// Ports held on this machine at the last `DockerAction::ScanHostPorts`,
+    /// or `None` when none has run yet.
+    ///
+    /// `None` and `Some(&[])` are two different statements — "never looked"
+    /// and "looked, found nothing" — and the Ports section shows its « Hôte »
+    /// column only in the second case, the same way the volume list hides its
+    /// size column until a scan has filled it.
+    pub host_ports: Option<&'a [ListeningPort]>,
 }
 
 /// One user intent emitted by `render`. Each destructive variant's `String`
@@ -1045,6 +1057,11 @@ pub enum DockerAction {
     /// Switch the visible list tab. Not destructive, and not a refetch: the
     /// snapshot already holds all three lists.
     SelectList(DockerList),
+    /// Not destructive — reads the host's listening sockets (`netstat -ano`
+    /// or `ss -lntuHp`, see [`crate::net`]) and answers a question no Docker
+    /// command can: whether a declared port is already taken by something
+    /// that is not a container.
+    ScanHostPorts,
 }
 
 /// Reason a container's « Arrêter » button is disabled, or `None` when
@@ -1270,6 +1287,7 @@ fn render_list_tabs(
     ui: &mut egui::Ui,
     state: &DockerViewState<'_>,
     snapshot: &DockerSnapshot,
+    port_rows: usize,
     actions: &mut Vec<DockerAction>,
 ) {
     let (containers, images, volumes) = selection_counts(state.selection);
@@ -1287,6 +1305,9 @@ fn render_list_tabs(
             snapshot.volumes.len(),
             volumes,
         ),
+        // Nothing is selectable here, so the `sél.` half of the label never
+        // applies: a hard 0 rather than a count that could not move.
+        (DockerList::Ports, "Ports", port_rows, 0),
     ];
     ui.horizontal(|ui| {
         for (list, name, total, selected) in tabs {
@@ -1498,6 +1519,185 @@ fn render_images_section(
         });
 }
 
+/// The host-port allocation table: one row per owner per published port,
+/// sorted by port.
+///
+/// Read-only by design. It answers "who holds 8080, where is it written, and
+/// is that number pinned or handed out by docker" — the three facts needed to
+/// pick a free port by hand. It does not reassign anything: rewriting a
+/// `ports:` line would not touch the containers already created from it, so an
+/// automatic fix would silently do nothing until a `--force-recreate`.
+fn render_ports_section(
+    ui: &mut egui::Ui,
+    rows: &[PortAllocation],
+    host_ports: Option<&[ListeningPort]>,
+    buttons_enabled: bool,
+    actions: &mut Vec<DockerAction>,
+) {
+    // Above the empty-table short-circuit on purpose: "no container publishes
+    // anything" is exactly when knowing what the *host* holds is most useful,
+    // since every port is then free as far as Docker is concerned.
+    if ui
+        .add_enabled(
+            buttons_enabled,
+            egui::Button::new(match host_ports {
+                None => "Scanner les ports de l'hôte",
+                Some(_) => "Rescanner l'hôte",
+            }),
+        )
+        .clicked()
+    {
+        actions.push(DockerAction::ScanHostPorts);
+    }
+
+    if rows.is_empty() {
+        ui.label("Aucun port publié.");
+        render_host_only_ports(ui, host_ports, rows);
+        return;
+    }
+    ui.label(format!(
+        "{} port(s) publié(s). « Dynamique » = docker choisit un port libre à chaque démarrage, le numéro affiché est celui du dernier lancement.",
+        rows.len()
+    ));
+
+    let mut columns = vec![
+        ("Port", 0.08),
+        ("Proto", 0.07),
+        ("Attribution", 0.11),
+        ("Propriétaire", 0.26),
+        ("Type", 0.13),
+        ("Source", 0.25),
+    ];
+    if host_ports.is_some() {
+        columns.push(("Hôte", 0.10));
+    }
+    let total_width = ui.available_width();
+    egui::ScrollArea::horizontal()
+        .id_salt("docker-ports-scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("docker-ports-grid")
+                .striped(true)
+                .min_col_width(70.0)
+                .show(ui, |ui| {
+                    header_row(ui, total_width, &columns);
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            ui.label(row.host_port.to_string());
+                            if row.conflicting {
+                                render_badge(
+                                    ui,
+                                    "⚠",
+                                    CONFLICT_COLOR,
+                                    "Ce port est réclamé par plusieurs propriétaires",
+                                );
+                            }
+                        });
+                        ui.label(&row.protocol);
+                        ui.label(if row.declared {
+                            "déclaré"
+                        } else {
+                            "dynamique"
+                        });
+                        ui.label(&row.owner);
+                        ui.label(match row.kind {
+                            OwnerKind::RunningContainer => "conteneur actif",
+                            OwnerKind::StoppedContainer => "conteneur arrêté",
+                            OwnerKind::DeclaredStack => "stack déclaré",
+                        });
+                        // An empty source is a container created outside
+                        // compose: there is no file to point at, and an em
+                        // dash says so without suggesting the lookup failed.
+                        ui.label(if row.source.is_empty() {
+                            "—"
+                        } else {
+                            row.source.as_str()
+                        });
+                        if let Some(listeners) = host_ports {
+                            render_host_cell(ui, listeners, row);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    render_host_only_ports(ui, host_ports, rows);
+}
+
+/// The « Hôte » cell: whether this port is bound on the machine right now.
+///
+/// A *running* container's port is of course bound — by Docker's own proxy —
+/// so that case is stated plainly and left uncoloured. The one worth a warning
+/// is a stopped container or a declared-only stack whose port is already
+/// taken: nothing in the Docker data hints at it, and the next `up` is what
+/// discovers it.
+fn render_host_cell(ui: &mut egui::Ui, listeners: &[ListeningPort], row: &PortAllocation) {
+    let Some(listener) = ports::host_listener(listeners, row) else {
+        ui.label("libre");
+        return;
+    };
+    let owner = listener
+        .owner_label()
+        .unwrap_or_else(|| "processus inconnu".to_string());
+    if row.kind == OwnerKind::RunningContainer {
+        ui.label("occupé").on_hover_text(owner);
+        return;
+    }
+    render_badge(
+        ui,
+        "occupé",
+        CONFLICT_COLOR,
+        &format!("Port déjà pris par {owner} — ce port ne sera pas disponible au démarrage"),
+    );
+}
+
+/// The listeners no container or stack explains — everything else on the
+/// machine that is holding a port.
+///
+/// Rendered under the table rather than merged into it: these rows have no
+/// owner, no source and no declaration, so half the columns would be empty,
+/// and mixing them in would make the allocation table stop being a table of
+/// *allocations*.
+fn render_host_only_ports(
+    ui: &mut egui::Ui,
+    host_ports: Option<&[ListeningPort]>,
+    rows: &[PortAllocation],
+) {
+    let Some(listeners) = host_ports else {
+        return;
+    };
+    let outside = ports::listeners_outside_docker(listeners, rows);
+    ui.separator();
+    if outside.is_empty() {
+        ui.label("Aucun port de l'hôte en dehors de Docker.");
+        return;
+    }
+    ui.label(format!(
+        "{} port(s) tenu(s) par l'hôte, hors Docker. Un port listé ici est indisponible pour un conteneur.",
+        outside.len()
+    ));
+    let columns = [("Port", 0.12), ("Proto", 0.12), ("Processus", 0.76)];
+    let total_width = ui.available_width();
+    egui::ScrollArea::horizontal()
+        .id_salt("docker-host-ports-scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("docker-host-ports-grid")
+                .striped(true)
+                .min_col_width(70.0)
+                .show(ui, |ui| {
+                    header_row(ui, total_width, &columns);
+                    for listener in outside {
+                        ui.label(listener.port.to_string());
+                        ui.label(&listener.protocol);
+                        ui.label(
+                            listener
+                                .owner_label()
+                                .unwrap_or_else(|| "processus inconnu".to_string()),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 fn render_volumes_section(
     ui: &mut egui::Ui,
     volumes: &[VolumeEntry],
@@ -1519,6 +1719,23 @@ fn render_volumes_section(
         ui.label("Aucun volume.");
         return;
     }
+    // Sizes come from a ~6 s `docker system df -v` scan run only on demand,
+    // so before the first « Calculer les tailles » there is nothing to show.
+    // The column is then dropped entirely rather than filled with
+    // placeholders: a grid of « ? » reads as a failed measurement, when in
+    // fact no measurement was ever asked for. Nom absorbs the freed width.
+    let sizes_known = volumes.iter().any(|volume| volume.size.is_some());
+    let mut columns = vec![
+        ("Sél.", 0.04),
+        ("Nom", if sizes_known { 0.42 } else { 0.54 }),
+        ("Driver", 0.12),
+        ("Orphelin", 0.12),
+    ];
+    if sizes_known {
+        columns.push(("Taille", 0.12));
+    }
+    columns.push(("Action", 0.18));
+
     let total_width = ui.available_width();
     egui::ScrollArea::horizontal()
         .id_salt("docker-volumes-scroll")
@@ -1527,18 +1744,7 @@ fn render_volumes_section(
                 .striped(true)
                 .min_col_width(85.0)
                 .show(ui, |ui| {
-                    header_row(
-                        ui,
-                        total_width,
-                        &[
-                            ("Sél.", 0.04),
-                            ("Nom", 0.42),
-                            ("Driver", 0.12),
-                            ("Orphelin", 0.12),
-                            ("Taille", 0.12),
-                            ("Action", 0.18),
-                        ],
-                    );
+                    header_row(ui, total_width, &columns);
                     for volume in volumes {
                         let reason = (!volume.orphan).then_some("volume rattaché à un conteneur");
                         selection_checkbox(
@@ -1565,7 +1771,12 @@ fn render_volumes_section(
                         });
                         ui.label(&volume.driver);
                         ui.label(if volume.orphan { "oui" } else { "non" });
-                        ui.label(volume.size.as_deref().unwrap_or("?"));
+                        if sizes_known {
+                            // `docker system df -v` can still skip a volume it
+                            // cannot stat; an em dash marks that hole without
+                            // claiming the whole scan failed.
+                            ui.label(volume.size.as_deref().unwrap_or("—"));
+                        }
                         let remove_button = with_disabled_reason(
                             ui.add_enabled(
                                 ctx.buttons_enabled && reason.is_none(),
@@ -1622,12 +1833,14 @@ pub fn render(ui: &mut egui::Ui, state: &DockerViewState<'_>) -> Vec<DockerActio
         return actions;
     };
 
-    // Conflict detection runs on the running containers only: `docker ps -a`
-    // publishes no `Ports` for a stopped one, so a collision with a stack that
-    // is not up yet is Part 2's `DeclaredStack` case, not this one.
+    // Every publishing container takes part, running or not — a stopped one
+    // still holds the host port it declared, and would fail to start next to a
+    // rival. What `find_conflicts` filters out is narrower: the *dynamic*
+    // ports of stopped containers, which docker will reassign anyway.
     let mut owners = container_port_owners(snapshot);
     owners.extend_from_slice(state.extra_port_owners);
     let conflicts = ports::find_conflicts(&owners);
+    let allocations = ports::port_allocations(&owners, &conflicts);
     let cutoff = cutoff_epoch(state.now_epoch_secs, state.dormant_after_days);
 
     let ctx = RowContext {
@@ -1640,7 +1853,7 @@ pub fn render(ui: &mut egui::Ui, state: &DockerViewState<'_>) -> Vec<DockerActio
     ui.separator();
     render_selection_bar(ui, state, snapshot, cutoff, buttons_enabled, &mut actions);
     ui.separator();
-    render_list_tabs(ui, state, snapshot, &mut actions);
+    render_list_tabs(ui, state, snapshot, allocations.len(), &mut actions);
 
     egui::ScrollArea::vertical()
         // Fills the tab in both directions: the sections below size their
@@ -1663,6 +1876,13 @@ pub fn render(ui: &mut egui::Ui, state: &DockerViewState<'_>) -> Vec<DockerActio
                 DockerList::Volumes => {
                     render_volumes_section(ui, &snapshot.volumes, &ctx, &mut actions)
                 }
+                DockerList::Ports => render_ports_section(
+                    ui,
+                    &allocations,
+                    state.host_ports,
+                    buttons_enabled,
+                    &mut actions,
+                ),
             }
         });
 
@@ -1773,13 +1993,11 @@ mod tests {
 
     // --- façade — Linux delegation sanity (this dev machine has docker) ------
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn available_delegates_to_linux_binary_detection() {
-        assert_eq!(available(), crate::linux::docker::binary_available());
+        assert_eq!(available(), crate::docker::engine::binary_available());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn fetch_through_facade_succeeds_on_this_machine_when_docker_is_available() {
         if !available() {
@@ -1789,7 +2007,7 @@ mod tests {
         // Smoke test: the façade must compile the Result<_, DockerError> ->
         // Result<_, String> conversion end to end without panicking, and a
         // successful fetch on this reference machine (Docker 29.7.2, daemon
-        // reachable — see `crate::linux::docker`'s own real-machine tests)
+        // reachable — see `crate::docker::engine`'s own real-machine tests)
         // must actually come back `Ok`.
         let snapshot = fetch();
         assert!(
@@ -1798,7 +2016,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn remove_container_through_facade_reports_a_readable_error_for_a_bogus_id() {
         if !available() {
@@ -1825,6 +2042,8 @@ mod tests {
             last_activity: None,
             compose_project: None,
             compose_files: Vec::new(),
+            compose_service: None,
+            declared_host_ports: BTreeSet::new(),
             exit_code: None,
         }
     }
@@ -1873,6 +2092,7 @@ mod tests {
         selection: HashSet<SelectionKey>,
         batch_report: Vec<BatchOutcome>,
         active_list: DockerList,
+        host_ports: Option<Vec<ListeningPort>>,
     }
 
     impl State {
@@ -1887,7 +2107,15 @@ mod tests {
                 selection: HashSet::new(),
                 batch_report: Vec::new(),
                 active_list: DockerList::Containers,
+                host_ports: None,
             }
+        }
+
+        /// Hand the view a host scan result, as `EguiApp` does after a
+        /// `ScanHostPorts`. `None` (the default) is "never scanned".
+        fn with_host_ports(mut self, ports: Vec<ListeningPort>) -> Self {
+            self.host_ports = Some(ports);
+            self
         }
 
         /// Open the harness straight on one list, for the many tests whose
@@ -1920,6 +2148,7 @@ mod tests {
                         selection: &state.selection,
                         batch_report: &state.batch_report,
                         active_list: state.active_list,
+                        host_ports: state.host_ports.as_deref(),
                     };
                     let emitted = render(ui, &view_state);
                     // Applied here, like `EguiApp` does, so a test can click a
@@ -2127,7 +2356,7 @@ mod tests {
     }
 
     #[test]
-    fn volume_size_column_shows_question_mark_when_not_yet_computed() {
+    fn volume_size_column_is_absent_until_sizes_are_computed() {
         let snapshot = DockerSnapshot {
             containers: vec![],
             images: vec![],
@@ -2135,9 +2364,14 @@ mod tests {
         };
         let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Volumes));
         assert_eq!(
+            harness.query_all_by_label("Taille").count(),
+            0,
+            "no size has been computed, so the column must not be drawn"
+        );
+        assert_eq!(
             harness.query_all_by_label("?").count(),
-            1,
-            "an unknown volume size must render as a literal '?'"
+            0,
+            "an uncomputed size must never render as a placeholder"
         );
     }
 
@@ -2149,8 +2383,26 @@ mod tests {
             volumes: vec![volume_entry_with_size("dangling-vol", true, "6.64MB")],
         };
         let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Volumes));
+        assert_eq!(harness.query_all_by_label("Taille").count(), 1);
         assert_eq!(harness.query_all_by_label("6.64MB").count(), 1);
         assert_eq!(harness.query_all_by_label("?").count(), 0);
+    }
+
+    /// One volume measured is enough to raise the column; the volumes
+    /// `docker system df -v` skipped keep an em dash, not a « ? ».
+    #[test]
+    fn volume_size_column_marks_the_entries_the_scan_skipped() {
+        let snapshot = DockerSnapshot {
+            containers: vec![],
+            images: vec![],
+            volumes: vec![
+                volume_entry_with_size("measured-vol", true, "6.64MB"),
+                volume_entry("skipped-vol", true),
+            ],
+        };
+        let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Volumes));
+        assert_eq!(harness.query_all_by_label("Taille").count(), 1);
+        assert_eq!(harness.query_all_by_label("—").count(), 1);
     }
 
     #[test]
@@ -2205,6 +2457,7 @@ mod tests {
             selection: HashSet::new(),
             batch_report: Vec::new(),
             active_list: DockerList::Containers,
+            host_ports: None,
         };
         let mut harness = build_harness(state);
         assert_eq!(harness.query_all_by_label("Réessayer").count(), 1);
@@ -2251,6 +2504,7 @@ mod tests {
                 selection: HashSet::new(),
                 batch_report: Vec::new(),
                 active_list: list,
+                host_ports: None,
             };
             let mut harness = build_harness(state);
             for button in buttons {
@@ -2358,6 +2612,7 @@ mod tests {
             selection: HashSet::new(),
             batch_report: Vec::new(),
             active_list: DockerList::Containers,
+            host_ports: None,
         };
         let harness = build_harness(state);
         assert_eq!(
@@ -2647,6 +2902,232 @@ mod tests {
         };
         let harness = build_harness(State::with_snapshot(snapshot));
         assert_eq!(harness.query_all_by_label("⚠ conflit").count(), 0);
+    }
+
+    // --- the ports tab -------------------------------------------------------
+
+    /// A stopped container that never declared a host port is exactly the
+    /// case the conflict detector drops. The table must still list it, and
+    /// say *why* it was dropped — otherwise the port simply vanishes.
+    #[test]
+    fn the_ports_tab_lists_a_dynamic_port_as_dynamic_and_unflagged() {
+        let mut mysql = container_entry("aaa", "mauceri-mysql-1", ContainerState::Exited);
+        mysql.ports = ports::parse_ps_ports("0.0.0.0:32768->3306/tcp");
+        let snapshot = DockerSnapshot {
+            containers: vec![mysql],
+            images: vec![],
+            volumes: vec![],
+        };
+        let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Ports));
+        assert_eq!(harness.query_all_by_label("Ports (1)").count(), 1);
+        assert_eq!(harness.query_all_by_label("32768").count(), 1);
+        assert_eq!(harness.query_all_by_label("dynamique").count(), 1);
+        assert_eq!(harness.query_all_by_label("conteneur arrêté").count(), 1);
+        assert_eq!(
+            harness.query_all_by_label("⚠").count(),
+            0,
+            "a port docker will reassign is not a conflict"
+        );
+    }
+
+    #[test]
+    fn the_ports_tab_names_the_compose_file_and_flags_a_real_collision() {
+        let mut lab = container_entry("aaa", "lab", ContainerState::Running);
+        lab.ports = ports::parse_ps_ports("0.0.0.0:5656->5656/tcp");
+        lab.compose_files = vec!["/srv/lab/docker-compose.yml".to_string()];
+        lab.declared_host_ports = BTreeSet::from([(5656, "tcp".to_string())]);
+        let mut tasks = container_entry("bbb", "tasks", ContainerState::Running);
+        tasks.ports = ports::parse_ps_ports("0.0.0.0:5656->3000/tcp");
+        let snapshot = DockerSnapshot {
+            containers: vec![lab, tasks],
+            images: vec![],
+            volumes: vec![],
+        };
+        let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Ports));
+        assert_eq!(harness.query_all_by_label("Ports (2)").count(), 1);
+        assert_eq!(
+            harness.query_all_by_label("⚠").count(),
+            2,
+            "both sides of a collision are flagged in the table too"
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("/srv/lab/docker-compose.yml")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness.query_all_by_label("—").count(),
+            1,
+            "the container created outside compose has no file to point at"
+        );
+    }
+
+    #[test]
+    fn the_ports_tab_is_empty_when_nothing_publishes() {
+        let snapshot = DockerSnapshot {
+            containers: vec![container_entry("aaa", "lab", ContainerState::Running)],
+            images: vec![],
+            volumes: vec![],
+        };
+        let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Ports));
+        assert_eq!(harness.query_all_by_label("Ports (0)").count(), 1);
+        assert_eq!(harness.query_all_by_label("Aucun port publié.").count(), 1);
+    }
+
+    // --- render(): the Ports tab's host scan ----------------------------------
+
+    fn host(port: u16, protocol: &str, process: &str) -> ListeningPort {
+        ListeningPort {
+            port,
+            protocol: protocol.to_string(),
+            pid: Some(4242),
+            process: Some(process.to_string()),
+        }
+    }
+
+    fn publishing_snapshot(name: &str, mapping: &str, state: ContainerState) -> DockerSnapshot {
+        let mut container = container_entry("aaa", name, state);
+        container.ports = ports::parse_ps_ports(mapping);
+        DockerSnapshot {
+            containers: vec![container],
+            images: vec![],
+            volumes: vec![],
+        }
+    }
+
+    /// The « Hôte » column only exists once a scan has produced something to
+    /// put in it — same rule as the volume list's size column, and for the
+    /// same reason: an empty column reads as a failed measurement.
+    #[test]
+    fn the_host_column_is_absent_until_a_scan_has_run() {
+        let snapshot = publishing_snapshot("lab", "0.0.0.0:8080->80/tcp", ContainerState::Running);
+        let harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Ports));
+        assert_eq!(harness.query_all_by_label("Hôte").count(), 0);
+        assert_eq!(
+            harness
+                .query_all_by_label("Scanner les ports de l'hôte")
+                .count(),
+            1,
+            "the button is what makes it appear"
+        );
+    }
+
+    #[test]
+    fn clicking_the_scan_button_emits_scan_host_ports() {
+        let snapshot = publishing_snapshot("lab", "0.0.0.0:8080->80/tcp", ContainerState::Running);
+        let mut harness = build_harness(State::with_snapshot(snapshot).on_list(DockerList::Ports));
+        harness.get_by_label("Scanner les ports de l'hôte").click();
+        harness.run();
+        assert!(harness
+            .state()
+            .actions
+            .contains(&DockerAction::ScanHostPorts));
+    }
+
+    /// The point of the whole scan: a *stopped* container declares 5432, a
+    /// host Postgres already holds it, and no Docker command would ever say
+    /// so — `find_conflicts` sees a single owner and reports nothing.
+    #[test]
+    fn a_stopped_owner_whose_port_the_host_holds_is_flagged_occupied() {
+        let snapshot =
+            publishing_snapshot("app-db", "0.0.0.0:5432->5432/tcp", ContainerState::Exited);
+        let harness = build_harness(
+            State::with_snapshot(snapshot)
+                .on_list(DockerList::Ports)
+                .with_host_ports(vec![host(5432, "tcp", "postgres.exe")]),
+        );
+        assert_eq!(harness.query_all_by_label("Hôte").count(), 1);
+        assert_eq!(harness.query_all_by_label("occupé").count(), 1);
+        assert_eq!(
+            harness.query_all_by_label("libre").count(),
+            0,
+            "the only published port is the taken one"
+        );
+    }
+
+    #[test]
+    fn a_published_port_no_one_holds_reads_as_free() {
+        let snapshot = publishing_snapshot("lab", "0.0.0.0:8080->80/tcp", ContainerState::Exited);
+        let harness = build_harness(
+            State::with_snapshot(snapshot)
+                .on_list(DockerList::Ports)
+                .with_host_ports(vec![host(80, "tcp", "httpd.exe")]),
+        );
+        assert_eq!(
+            harness.query_all_by_label("libre").count(),
+            1,
+            "8080 is not 80, whatever the container port says"
+        );
+    }
+
+    /// Everything the allocation table does not explain goes in its own
+    /// block — that is what turns "which container wants 80" into "is 80
+    /// free at all".
+    #[test]
+    fn host_listeners_no_container_explains_get_their_own_block() {
+        let snapshot = publishing_snapshot("lab", "0.0.0.0:8080->80/tcp", ContainerState::Running);
+        let harness = build_harness(
+            State::with_snapshot(snapshot)
+                .on_list(DockerList::Ports)
+                .with_host_ports(vec![
+                    host(80, "tcp", "httpd.exe"),
+                    host(8080, "tcp", "com.docker.backend.exe"),
+                ]),
+        );
+        assert_eq!(
+            harness.query_all_by_label("httpd.exe (PID 4242)").count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("com.docker.backend.exe (PID 4242)")
+                .count(),
+            0,
+            "8080 is published by the container, so its proxy is not \"outside Docker\""
+        );
+    }
+
+    /// A machine with no published port is precisely when the host block is
+    /// most useful, so the empty table must not swallow it.
+    #[test]
+    fn the_host_block_still_shows_when_nothing_is_published() {
+        let snapshot = DockerSnapshot {
+            containers: vec![container_entry("aaa", "lab", ContainerState::Running)],
+            images: vec![],
+            volumes: vec![],
+        };
+        let harness = build_harness(
+            State::with_snapshot(snapshot)
+                .on_list(DockerList::Ports)
+                .with_host_ports(vec![host(80, "tcp", "httpd.exe")]),
+        );
+        assert_eq!(harness.query_all_by_label("Aucun port publié.").count(), 1);
+        assert_eq!(
+            harness.query_all_by_label("httpd.exe (PID 4242)").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_scan_that_found_nothing_says_so_rather_than_showing_nothing() {
+        let snapshot = publishing_snapshot("lab", "0.0.0.0:8080->80/tcp", ContainerState::Running);
+        let harness = build_harness(
+            State::with_snapshot(snapshot)
+                .on_list(DockerList::Ports)
+                .with_host_ports(Vec::new()),
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("Aucun port de l'hôte en dehors de Docker.")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness.query_all_by_label("Rescanner l'hôte").count(),
+            1,
+            "a scan that ran turns the button into a rescan"
+        );
     }
 
     #[test]

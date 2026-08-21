@@ -3,7 +3,7 @@
 //! `aidd_docs/tasks/2026_08/2026_08_21-docker-compose-ports-cleanup-master.md`).
 //!
 //! Same split as [`crate::ui::docker_view`]: every type the UI names lives
-//! here, compiled on every OS, and `crate::linux::compose` (which compiles to
+//! here, compiled on every OS, and `crate::docker::compose` (which compiles to
 //! nothing off Linux) is the only module that knows how to *produce* them from
 //! `docker compose` output. Putting [`StackConfig`] / [`StackService`] in the
 //! Linux-only module would break the Windows build the moment [`StackEntry`]
@@ -20,7 +20,7 @@
 //! - It writes `level=warning` lines (unset `.env` variables, mostly) to
 //!   **stderr** while stdout stays clean JSON. Reading the two merged — the
 //!   obvious `2>&1` reflex — corrupts the parse on 6 of the 13 files here.
-//!   [`crate::linux::compose::read_config`] therefore consumes stdout only.
+//!   [`crate::docker::compose::read_config`] therefore consumes stdout only.
 //! - `published` is a **string** (`"8081"`) in every one of the 13 files.
 //!   Other schema versions emit a number, so [`PublishedPort`] accepts both.
 //! - `host_ip` is **absent** from every published port here; a service that
@@ -411,12 +411,15 @@ pub fn declared_owners(stacks: &[StackEntry]) -> Vec<PortOwner> {
             if bindings.is_empty() {
                 return None;
             }
-            Some(PortOwner::new(
-                stack.file.clone(),
-                format!("stack {}", stack.project),
-                OwnerKind::DeclaredStack,
-                bindings,
-            ))
+            Some(
+                PortOwner::new(
+                    stack.file.clone(),
+                    format!("stack {}", stack.project),
+                    OwnerKind::DeclaredStack,
+                    bindings,
+                )
+                .with_source(stack.file.clone()),
+            )
         })
         .collect()
 }
@@ -465,14 +468,8 @@ pub fn plugin_available() -> bool {
     plugin_available_impl()
 }
 
-#[cfg(target_os = "linux")]
 fn plugin_available_impl() -> bool {
-    crate::linux::compose::plugin_available()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn plugin_available_impl() -> bool {
-    false
+    crate::docker::compose::plugin_available()
 }
 
 /// Walk `root` for compose files.
@@ -480,14 +477,8 @@ pub fn discover(root: &Path) -> ScanOutcome {
     discover_impl(root)
 }
 
-#[cfg(target_os = "linux")]
 fn discover_impl(root: &Path) -> ScanOutcome {
-    crate::linux::compose::discover(root)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn discover_impl(_root: &Path) -> ScanOutcome {
-    ScanOutcome::default()
+    crate::docker::compose::discover(root)
 }
 
 /// Read one compose file. The error string is already a formatted, French,
@@ -497,14 +488,8 @@ pub fn read_config(file: &Path) -> Result<StackConfig, String> {
     read_config_impl(file)
 }
 
-#[cfg(target_os = "linux")]
 fn read_config_impl(file: &Path) -> Result<StackConfig, String> {
-    crate::linux::compose::read_config(file).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_config_impl(_file: &Path) -> Result<StackConfig, String> {
-    Err("Docker Compose n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::compose::read_config(file).map_err(|error| error.to_string())
 }
 
 /// argv for `docker compose … up -d` on `target`.
@@ -943,6 +928,8 @@ mod tests {
             } else {
                 Vec::new()
             },
+            compose_service: None,
+            declared_host_ports: std::collections::BTreeSet::new(),
             exit_code: None,
         }
     }

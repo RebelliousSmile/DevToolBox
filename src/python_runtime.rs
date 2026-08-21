@@ -4,11 +4,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::process_flags::hide_console_window;
 
 pub fn action_root() -> PathBuf {
     let mut candidates = Vec::new();
@@ -119,8 +115,7 @@ fn recommendation_command_from_root(root: PathBuf, history_path: &Path) -> Resul
         .env("PYTHONIOENCODING", "utf-8")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    hide_console_window(&mut command);
     Ok(command)
 }
 

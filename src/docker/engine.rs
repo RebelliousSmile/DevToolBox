@@ -78,15 +78,14 @@
 //! **Action**-class call (never bundled into [`fetch`]) rather than a fifth
 //! listing every snapshot pays for.
 
-use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Read};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+use crate::command_runner::RunError;
 use crate::ui::docker_view::{
     ContainerEntry, ContainerState, DockerSnapshot, ImageEntry, VolumeEntry, ZERO_DOCKER_DATE,
 };
@@ -143,10 +142,21 @@ fn binary_available_with_env(env: &EnvLookup) -> bool {
     resolve_docker_binary(env).is_some()
 }
 
+/// File name of the Docker CLI executable on this OS.
+///
+/// Windows needs the `.exe`: `PATH` entries are searched by literal file
+/// name here, and `C:\Program Files\Docker\Docker\resources\bin\docker`
+/// (no extension) does not exist, so a suffix-less lookup reports "docker
+/// introuvable" on a machine where Docker Desktop is installed and running.
+#[cfg(windows)]
+const DOCKER_BINARY: &str = "docker.exe";
+#[cfg(not(windows))]
+const DOCKER_BINARY: &str = "docker";
+
 fn resolve_docker_binary(env: &EnvLookup) -> Option<PathBuf> {
     let path = env("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join("docker"))
+        .map(|dir| dir.join(DOCKER_BINARY))
         .find(|candidate| candidate.is_file())
 }
 
@@ -157,7 +167,7 @@ fn resolve_docker_binary(env: &EnvLookup) -> Option<PathBuf> {
 /// Which timeout budget (and, on timeout, which [`DockerError`] variant)
 /// applies to a given `docker` invocation.
 ///
-/// `pub(crate)` since Part 2: `crate::linux::compose` runs `docker compose`
+/// `pub(crate)` since Part 2: `crate::docker::compose` runs `docker compose`
 /// through the same spawn/poll/kill machinery rather than growing a second,
 /// subtly different one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,88 +238,71 @@ struct CommandOutput {
     stderr: String,
 }
 
-/// The spawn/poll/kill machinery both wrappers share. Only a spawn failure or
-/// a timeout is an `Err` here; a non-zero exit is reported through
-/// [`CommandOutput::success`].
+/// Turn one invocation into Docker's vocabulary.
+///
+/// The spawn/poll/kill machinery itself lives in [`crate::command_runner`];
+/// what stays here is the part that is Docker-specific — that a *listing*
+/// timing out means "daemon unreachable" while an *action* timing out means
+/// "the command failed", a distinction the Risk register calls out and the
+/// module doc's "Timeouts and error classification" section explains.
 fn run_command_capturing(
     program: &str,
     args: &[&str],
     timeout: Duration,
     class: OperationClass,
 ) -> Result<CommandOutput, DockerError> {
-    let mut child = match Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return Err(DockerError::BinaryMissing),
-    };
-
-    let stdout_handle = child.stdout.take().map(|pipe| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = BufReader::new(pipe).read_to_end(&mut bytes);
-            bytes
-        })
-    });
-    let stderr_handle = child.stderr.take().map(|pipe| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = BufReader::new(pipe).read_to_end(&mut bytes);
-            bytes
-        })
-    });
-
-    let expiry = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < expiry => std::thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Err(_) => break None,
+    match crate::command_runner::run_capturing(program, args, timeout) {
+        Ok(capture) => Ok(CommandOutput {
+            success: capture.success,
+            stdout: capture.stdout,
+            stderr: capture.stderr,
+        }),
+        Err(RunError::SpawnFailed) => Err(DockerError::BinaryMissing),
+        Err(RunError::TimedOut(timeout)) => {
+            let message = format!("délai d'attente dépassé ({timeout:?})");
+            Err(match class {
+                OperationClass::Listing => DockerError::DaemonUnreachable(message),
+                OperationClass::Action => DockerError::CommandFailed(message),
+            })
         }
-    };
-
-    let stdout_bytes = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr_bytes = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-
-    let Some(status) = status else {
-        let message = format!("délai d'attente dépassé ({timeout:?})");
-        // An action timing out must never present as daemon-unreachable —
-        // see the module doc's "Timeouts and error classification"
-        // section and the Risk register.
-        return Err(match class {
-            OperationClass::Listing => DockerError::DaemonUnreachable(message),
-            OperationClass::Action => DockerError::CommandFailed(message),
-        });
-    };
-
-    Ok(CommandOutput {
-        success: status.success(),
-        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
-    })
+    }
 }
 
+/// Wordings that mean "the CLI never reached a daemon", as opposed to "the
+/// daemon answered and refused".
+///
+/// The first two are the Unix socket shapes. The last two are what Docker
+/// Desktop emits on Windows, where the transport is a named pipe rather than
+/// a socket:
+///
+/// ```text
+/// error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/containers/json":
+///   open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+/// ```
+///
+/// Note what is deliberately absent: `the system cannot find the file
+/// specified` on its own. That is a generic Win32 error text that a perfectly
+/// reachable daemon also returns (a missing build context, a bad `--file`),
+/// so matching it alone would report a healthy daemon as unreachable. The
+/// pipe-name marker pins it to the transport.
+const DAEMON_UNREACHABLE_MARKERS: [&str; 4] = [
+    "cannot connect",
+    "permission denied",
+    "error during connect",
+    "//./pipe/",
+];
+
 /// Classify a non-zero-exit `docker` invocation's stderr: the well-known
-/// "can't reach the daemon" shapes (a downed daemon, or a permissions
-/// problem reaching its socket) become [`DockerError::DaemonUnreachable`];
-/// everything else (a daemon refusal, e.g. "image is in use") becomes
-/// [`DockerError::CommandFailed`].
+/// "can't reach the daemon" shapes (a downed daemon, a permissions problem
+/// reaching its socket, or an absent Docker Desktop named pipe) become
+/// [`DockerError::DaemonUnreachable`]; everything else (a daemon refusal,
+/// e.g. "image is in use") becomes [`DockerError::CommandFailed`].
 fn classify_stderr(stderr: &str) -> DockerError {
     let lowered = stderr.to_ascii_lowercase();
-    if lowered.contains("cannot connect") || lowered.contains("permission denied") {
+    if DAEMON_UNREACHABLE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
         DockerError::DaemonUnreachable(stderr.trim().to_string())
     } else {
         DockerError::CommandFailed(stderr.trim().to_string())
@@ -611,7 +604,7 @@ const INSPECT_CHUNK: usize = 50;
 /// the line with `{{json …}}` also lets docker escape the values itself, which
 /// is what will let Part 2 append `,"labels":{{json .Config.Labels}}` — a map
 /// whose values contain commas and paths — without inventing a separator.
-const CONTAINER_INSPECT_TEMPLATE: &str = r#"{"id":{{json .Id}},"finished":{{json .State.FinishedAt}},"created":{{json .Created}},"labels":{{json .Config.Labels}}}"#;
+const CONTAINER_INSPECT_TEMPLATE: &str = r#"{"id":{{json .Id}},"finished":{{json .State.FinishedAt}},"created":{{json .Created}},"labels":{{json .Config.Labels}},"bindings":{{json .HostConfig.PortBindings}}}"#;
 const IMAGE_INSPECT_TEMPLATE: &str = r#"{"id":{{json .Id}},"created":{{json .Created}}}"#;
 const VOLUME_INSPECT_TEMPLATE: &str = r#"{"name":{{json .Name}},"created":{{json .CreatedAt}}}"#;
 
@@ -635,6 +628,17 @@ struct ContainerFacts {
     /// `.Config.Labels` verbatim. Docker emits `null` here for a container
     /// with no label at all, hence the `#[serde(default)]` on the wire side.
     labels: HashMap<String, String>,
+    /// `(host_port, protocol)` for every binding the container **asked** for,
+    /// i.e. whose `HostConfig.PortBindings[…].HostPort` is a non-empty string.
+    ///
+    /// The distinction is invisible in `docker ps -a`, and it is the one that
+    /// matters for conflict detection: a service declaring `- "3306"` (target
+    /// only) gets `HostPort:""` and lets docker pick a free host port at every
+    /// start. `docker ps -a` still prints the port of the container's *last*
+    /// run — measured here: four stopped `mysql` containers all reporting
+    /// `0.0.0.0:32768->3306/tcp` while none of them declares a host port. They
+    /// do not collide; each would get its own free port on the next `up`.
+    declared_host_ports: BTreeSet<(u16, String)>,
 }
 
 /// `com.docker.compose.project` — the `-p` name a container runs under.
@@ -642,11 +646,27 @@ const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
 /// `com.docker.compose.project.config_files` — the `,`-separated list of
 /// compose files the project was assembled from.
 const COMPOSE_FILES_LABEL: &str = "com.docker.compose.project.config_files";
+/// `com.docker.compose.service` — the service key inside those files.
+///
+/// Paired with [`COMPOSE_FILES_LABEL`] it identifies the *declaration* a
+/// container instantiates, which is not the same thing as the container: one
+/// declaration re-run under two `-p` names yields two containers publishing
+/// the same host port. Measured here on `.wp-env/525f87…/docker-compose.yml`,
+/// whose `wordpress` service backs both `525f87…-wordpress-1` and
+/// `arbre-de-jade-code-wordpress-1`.
+const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
 impl ContainerFacts {
     fn compose_project(&self) -> Option<String> {
         self.labels
             .get(COMPOSE_PROJECT_LABEL)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn compose_service(&self) -> Option<String> {
+        self.labels
+            .get(COMPOSE_SERVICE_LABEL)
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     }
@@ -695,6 +715,46 @@ struct ContainerInspectWire {
     /// `Option` flattened to an empty map below.
     #[serde(default)]
     labels: Option<HashMap<String, String>>,
+    /// `HostConfig.PortBindings`, keyed by `"<target>/<proto>"`. `null` for a
+    /// container publishing nothing, and each value is itself nullable, hence
+    /// the doubled `Option`.
+    #[serde(default)]
+    bindings: Option<HashMap<String, Option<Vec<HostBindingWire>>>>,
+}
+
+/// One entry of `HostConfig.PortBindings`. Docker capitalises both keys, and
+/// `HostPort` is a **string** — empty when the port is left to docker.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct HostBindingWire {
+    #[serde(rename = "HostPort", default)]
+    host_port: Option<String>,
+}
+
+/// `(host_port, protocol)` for every explicitly requested binding of one
+/// `HostConfig.PortBindings` map. Unparsable ports and empty `HostPort`
+/// values are skipped, never fatal: a binding we cannot read simply falls
+/// back to being treated as dynamic, which only ever *removes* a conflict
+/// badge — the safe direction for a parsing doubt.
+fn declared_host_ports(
+    bindings: &HashMap<String, Option<Vec<HostBindingWire>>>,
+) -> BTreeSet<(u16, String)> {
+    let mut declared = BTreeSet::new();
+    for (target, entries) in bindings {
+        let protocol = target
+            .split_once('/')
+            .map(|(_, proto)| proto.trim().to_ascii_lowercase())
+            .filter(|proto| !proto.is_empty())
+            .unwrap_or_else(|| "tcp".to_string());
+        for entry in entries.iter().flatten() {
+            let Some(raw) = entry.host_port.as_deref() else {
+                continue;
+            };
+            if let Ok(port) = raw.trim().parse::<u16>() {
+                declared.insert((port, protocol.clone()));
+            }
+        }
+    }
+    declared
 }
 
 /// Images key on `id`, volumes on `name`; one wire struct covers both since
@@ -767,6 +827,11 @@ fn parse_container_facts(raw: &str) -> HashMap<String, ContainerFacts> {
                     finished_at: wire.finished,
                     created: wire.created,
                     labels: wire.labels.unwrap_or_default(),
+                    declared_host_ports: wire
+                        .bindings
+                        .as_ref()
+                        .map(declared_host_ports)
+                        .unwrap_or_default(),
                 },
             )
         })
@@ -881,6 +946,10 @@ fn build_container_entry(wire: ContainerWire, facts: Option<&ContainerFacts>) ->
         last_activity: facts.and_then(ContainerFacts::last_activity),
         compose_project: facts.and_then(ContainerFacts::compose_project),
         compose_files: facts.map(ContainerFacts::compose_files).unwrap_or_default(),
+        compose_service: facts.and_then(ContainerFacts::compose_service),
+        declared_host_ports: facts
+            .map(|facts| facts.declared_host_ports.clone())
+            .unwrap_or_default(),
         // From the listing's own status text, not from `facts`: the inspect
         // pass is allowed to come back empty on a race, and a row whose exit
         // code silently became `None` would read as a failed stack.
@@ -894,7 +963,7 @@ fn build_container_entry(wire: ContainerWire, facts: Option<&ContainerFacts>) ->
     }
 }
 
-/// Build one [`ImageEntry`], including the reference [`crate::linux::docker::remove_image`]
+/// Build one [`ImageEntry`], including the reference [`crate::docker::engine::remove_image`]
 /// must receive if this row's delete action is confirmed: the tagged
 /// identity (`repo:tag`) for a tagged row, since `docker rmi <id>` refuses
 /// a multi-tagged image without `--force` (banned) while removing by tag
@@ -1114,26 +1183,65 @@ mod tests {
 
     #[test]
     fn binary_available_with_env_false_when_no_path_entry_has_docker() {
+        let missing =
+            std::env::temp_dir().join(format!("devtoolbox-docker-absent-{}", std::process::id()));
         let env = |name: &str| -> Option<String> {
             match name {
-                "PATH" => Some("/nonexistent/bin:/also/nonexistent".to_string()),
+                "PATH" => Some(missing.display().to_string()),
                 _ => None,
             }
         };
         assert!(!binary_available_with_env(&env));
     }
 
+    /// Hermetic on purpose: an earlier version of this test hardcoded
+    /// `/usr/bin` because that is where `which docker` pointed on the Linux
+    /// reference machine, which made it fail on Windows for a reason that had
+    /// nothing to do with the code under test. Planting a file named
+    /// [`DOCKER_BINARY`] in a temp directory exercises the same lookup on
+    /// every OS, and additionally proves the `.exe` suffix is applied.
     #[test]
     fn binary_available_with_env_true_when_docker_on_path() {
-        // `which docker` -> `/usr/bin/docker` on this reference machine
-        // (Docker 29.7.2, verified while implementing this module).
-        let env = |name: &str| -> Option<String> {
+        let dir =
+            std::env::temp_dir().join(format!("devtoolbox-docker-present-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join(DOCKER_BINARY), b"").expect("fake docker binary");
+
+        let probe = dir.clone();
+        let env = move |name: &str| -> Option<String> {
             match name {
-                "PATH" => Some("/usr/bin".to_string()),
+                "PATH" => Some(probe.display().to_string()),
                 _ => None,
             }
         };
         assert!(binary_available_with_env(&env));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory holding a suffix-less `docker` must not satisfy the lookup
+    /// on Windows — that file is not executable there, and treating it as the
+    /// CLI would turn a clean "introuvable" into a spawn failure.
+    #[cfg(windows)]
+    #[test]
+    fn binary_available_with_env_false_when_only_a_suffixless_docker_is_on_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-docker-suffixless-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("docker"), b"").expect("suffixless file");
+
+        let probe = dir.clone();
+        let env = move |name: &str| -> Option<String> {
+            match name {
+                "PATH" => Some(probe.display().to_string()),
+                _ => None,
+            }
+        };
+        assert!(!binary_available_with_env(&env));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- run_command_with_timeout / classification --------------------------
@@ -1216,6 +1324,29 @@ mod tests {
             classify_stderr(stderr),
             DockerError::DaemonUnreachable(_)
         ));
+    }
+
+    /// Verbatim from `docker ps` with Docker Desktop stopped on Windows.
+    #[test]
+    fn classify_stderr_detects_a_missing_docker_desktop_pipe() {
+        let stderr = "error during connect: Get \"http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/containers/json\": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.";
+        assert!(
+            matches!(classify_stderr(stderr), DockerError::DaemonUnreachable(_)),
+            "got: {:?}",
+            classify_stderr(stderr)
+        );
+    }
+
+    /// The generic Win32 wording alone must NOT be read as an unreachable
+    /// daemon: the daemon answered here, it just could not find a file.
+    #[test]
+    fn classify_stderr_keeps_a_generic_missing_file_as_a_command_failure() {
+        let stderr = "failed to read dockerfile: open Dockerfile: The system cannot find the file specified.";
+        assert!(
+            matches!(classify_stderr(stderr), DockerError::CommandFailed(_)),
+            "got: {:?}",
+            classify_stderr(stderr)
+        );
     }
 
     #[test]
@@ -1995,6 +2126,7 @@ mod tests {
     #[test]
     fn last_activity_prefers_finished_at_when_the_container_has_actually_run() {
         let facts = ContainerFacts {
+            declared_host_ports: BTreeSet::new(),
             labels: HashMap::new(),
             finished_at: Some("2026-06-01T10:00:00Z".to_string()),
             created: Some("2026-01-01T10:00:00Z".to_string()),
@@ -2008,6 +2140,7 @@ mod tests {
     #[test]
     fn last_activity_falls_back_to_created_on_the_docker_zero_date() {
         let facts = ContainerFacts {
+            declared_host_ports: BTreeSet::new(),
             labels: HashMap::new(),
             finished_at: Some(ZERO_DOCKER_DATE.to_string()),
             created: Some("2026-01-01T10:00:00Z".to_string()),
@@ -2022,6 +2155,7 @@ mod tests {
     #[test]
     fn last_activity_is_none_when_neither_date_is_usable() {
         let facts = ContainerFacts {
+            declared_host_ports: BTreeSet::new(),
             labels: HashMap::new(),
             finished_at: Some(String::new()),
             created: Some(ZERO_DOCKER_DATE.to_string()),
@@ -2110,6 +2244,7 @@ mod tests {
         let mut wire = container("581c17389e54", "nginx:alpine");
         wire.ports = "0.0.0.0:5656->5656/tcp, [::]:5656->5656/tcp".to_string();
         let facts = ContainerFacts {
+            declared_host_ports: BTreeSet::new(),
             labels: HashMap::new(),
             finished_at: Some("2026-06-01T10:00:00Z".to_string()),
             created: Some("2026-01-01T10:00:00Z".to_string()),

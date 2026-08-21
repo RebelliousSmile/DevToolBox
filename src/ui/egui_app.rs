@@ -868,6 +868,11 @@ enum DeferredDockerAction {
     /// variants: `docker system df -v` takes ~5s on this machine, and running
     /// it inline would freeze the UI before the "Calcul…" status text paints.
     ComputeVolumeSizes,
+    /// Deferred for the same reason as `ComputeVolumeSizes` and not because
+    /// it is destructive (it reads two console tools and writes nothing):
+    /// `netstat -ano` plus `tasklist` take ~1 s on this machine, long enough
+    /// to drop a frame if run inline.
+    ScanHostPorts,
     /// One `docker` call per target, so this is the slowest deferred action
     /// of them all — all the more reason for it to run after its "Suppression
     /// de N ressource(s)…" status has painted.
@@ -1001,6 +1006,14 @@ pub struct EguiApp {
     /// deliberately absent from `config.json`: a tab choice is not a setting,
     /// and « Conteneurs » is the right thing to reopen on.
     docker_active_list: DockerList,
+    /// Result of the last host-port scan, `None` until one has run.
+    ///
+    /// Deliberately *not* refreshed by `refetch_docker`: the scan reads the
+    /// machine's sockets, not Docker's state, so a container action has no
+    /// reason to invalidate it — and re-running `netstat` after every `docker
+    /// rm` would add a second of latency to each one. The « Rescanner l'hôte »
+    /// button is how it gets refreshed.
+    docker_host_ports: Option<Vec<crate::net::ListeningPort>>,
 
     // --- Compose stacks (Part 2) -------------------------------------------
     /// `docker compose` plugin availability, probed once the first time the
@@ -1232,6 +1245,7 @@ impl EguiApp {
             docker_selection: HashSet::new(),
             docker_batch_report: Vec::new(),
             docker_active_list: DockerList::default(),
+            docker_host_ports: None,
             compose_plugin: None,
             compose_stacks: Vec::new(),
             compose_loaded: false,
@@ -1898,6 +1912,23 @@ impl EguiApp {
             }
             return;
         }
+        // Same shape argument as `ComputeVolumeSizes`: the result is a list,
+        // not a `Result<(), String>`, and it must not trigger a refetch — the
+        // Docker snapshot has nothing to do with what the host is listening on.
+        if matches!(action, DeferredDockerAction::ScanHostPorts) {
+            match crate::net::scan() {
+                Ok(ports) => {
+                    let message = format!("{} port(s) à l'écoute sur l'hôte.", ports.len());
+                    self.docker_host_ports = Some(ports);
+                    self.set_status(message, false);
+                }
+                // The previous scan is kept on failure: stale data with a
+                // visible error beats silently emptying the « Hôte » column,
+                // which would read as "everything is free now".
+                Err(err) => self.set_status(err, true),
+            }
+            return;
+        }
         let result = match &action {
             DeferredDockerAction::StopContainer { id, .. } => docker_view::stop_container(id),
             DeferredDockerAction::RemoveContainer { id, .. } => docker_view::remove_container(id),
@@ -1905,7 +1936,9 @@ impl EguiApp {
                 docker_view::remove_image(reference)
             }
             DeferredDockerAction::RemoveVolume { name } => docker_view::remove_volume(name),
-            DeferredDockerAction::ComputeVolumeSizes | DeferredDockerAction::DeleteSelection(_) => {
+            DeferredDockerAction::ComputeVolumeSizes
+            | DeferredDockerAction::ScanHostPorts
+            | DeferredDockerAction::DeleteSelection(_) => {
                 unreachable!("handled above")
             }
         };
@@ -1925,6 +1958,7 @@ impl EguiApp {
                         format!("Volume {name} supprimé.")
                     }
                     DeferredDockerAction::ComputeVolumeSizes
+                    | DeferredDockerAction::ScanHostPorts
                     | DeferredDockerAction::DeleteSelection(_) => unreachable!("handled above"),
                 };
                 self.set_status(message, false);
@@ -1976,6 +2010,7 @@ impl EguiApp {
             DockerAction::Refresh
             | DockerAction::Retry
             | DockerAction::ComputeVolumeSizes
+            | DockerAction::ScanHostPorts
             | DockerAction::ToggleSelection(_)
             | DockerAction::SelectDormant
             | DockerAction::ClearSelection
@@ -2134,11 +2169,14 @@ impl EguiApp {
                      • {volumes} volume(s) — docker volume rm\n\n"
                 );
                 match size {
+                    // `(0, true)` means *nothing* in the selection had a known
+                    // size, not that it frees nothing: announcing « ≥ 0B »
+                    // there dresses up an absent measurement as a real one.
+                    Some((0, true)) | None => message.push_str("Espace récupéré inconnu.\n"),
                     Some((bytes, partial)) => message.push_str(&format!(
                         "Libérera environ {}.\n",
                         docker_view::format_selection_size(bytes, partial)
                     )),
-                    None => message.push_str("Espace récupéré inconnu.\n"),
                 }
                 message.push_str("Continuer ?");
                 (
@@ -3477,6 +3515,7 @@ impl EguiApp {
             selection: &self.docker_selection,
             batch_report: &self.docker_batch_report,
             active_list: self.docker_active_list,
+            host_ports: self.docker_host_ports.as_deref(),
         };
         let actions = docker_view::render(ui, &state);
         for action in actions {
@@ -3522,6 +3561,12 @@ impl EguiApp {
                 DockerAction::ComputeVolumeSizes => {
                     self.deferred_docker_action = Some(DeferredDockerAction::ComputeVolumeSizes);
                     self.set_status("Calcul des tailles des volumes…", false);
+                    ui.ctx().request_repaint();
+                }
+                // Also non-destructive: it only reads the host's sockets.
+                DockerAction::ScanHostPorts => {
+                    self.deferred_docker_action = Some(DeferredDockerAction::ScanHostPorts);
+                    self.set_status("Analyse des ports de l'hôte…", false);
                     ui.ctx().request_repaint();
                 }
                 destructive => self.open_docker_confirm(destructive),
@@ -6408,6 +6453,8 @@ mod tests {
                 last_activity: None,
                 compose_project: None,
                 compose_files: Vec::new(),
+                compose_service: None,
+                declared_host_ports: std::collections::BTreeSet::new(),
                 exit_code: None,
             }],
             images: vec![],
@@ -6587,6 +6634,8 @@ mod tests {
             last_activity: None,
             compose_project: Some("lab".to_string()),
             compose_files: vec![running_file],
+            compose_service: None,
+            declared_host_ports: std::collections::BTreeSet::new(),
             exit_code: None,
         };
         container.compose_project = Some("lab".to_string());
@@ -6713,6 +6762,40 @@ mod tests {
         // `docker_actions_enabled` is false in every test app, so the worker
         // thread is never spawned and the flag never latches.
         assert!(!harness.state().compose_scanning);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scan_host_ports_never_opens_a_dialog_and_executes_exactly_once() {
+        let (mut app, dir) = cleanup_test_app("docker-scan-host-ports");
+        app.docker_available = true;
+        app.docker = Some(Ok(sample_docker_snapshot()));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Ports (0)").click();
+        harness.run();
+        assert_eq!(harness.state().docker_active_list, DockerList::Ports);
+        harness.get_by_label("Scanner les ports de l'hôte").click();
+        // Same two-frame shape as `ComputeVolumeSizes` above, and for the
+        // same reason: the click stashes the deferred action, the next frame
+        // runs it.
+        harness.run_steps(1);
+        assert!(
+            harness.state().active_dialog.is_none(),
+            "ScanHostPorts must never open a confirm dialog — it reads sockets, it writes nothing"
+        );
+        assert_eq!(harness.state().docker_action_invocations, 0);
+        harness.step();
+        assert_eq!(harness.state().docker_action_invocations, 1);
+        // `docker_actions_enabled` is false in a test app, so nothing was
+        // actually spawned and the result stays `None` — the point here is
+        // the dispatch, not `netstat` itself (covered in `crate::net`).
+        assert!(harness.state().docker_host_ports.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
