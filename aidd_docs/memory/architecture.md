@@ -301,7 +301,9 @@ only converts its private `ConfigWire` into them. Measured contracts:
   what keeps a `node_modules` tree from being descended at all, and never
   truncates silently — past `SCAN_WARN_MS` the outcome carries a warning.
 - The command's output goes to an **anchored bottom panel**
-  (`compose_view::render_log_panel`, `egui::Panel::bottom`), not into the
+  (`compose_view::render_log_panel`, `egui::Panel::bottom` — egui 0.35
+  unified the panel types: no `TopBottomPanel`, `show` not `show_inside`,
+  `default_size`/`size_range` not `*_height`), not into the
   tab's flow and not into the Terminal view. Two constraints decided this.
   Inline, the panel appeared and vanished mid-run and shoved the Docker
   sections below it while the user was reading them. Rerouting to Terminal
