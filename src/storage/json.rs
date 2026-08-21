@@ -257,6 +257,7 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: Settings {
                 show_categories: true,
@@ -264,6 +265,7 @@ mod tests {
                 theme: "light".to_string(),
                 launch_at_startup: true,
                 show_descriptions: true,
+                dormant_after_days: 60,
             },
             categories: vec![Category {
                 id: "system".to_string(),
@@ -283,6 +285,7 @@ mod tests {
                     group_name: None,
                     variant_label: None,
                     machine_specific: false,
+                    info: None,
                 },
                 Command {
                     id: "cmd".to_string(),
@@ -296,6 +299,7 @@ mod tests {
                     group_name: None,
                     variant_label: None,
                     machine_specific: false,
+                    info: None,
                 },
             ],
         }

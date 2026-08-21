@@ -5,7 +5,8 @@
     "icon_size": 80,
     "theme": "light",
     "launch_at_startup": true,
-    "show_descriptions": true
+    "show_descriptions": true,
+    "dormant_after_days": 60
   },
   "categories": [
     {

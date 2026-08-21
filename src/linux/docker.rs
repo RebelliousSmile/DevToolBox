@@ -78,7 +78,7 @@
 //! **Action**-class call (never bundled into [`fetch`]) rather than a fifth
 //! listing every snapshot pays for.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -88,8 +88,9 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::ui::docker_view::{
-    ContainerEntry, ContainerState, DockerSnapshot, ImageEntry, VolumeEntry,
+    ContainerEntry, ContainerState, DockerSnapshot, ImageEntry, VolumeEntry, ZERO_DOCKER_DATE,
 };
+use crate::ui::ports::parse_ps_ports;
 
 /// Failure modes a `docker` invocation can produce, deliberately coarser
 /// than raw exit codes/stderr text so callers (the Phase 2 façade, later
@@ -155,8 +156,12 @@ fn resolve_docker_binary(env: &EnvLookup) -> Option<PathBuf> {
 
 /// Which timeout budget (and, on timeout, which [`DockerError`] variant)
 /// applies to a given `docker` invocation.
+///
+/// `pub(crate)` since Part 2: `crate::linux::compose` runs `docker compose`
+/// through the same spawn/poll/kill machinery rather than growing a second,
+/// subtly different one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperationClass {
+pub(crate) enum OperationClass {
     /// `ps -a` / `images` / `volume ls`: a healthy daemon answers near
     /// instantly, so a long wait here is itself evidence of an
     /// unreachable daemon.
@@ -195,12 +200,43 @@ fn run_docker(args: &[&str], class: OperationClass) -> Result<String, DockerErro
 /// elapses, in which case the child is killed. stdout/stderr are drained
 /// concurrently on background threads so a child that fills its pipe
 /// buffer can't deadlock the wait loop.
-fn run_command_with_timeout(
+pub(crate) fn run_command_with_timeout(
     program: &str,
     args: &[&str],
     timeout: Duration,
     class: OperationClass,
 ) -> Result<String, DockerError> {
+    let output = run_command_capturing(program, args, timeout, class)?;
+    if output.success {
+        Ok(output.stdout)
+    } else {
+        Err(classify_stderr(&output.stderr))
+    }
+}
+
+/// What a `docker` invocation produced, exit status included.
+///
+/// [`run_command_with_timeout`] collapses a non-zero exit into a
+/// [`DockerError`], which is the right call for every command whose output is
+/// worthless when it failed. `docker inspect` is the exception: it exits
+/// non-zero as soon as *one* id is unknown — a resource removed between the
+/// listing and the inspect — while still printing every id it did resolve, so
+/// the dates pass needs the stdout of a "failed" run.
+struct CommandOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// The spawn/poll/kill machinery both wrappers share. Only a spawn failure or
+/// a timeout is an `Err` here; a non-zero exit is reported through
+/// [`CommandOutput::success`].
+fn run_command_capturing(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    class: OperationClass,
+) -> Result<CommandOutput, DockerError> {
     let mut child = match Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -259,14 +295,11 @@ fn run_command_with_timeout(
         });
     };
 
-    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-
-    if status.success() {
-        Ok(stdout)
-    } else {
-        Err(classify_stderr(&stderr))
-    }
+    Ok(CommandOutput {
+        success: status.success(),
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    })
 }
 
 /// Classify a non-zero-exit `docker` invocation's stderr: the well-known
@@ -310,6 +343,16 @@ struct ContainerWire {
     /// [`extract_rw_size`].
     #[serde(default, rename = "Size")]
     size: String,
+    /// Published bindings, e.g. `"0.0.0.0:5656->5656/tcp, [::]:5656->5656/tcp"`
+    /// (verbatim from this machine's `REAL_PS_FIXTURE`). Empty for a stopped
+    /// container: docker publishes nothing until it runs.
+    ///
+    /// `Labels` is deliberately **not** deserialized alongside it: `docker ps`
+    /// joins labels with `,` while the compose `config_files` label is itself
+    /// a `,`-separated list, so the compose labels Part 2 needs come from the
+    /// structured `.Config.Labels` of the grouped inspect instead.
+    #[serde(default, rename = "Ports")]
+    ports: String,
     /// Captured for wire-fidelity/debug parity with `docker ps -a`'s own
     /// output (`Debug`-derived), but not surfaced on [`ContainerEntry`] —
     /// `status` already carries the free-text detail the view displays, and
@@ -553,6 +596,244 @@ fn compute_used(images: &[ImageWire], containers: &[ContainerWire]) -> Vec<bool>
 }
 
 // ---------------------------------------------------------------------------
+// Grouped `docker inspect` — dates for the dormancy badges
+// ---------------------------------------------------------------------------
+
+/// Ids per `docker inspect` call. Large enough that a normal machine needs a
+/// single round-trip, small enough to stay well clear of `ARG_MAX`.
+const INSPECT_CHUNK: usize = 50;
+
+/// **The template emits NDJSON, not tab-separated fields** — measured on this
+/// machine, and a silent-failure trap: `docker inspect --format` does *not*
+/// expand `\t` (that is a `docker ps --format 'table …'` behaviour), it prints
+/// the two literal characters `\` and `t`, so a `split('\t')` would find one
+/// field per line and leave every date `None` with no error anywhere. Building
+/// the line with `{{json …}}` also lets docker escape the values itself, which
+/// is what will let Part 2 append `,"labels":{{json .Config.Labels}}` — a map
+/// whose values contain commas and paths — without inventing a separator.
+const CONTAINER_INSPECT_TEMPLATE: &str = r#"{"id":{{json .Id}},"finished":{{json .State.FinishedAt}},"created":{{json .Created}},"labels":{{json .Config.Labels}}}"#;
+const IMAGE_INSPECT_TEMPLATE: &str = r#"{"id":{{json .Id}},"created":{{json .Created}}}"#;
+const VOLUME_INSPECT_TEMPLATE: &str = r#"{"name":{{json .Name}},"created":{{json .CreatedAt}}}"#;
+
+/// Which `--type` a date-only inspect pass targets. Containers are
+/// deliberately **not** a variant: they go through [`inspect_containers`],
+/// which returns a richer [`ContainerFacts`] (and gains the compose labels in
+/// Part 2). The two helpers are disjoint, not overlapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectKind {
+    Image,
+    Volume,
+}
+
+/// What the container inspect pass brings back per id — dates *and*, since
+/// Part 2, the compose labels, which is the whole reason containers get their
+/// own helper instead of going through [`inspect_dates`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ContainerFacts {
+    finished_at: Option<String>,
+    created: Option<String>,
+    /// `.Config.Labels` verbatim. Docker emits `null` here for a container
+    /// with no label at all, hence the `#[serde(default)]` on the wire side.
+    labels: HashMap<String, String>,
+}
+
+/// `com.docker.compose.project` — the `-p` name a container runs under.
+const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+/// `com.docker.compose.project.config_files` — the `,`-separated list of
+/// compose files the project was assembled from.
+const COMPOSE_FILES_LABEL: &str = "com.docker.compose.project.config_files";
+
+impl ContainerFacts {
+    fn compose_project(&self) -> Option<String> {
+        self.labels
+            .get(COMPOSE_PROJECT_LABEL)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn compose_files(&self) -> Vec<String> {
+        self.labels
+            .get(COMPOSE_FILES_LABEL)
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl ContainerFacts {
+    /// `FinishedAt` when it is not the zero value, otherwise `Created`: a
+    /// container in the `created` state has never run, so its creation date
+    /// *is* its last activity.
+    fn last_activity(&self) -> Option<String> {
+        match self.finished_at.as_deref() {
+            Some(date) if !date.is_empty() && date != ZERO_DOCKER_DATE => Some(date.to_string()),
+            _ => self
+                .created
+                .as_deref()
+                .filter(|date| !date.is_empty() && *date != ZERO_DOCKER_DATE)
+                .map(str::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ContainerInspectWire {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    finished: Option<String>,
+    #[serde(default)]
+    created: Option<String>,
+    /// `null` for a container carrying no label at all — `#[serde(default)]`
+    /// alone would still fail on an explicit `null`, so the field is an
+    /// `Option` flattened to an empty map below.
+    #[serde(default)]
+    labels: Option<HashMap<String, String>>,
+}
+
+/// Images key on `id`, volumes on `name`; one wire struct covers both since
+/// the absent field simply stays empty.
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DatedInspectWire {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    created: Option<String>,
+}
+
+/// `docker inspect` returns the full 64-character container id and the
+/// `sha256:`-prefixed image id, while `docker ps`/`docker images --format
+/// '{{json .}}'` return the 12-character short forms (both measured on this
+/// machine). Both sides of the join go through this, or the join silently
+/// matches nothing and the date column stays permanently empty.
+fn normalize_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed.strip_prefix("sha256:").unwrap_or(trimmed);
+    without_prefix.chars().take(12).collect()
+}
+
+fn inspect_args<'a>(kind: &'a str, template: &'a str, ids: &'a [String]) -> Vec<String> {
+    let mut args = vec![
+        "inspect".to_string(),
+        "--type".to_string(),
+        kind.to_string(),
+        "--format".to_string(),
+        template.to_string(),
+    ];
+    args.extend(ids.iter().cloned());
+    args
+}
+
+/// Run a `docker inspect` chunk and hand back its stdout **whatever the exit
+/// status**: one unknown id (a resource removed between the listing and the
+/// inspect) makes the command exit non-zero while it still prints every id it
+/// resolved, and treating that as a hard failure would blank the whole column
+/// on a benign race. A timeout or a missing binary contributes nothing, so
+/// those rows are simply left date-less — no badge, never a wrong badge.
+fn inspect_stdout(args: &[String]) -> String {
+    if !binary_available() {
+        return String::new();
+    }
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_command_capturing(
+        "docker",
+        &borrowed,
+        timeout_for(OperationClass::Listing),
+        OperationClass::Listing,
+    )
+    .map(|output| output.stdout)
+    .unwrap_or_default()
+}
+
+/// Pure NDJSON parsing of the container inspect pass, keyed by
+/// [`normalize_id`]. Lines that are truncated, unparsable or carry no id are
+/// dropped without touching the rest of the batch.
+fn parse_container_facts(raw: &str) -> HashMap<String, ContainerFacts> {
+    parse_ndjson::<ContainerInspectWire>(raw)
+        .into_iter()
+        .filter(|wire| !wire.id.trim().is_empty())
+        .map(|wire| {
+            (
+                normalize_id(&wire.id),
+                ContainerFacts {
+                    finished_at: wire.finished,
+                    created: wire.created,
+                    labels: wire.labels.unwrap_or_default(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Pure NDJSON parsing of a date-only inspect pass. Images key on the
+/// normalized id, volumes on their name (identical on both sides).
+fn parse_inspect_dates(kind: InspectKind, raw: &str) -> HashMap<String, String> {
+    parse_ndjson::<DatedInspectWire>(raw)
+        .into_iter()
+        .filter_map(|wire| {
+            let key = match kind {
+                InspectKind::Image => normalize_id(&wire.id),
+                InspectKind::Volume => wire.name.trim().to_string(),
+            };
+            let created = wire.created?;
+            if key.is_empty() || created.trim().is_empty() {
+                return None;
+            }
+            Some((key, created))
+        })
+        .collect()
+}
+
+fn inspect_containers(ids: &[String]) -> HashMap<String, ContainerFacts> {
+    let mut facts = HashMap::new();
+    for chunk in ids.chunks(INSPECT_CHUNK) {
+        let raw = inspect_stdout(&inspect_args(
+            "container",
+            CONTAINER_INSPECT_TEMPLATE,
+            chunk,
+        ));
+        facts.extend(parse_container_facts(&raw));
+    }
+    facts
+}
+
+fn inspect_dates(kind: InspectKind, ids: &[String]) -> HashMap<String, String> {
+    let (type_arg, template) = match kind {
+        InspectKind::Image => ("image", IMAGE_INSPECT_TEMPLATE),
+        InspectKind::Volume => ("volume", VOLUME_INSPECT_TEMPLATE),
+    };
+    let mut dates = HashMap::new();
+    for chunk in ids.chunks(INSPECT_CHUNK) {
+        let raw = inspect_stdout(&inspect_args(type_arg, template, chunk));
+        dates.extend(parse_inspect_dates(kind, &raw));
+    }
+    dates
+}
+
+/// Per-image list of the containers referencing it, one entry per image, in
+/// the same order — the very walk [`compute_used`] performs, kept instead of
+/// collapsed into a bool. `used` keeps its own used-on-doubt semantics (an
+/// unresolvable reference marks *every* image used, with nothing to list),
+/// so this is a refinement, never a replacement.
+fn compute_used_by(images: &[ImageWire], containers: &[ContainerWire]) -> Vec<Vec<String>> {
+    let mut used_by = vec![Vec::new(); images.len()];
+    for container in containers {
+        if let Some(index) = resolve_image_index(images, &container.image) {
+            used_by[index].push(container.id.clone());
+        }
+    }
+    used_by
+}
+
+// ---------------------------------------------------------------------------
 // Container state mapping
 // ---------------------------------------------------------------------------
 
@@ -594,8 +875,16 @@ fn extract_rw_size(raw: &str) -> String {
 // Wire -> view type mapping
 // ---------------------------------------------------------------------------
 
-fn build_container_entry(wire: ContainerWire) -> ContainerEntry {
+fn build_container_entry(wire: ContainerWire, facts: Option<&ContainerFacts>) -> ContainerEntry {
     ContainerEntry {
+        ports: parse_ps_ports(&wire.ports),
+        last_activity: facts.and_then(ContainerFacts::last_activity),
+        compose_project: facts.and_then(ContainerFacts::compose_project),
+        compose_files: facts.map(ContainerFacts::compose_files).unwrap_or_default(),
+        // From the listing's own status text, not from `facts`: the inspect
+        // pass is allowed to come back empty on a race, and a row whose exit
+        // code silently became `None` would read as a failed stack.
+        exit_code: crate::ui::docker_view::parse_exit_code(&wire.status),
         id: wire.id,
         name: wire.names,
         image: wire.image,
@@ -611,7 +900,12 @@ fn build_container_entry(wire: ContainerWire) -> ContainerEntry {
 /// a multi-tagged image without `--force` (banned) while removing by tag
 /// untags cleanly; the short ID for an untagged `<none>:<none>` row, which
 /// has no tag to remove by at all.
-fn build_image_entry(wire: ImageWire, used: bool) -> ImageEntry {
+fn build_image_entry(
+    wire: ImageWire,
+    used: bool,
+    used_by: Vec<String>,
+    created_iso: Option<String>,
+) -> ImageEntry {
     let repository = if wire.repository.is_empty() {
         "<none>".to_string()
     } else {
@@ -637,12 +931,19 @@ fn build_image_entry(wire: ImageWire, used: bool) -> ImageEntry {
         created: wire.created_at,
         used,
         rmi_reference,
+        created_iso,
+        used_by,
     }
 }
 
-fn build_volume_entry(wire: VolumeWire, dangling: &HashSet<String>) -> VolumeEntry {
+fn build_volume_entry(
+    wire: VolumeWire,
+    dangling: &HashSet<String>,
+    created_iso: Option<String>,
+) -> VolumeEntry {
     VolumeEntry {
         orphan: dangling.contains(&wire.name),
+        created_iso,
         name: wire.name,
         driver: wire.driver,
         // `docker volume ls` never reports a real size (always "N/A" on this
@@ -670,19 +971,54 @@ pub fn fetch() -> Result<DockerSnapshot, DockerError> {
     let volume_wires = list_volumes()?;
     let dangling_names = list_dangling_volume_names()?;
 
+    // Three grouped, chunked `docker inspect` passes: the listings return
+    // 12-character ids and no volume date at all, so the dormancy dates cannot
+    // come from them. None of the three can fail the snapshot — a missing date
+    // costs a badge, not the tab (see `inspect_stdout`).
+    let container_ids: Vec<String> = container_wires
+        .iter()
+        .map(|wire| wire.id.clone())
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    let image_ids: Vec<String> = image_wires
+        .iter()
+        .map(|wire| wire.id.clone())
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    let volume_names: Vec<String> = volume_wires
+        .iter()
+        .map(|wire| wire.name.clone())
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+
+    let container_facts = inspect_containers(&container_ids);
+    let image_dates = inspect_dates(InspectKind::Image, &image_ids);
+    let volume_dates = inspect_dates(InspectKind::Volume, &volume_names);
+
     let used_flags = compute_used(&image_wires, &container_wires);
+    let used_by_lists = compute_used_by(&image_wires, &container_wires);
     let images = image_wires
         .into_iter()
         .zip(used_flags)
-        .map(|(wire, used)| build_image_entry(wire, used))
+        .zip(used_by_lists)
+        .map(|((wire, used), used_by)| {
+            let created_iso = image_dates.get(&normalize_id(&wire.id)).cloned();
+            build_image_entry(wire, used, used_by, created_iso)
+        })
         .collect();
     let volumes = volume_wires
         .into_iter()
-        .map(|wire| build_volume_entry(wire, &dangling_names))
+        .map(|wire| {
+            let created_iso = volume_dates.get(wire.name.trim()).cloned();
+            build_volume_entry(wire, &dangling_names, created_iso)
+        })
         .collect();
     let containers = container_wires
         .into_iter()
-        .map(build_container_entry)
+        .map(|wire| {
+            let facts = container_facts.get(&normalize_id(&wire.id)).cloned();
+            build_container_entry(wire, facts.as_ref())
+        })
         .collect();
 
     Ok(DockerSnapshot {
@@ -969,6 +1305,7 @@ mod tests {
             names: format!("container-{id}"),
             image: image.to_string(),
             state: "running".to_string(),
+            ports: String::new(),
             status: String::new(),
             size: String::new(),
             created_at: String::new(),
@@ -1133,23 +1470,34 @@ mod tests {
             state: "running".to_string(),
             status: "Up 3 hours".to_string(),
             size: "767kB (virtual 148MB)".to_string(),
+            ports: String::new(),
             created_at: String::new(),
         };
-        assert_eq!(build_container_entry(wire).rw_size, "767kB");
+        assert_eq!(build_container_entry(wire, None).rw_size, "767kB");
     }
 
     // --- build_image_entry: rmi reference selection -----------------------------
 
     #[test]
     fn build_image_entry_tagged_row_uses_repo_tag_as_rmi_reference() {
-        let entry = build_image_entry(image("581c17389e54", "proxy-pilotphone", "latest"), false);
+        let entry = build_image_entry(
+            image("581c17389e54", "proxy-pilotphone", "latest"),
+            false,
+            Vec::new(),
+            None,
+        );
         assert_eq!(entry.identity, "proxy-pilotphone:latest");
         assert_eq!(entry.rmi_reference, "proxy-pilotphone:latest");
     }
 
     #[test]
     fn build_image_entry_untagged_row_uses_id_as_rmi_reference() {
-        let entry = build_image_entry(image("581c17389e54", "<none>", "<none>"), false);
+        let entry = build_image_entry(
+            image("581c17389e54", "<none>", "<none>"),
+            false,
+            Vec::new(),
+            None,
+        );
         assert_eq!(entry.identity, "<none>:<none>");
         assert_eq!(entry.rmi_reference, "581c17389e54");
     }
@@ -1159,15 +1507,15 @@ mod tests {
         // `#[serde(default)]` degrades a missing Repository/Tag field to
         // "" rather than "<none>" — the mapping must still land on the
         // untagged/by-ID path.
-        let entry = build_image_entry(image("581c17389e54", "", ""), false);
+        let entry = build_image_entry(image("581c17389e54", "", ""), false, Vec::new(), None);
         assert_eq!(entry.identity, "<none>:<none>");
         assert_eq!(entry.rmi_reference, "581c17389e54");
     }
 
     #[test]
     fn build_image_entry_propagates_used_flag() {
-        assert!(build_image_entry(image("a", "img", "latest"), true).used);
-        assert!(!build_image_entry(image("a", "img", "latest"), false).used);
+        assert!(build_image_entry(image("a", "img", "latest"), true, Vec::new(), None).used);
+        assert!(!build_image_entry(image("a", "img", "latest"), false, Vec::new(), None).used);
     }
 
     // --- build_volume_entry: orphan computation ----------------------------------
@@ -1182,6 +1530,7 @@ mod tests {
                 mountpoint: "/var/lib/docker/volumes/orphan-vol/_data".to_string(),
             },
             &dangling,
+            None,
         );
         assert!(orphan.orphan);
 
@@ -1192,6 +1541,7 @@ mod tests {
                 mountpoint: "/var/lib/docker/volumes/attached-vol/_data".to_string(),
             },
             &dangling,
+            None,
         );
         assert!(!attached.orphan);
     }
@@ -1513,5 +1863,270 @@ mod tests {
         // since whether docker is installed is outside this test's
         // control.
         let _ = binary_available();
+    }
+
+    // --- normalize_id ---------------------------------------------------------
+
+    #[test]
+    fn normalize_id_leaves_the_twelve_char_form_from_the_listings_untouched() {
+        assert_eq!(normalize_id("581c17389e54"), "581c17389e54");
+    }
+
+    #[test]
+    fn normalize_id_truncates_the_full_container_id_returned_by_inspect() {
+        let full = "581c17389e5412ab7d0f3c9a1b2e4d6f8091a2b3c4d5e6f708192a3b4c5d6e7f";
+        assert_eq!(normalize_id(full), "581c17389e54");
+    }
+
+    #[test]
+    fn normalize_id_strips_the_sha256_prefix_of_image_ids() {
+        assert_eq!(
+            normalize_id("sha256:581c17389e5412ab7d0f3c9a1b2e4d6f8091a2b3"),
+            "581c17389e54"
+        );
+    }
+
+    #[test]
+    fn normalize_id_trims_and_survives_shorter_than_twelve_characters() {
+        assert_eq!(normalize_id("  abc123  "), "abc123");
+        assert_eq!(normalize_id(""), "");
+    }
+
+    #[test]
+    fn normalize_id_agrees_on_both_sides_of_the_join() {
+        // The whole point of the helper: the listing form and the inspect
+        // form of the same image must land on the same key.
+        let from_listing = normalize_id("581c17389e54");
+        let from_inspect =
+            normalize_id("sha256:581c17389e5412ab7d0f3c9a1b2e4d6f8091a2b3c4d5e6f708192a3b4c5d6e7f");
+        assert_eq!(from_listing, from_inspect);
+    }
+
+    // --- inspect_args ---------------------------------------------------------
+
+    #[test]
+    fn inspect_args_passes_the_type_the_template_and_every_id() {
+        let ids = vec!["aaa".to_string(), "bbb".to_string()];
+        let args = inspect_args("container", CONTAINER_INSPECT_TEMPLATE, &ids);
+        assert_eq!(
+            args,
+            vec![
+                "inspect".to_string(),
+                "--type".to_string(),
+                "container".to_string(),
+                "--format".to_string(),
+                CONTAINER_INSPECT_TEMPLATE.to_string(),
+                "aaa".to_string(),
+                "bbb".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_inspect_templates_emit_json_fields_never_tab_separated_ones() {
+        // Regression guard on a measured silent-failure trap: `docker
+        // inspect --format` prints a literal `\t` instead of expanding it,
+        // so a tab-separated template would blank every date with no error.
+        for template in [
+            CONTAINER_INSPECT_TEMPLATE,
+            IMAGE_INSPECT_TEMPLATE,
+            VOLUME_INSPECT_TEMPLATE,
+        ] {
+            assert!(!template.contains("\\t"), "template: {template}");
+            assert!(template.contains("{{json "), "template: {template}");
+        }
+    }
+
+    // --- parse_container_facts -------------------------------------------------
+
+    #[test]
+    fn parse_container_facts_keys_on_the_normalized_id() {
+        let raw = concat!(
+            r#"{"id":"581c17389e5412ab7d0f3c9a1b2e4d6f8091a2b3","#,
+            r#""finished":"2026-06-01T10:00:00Z","created":"2026-01-01T10:00:00Z"}"#,
+            "\n"
+        );
+        let facts = parse_container_facts(raw);
+        assert_eq!(facts.len(), 1);
+        let entry = facts.get("581c17389e54").expect("keyed on the short id");
+        assert_eq!(entry.finished_at.as_deref(), Some("2026-06-01T10:00:00Z"));
+    }
+
+    #[test]
+    fn parse_container_facts_drops_a_line_with_no_id_and_keeps_the_rest() {
+        let raw = concat!(
+            r#"{"id":"","finished":"2026-06-01T10:00:00Z","created":null}"#,
+            "\n",
+            r#"{"id":"aaaaaaaaaaaa","finished":"2026-06-02T10:00:00Z","created":null}"#,
+            "\n"
+        );
+        let facts = parse_container_facts(raw);
+        assert_eq!(facts.len(), 1);
+        assert!(facts.contains_key("aaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn parse_container_facts_survives_a_truncated_line_mid_batch() {
+        let raw = concat!(
+            r#"{"id":"aaaaaaaaaaaa","finished":"2026-06-01T10:00:00Z","created":null}"#,
+            "\n",
+            r#"{"id":"bbbbbbbbbbbb","finished":"2026-06-"#,
+            "\n",
+            r#"{"id":"cccccccccccc","finished":"2026-06-03T10:00:00Z","created":null}"#,
+            "\n"
+        );
+        let facts = parse_container_facts(raw);
+        assert_eq!(facts.len(), 2, "the truncated line must not kill the batch");
+        assert!(facts.contains_key("aaaaaaaaaaaa"));
+        assert!(facts.contains_key("cccccccccccc"));
+    }
+
+    #[test]
+    fn parse_container_facts_accepts_a_null_date() {
+        let raw = "{\"id\":\"aaaaaaaaaaaa\",\"finished\":null,\"created\":null}\n";
+        let facts = parse_container_facts(raw);
+        let entry = facts.get("aaaaaaaaaaaa").expect("the row must survive");
+        assert_eq!(entry.finished_at, None);
+        assert_eq!(entry.last_activity(), None);
+    }
+
+    // --- ContainerFacts::last_activity -----------------------------------------
+
+    #[test]
+    fn last_activity_prefers_finished_at_when_the_container_has_actually_run() {
+        let facts = ContainerFacts {
+            labels: HashMap::new(),
+            finished_at: Some("2026-06-01T10:00:00Z".to_string()),
+            created: Some("2026-01-01T10:00:00Z".to_string()),
+        };
+        assert_eq!(
+            facts.last_activity().as_deref(),
+            Some("2026-06-01T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn last_activity_falls_back_to_created_on_the_docker_zero_date() {
+        let facts = ContainerFacts {
+            labels: HashMap::new(),
+            finished_at: Some(ZERO_DOCKER_DATE.to_string()),
+            created: Some("2026-01-01T10:00:00Z".to_string()),
+        };
+        assert_eq!(
+            facts.last_activity().as_deref(),
+            Some("2026-01-01T10:00:00Z"),
+            "a container that never ran is dated by its creation"
+        );
+    }
+
+    #[test]
+    fn last_activity_is_none_when_neither_date_is_usable() {
+        let facts = ContainerFacts {
+            labels: HashMap::new(),
+            finished_at: Some(String::new()),
+            created: Some(ZERO_DOCKER_DATE.to_string()),
+        };
+        assert_eq!(facts.last_activity(), None);
+    }
+
+    // --- parse_inspect_dates ---------------------------------------------------
+
+    #[test]
+    fn parse_inspect_dates_keys_images_on_the_normalized_id() {
+        let raw = concat!(
+            r#"{"id":"sha256:581c17389e5412ab7d0f3c9a1b2e4d6f8091a2b3","created":"2026-01-01T10:00:00Z"}"#,
+            "\n"
+        );
+        let dates = parse_inspect_dates(InspectKind::Image, raw);
+        assert_eq!(
+            dates.get("581c17389e54").map(String::as_str),
+            Some("2026-01-01T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn parse_inspect_dates_keys_volumes_on_their_name_and_keeps_the_local_offset() {
+        // Measured: `docker volume inspect` returns `+02:00`, not `Z`. The
+        // raw string is stored verbatim; `docker_view::parse_rfc3339` is
+        // what makes the two shapes comparable.
+        let raw = "{\"name\":\"lab_pgdata\",\"created\":\"2026-08-17T11:07:18+02:00\"}\n";
+        let dates = parse_inspect_dates(InspectKind::Volume, raw);
+        assert_eq!(
+            dates.get("lab_pgdata").map(String::as_str),
+            Some("2026-08-17T11:07:18+02:00")
+        );
+    }
+
+    #[test]
+    fn parse_inspect_dates_drops_rows_with_no_key_or_no_date() {
+        let raw = concat!(
+            r#"{"id":"","created":"2026-01-01T10:00:00Z"}"#,
+            "\n",
+            r#"{"id":"aaaaaaaaaaaa","created":null}"#,
+            "\n",
+            r#"{"id":"bbbbbbbbbbbb","created":"   "}"#,
+            "\n",
+            r#"{"id":"cccccccccccc","created":"2026-02-02T10:00:00Z"}"#,
+            "\n"
+        );
+        let dates = parse_inspect_dates(InspectKind::Image, raw);
+        assert_eq!(dates.len(), 1);
+        assert!(dates.contains_key("cccccccccccc"));
+    }
+
+    // --- compute_used_by -------------------------------------------------------
+
+    #[test]
+    fn compute_used_by_lists_every_container_referencing_an_image() {
+        let images = vec![
+            image("581c17389e54", "proxy-pilotphone", "latest"),
+            image("aaaaaaaaaaaa", "unused", "latest"),
+        ];
+        let containers = vec![
+            container("c1", "proxy-pilotphone:latest"),
+            container("c2", "proxy-pilotphone:latest"),
+        ];
+        let used_by = compute_used_by(&images, &containers);
+        assert_eq!(used_by.len(), images.len(), "one entry per image, in order");
+        assert_eq!(used_by[0], vec!["c1".to_string(), "c2".to_string()]);
+        assert!(used_by[1].is_empty());
+    }
+
+    #[test]
+    fn compute_used_by_ignores_a_reference_it_cannot_resolve() {
+        // `compute_used` marks *every* image used on doubt; `used_by` has
+        // nothing to list in that case and must stay empty rather than
+        // invent an owner.
+        let images = vec![image("581c17389e54", "proxy-pilotphone", "latest")];
+        let containers = vec![container("c1", "some-unknown-thing:latest")];
+        let used_by = compute_used_by(&images, &containers);
+        assert!(used_by[0].is_empty());
+    }
+
+    // --- build_container_entry with inspect facts ------------------------------
+
+    #[test]
+    fn build_container_entry_carries_the_ports_and_the_inspect_date() {
+        let mut wire = container("581c17389e54", "nginx:alpine");
+        wire.ports = "0.0.0.0:5656->5656/tcp, [::]:5656->5656/tcp".to_string();
+        let facts = ContainerFacts {
+            labels: HashMap::new(),
+            finished_at: Some("2026-06-01T10:00:00Z".to_string()),
+            created: Some("2026-01-01T10:00:00Z".to_string()),
+        };
+        let entry = build_container_entry(wire, Some(&facts));
+        assert_eq!(entry.last_activity.as_deref(), Some("2026-06-01T10:00:00Z"));
+        // Both halves are kept verbatim here: de-duplicating the IPv4 and
+        // IPv6 sides of one publish is `PortOwner::new`'s job, so the raw
+        // snapshot stays a faithful image of what docker reported.
+        assert_eq!(entry.ports.len(), 2);
+        assert!(entry.ports.iter().all(|binding| binding.host_port == 5656));
+    }
+
+    #[test]
+    fn build_container_entry_without_inspect_facts_stays_undated() {
+        let entry = build_container_entry(container("581c17389e54", "nginx:alpine"), None);
+        assert_eq!(entry.last_activity, None);
+        assert!(entry.ports.is_empty());
     }
 }

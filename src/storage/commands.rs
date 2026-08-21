@@ -429,6 +429,7 @@ mod tests {
             theme: "light".to_string(),
             launch_at_startup: false,
             show_descriptions: true,
+            dormant_after_days: 60,
         }
     }
 
@@ -445,11 +446,13 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: false,
+            info: None,
         }
     }
 
     fn two_command_config() -> Config {
         Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: make_settings(),
             categories: vec![Category {
@@ -638,6 +641,7 @@ mod tests {
     #[test]
     fn toggle_round_trip_lossless_with_all_fields() {
         let mut config = Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: make_settings(),
             categories: vec![Category {
@@ -657,6 +661,7 @@ mod tests {
                 group_name: None,
                 variant_label: None,
                 machine_specific: false,
+                info: None,
             }],
         };
 
@@ -758,6 +763,7 @@ mod tests {
         o2.category = "ghost-b".to_string();
 
         Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: make_settings(),
             categories: vec![
@@ -874,6 +880,7 @@ mod tests {
         o1.category = "ghost".to_string();
 
         Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: make_settings(),
             categories: vec![Category {

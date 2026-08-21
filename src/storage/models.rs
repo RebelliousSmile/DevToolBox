@@ -18,6 +18,20 @@ pub struct Settings {
     pub theme: String,
     pub launch_at_startup: bool,
     pub show_descriptions: bool,
+    /// Age in days past which a stopped container / unused image / orphan
+    /// volume is badged « dormant » in the Docker tab.
+    ///
+    /// The field-level default is **required**, not decorative: `Settings`
+    /// carries no struct-level `#[serde(default)]`, so every `config.json`
+    /// written before this field existed would otherwise fail to deserialize
+    /// and drop the user into `fallback_config()`.
+    #[serde(default = "default_dormant_after_days")]
+    pub dormant_after_days: u32,
+}
+
+/// Two months, the threshold the user asked for.
+fn default_dormant_after_days() -> u32 {
+    60
 }
 
 /// A named group that commands can belong to.
@@ -30,8 +44,8 @@ pub struct Category {
 
 /// A single launchable command entry.
 ///
-/// `shortcut` is optional — commands without a shortcut omit the key in JSON
-/// (via `skip_serializing_if`) so the round-trip stays lossless.
+/// `shortcut` and `info` are optional — commands without them omit the key
+/// in JSON (via `skip_serializing_if`) so the round-trip stays lossless.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Command {
     pub id: String,
@@ -54,6 +68,11 @@ pub struct Command {
     /// preserving current behaviour for every pre-existing entry.
     #[serde(default)]
     pub machine_specific: bool,
+    /// Optional free-text note shown as an "i" badge with a tooltip on the
+    /// command's card. Absent from JSON (existing configs) deserializes to
+    /// `None`, so no badge is drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<String>,
 }
 
 /// Top-level configuration wrapper.
@@ -66,6 +85,15 @@ pub struct Config {
     pub default_settings: Settings,
     pub categories: Vec<Category>,
     pub commands: Vec<Command>,
+    /// Absolute paths of the compose files the Docker tab remembers between
+    /// runs (Part 2). Written by the `$HOME` scan and by « Oublier ».
+    ///
+    /// `skip_serializing_if` keeps the key out of `config/default.json` and
+    /// out of every config belonging to a user who never opened the Docker
+    /// tab: the shipped default must not carry machine-specific paths, and an
+    /// empty array in everyone's config file would be noise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docker_stacks: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +104,12 @@ pub struct Config {
 mod tests {
     use super::*;
 
-    /// The literal content of `config/default.json` — kept here so tests are
-    /// self-contained and do not depend on the working directory at test time.
+    /// A `config/default.json` **as it shipped before** `dormant_after_days`
+    /// existed — kept here so tests are self-contained and do not depend on
+    /// the working directory at test time, and doubling as the legacy-config
+    /// fixture: every field added since must be `#[serde(default)]` for this
+    /// to keep parsing. The current on-disk file is checked separately by
+    /// `the_shipped_default_json_carries_the_dormancy_threshold`.
     const DEFAULT_JSON: &str = r#"{
   "version": "0.1.0",
   "default_settings": {
@@ -171,6 +203,86 @@ mod tests {
         assert_eq!(cmd.shortcut, None);
     }
 
+    // --- dormant_after_days (Docker dormancy threshold) ---------------------
+
+    #[test]
+    fn dormant_after_days_defaults_to_sixty_when_the_key_is_absent() {
+        // A `config.json` written by a build predating the Docker dormancy
+        // work must still load — the field carries its own serde default
+        // because `Settings` has no struct-level `#[serde(default)]`.
+        let config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
+        assert_eq!(config.default_settings.dormant_after_days, 60);
+    }
+
+    #[test]
+    fn dormant_after_days_is_read_back_when_the_key_is_present() {
+        let json = DEFAULT_JSON.replace(
+            r#""show_descriptions": true"#,
+            r#""show_descriptions": true,
+    "dormant_after_days": 90"#,
+        );
+        let config: Config = serde_json::from_str(&json).expect("parse failed");
+        assert_eq!(config.default_settings.dormant_after_days, 90);
+    }
+
+    #[test]
+    fn dormant_after_days_survives_a_serde_round_trip_in_both_shapes() {
+        for threshold in [1u32, 60, 3650] {
+            let mut config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
+            config.default_settings.dormant_after_days = threshold;
+            let serialized = serde_json::to_string(&config).expect("serialize failed");
+            assert!(
+                serialized.contains("dormant_after_days"),
+                "the key must always be written back, never dropped"
+            );
+            let reloaded: Config = serde_json::from_str(&serialized).expect("re-parse failed");
+            assert_eq!(reloaded, config, "round-trip must be lossless");
+            assert_eq!(reloaded.default_settings.dormant_after_days, threshold);
+        }
+    }
+
+    #[test]
+    fn the_shipped_default_json_carries_the_dormancy_threshold() {
+        // The one test that reads the real file: `DEFAULT_JSON` above is
+        // deliberately frozen at the pre-dormancy shape, so it cannot catch a
+        // `config/default.json` that forgot the new key.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config")
+            .join("default.json");
+        let raw = std::fs::read_to_string(&path).expect("config/default.json must be readable");
+        let config: Config = serde_json::from_str(&raw).expect("config/default.json must parse");
+        assert_eq!(
+            config.default_settings.dormant_after_days, 60,
+            "the shipped default must match `default_dormant_after_days()`"
+        );
+    }
+
+    // --- docker_stacks (Part 2 compose-file memory) -------------------------
+
+    #[test]
+    fn docker_stacks_defaults_to_empty_and_stays_out_of_the_json_when_it_is() {
+        let config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
+        assert!(config.default_settings.dormant_after_days == 60);
+        assert!(config.docker_stacks.is_empty());
+        let serialized = serde_json::to_string(&config).expect("serialize failed");
+        assert!(
+            !serialized.contains("docker_stacks"),
+            "an empty list must not appear in a user's config file"
+        );
+    }
+
+    #[test]
+    fn docker_stacks_round_trips_when_populated() {
+        let mut config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
+        config.docker_stacks = vec![
+            "/home/tnn/a/docker-compose.yml".to_string(),
+            "/home/tnn/b/compose.yaml".to_string(),
+        ];
+        let serialized = serde_json::to_string(&config).expect("serialize failed");
+        let reloaded: Config = serde_json::from_str(&serialized).expect("re-parse failed");
+        assert_eq!(reloaded, config, "round-trip must be lossless");
+    }
+
     #[test]
     fn shortcut_absent_stays_absent_on_roundtrip() {
         let config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
@@ -194,6 +306,34 @@ mod tests {
             .find(|c| c["id"] == "notepad")
             .expect("notepad entry");
         assert_eq!(notepad_entry["shortcut"], "Ctrl+N");
+    }
+
+    #[test]
+    fn info_absent_stays_absent_and_present_roundtrips() {
+        let mut config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
+        assert!(
+            config.commands.iter().all(|c| c.info.is_none()),
+            "a JSON config with no 'info' keys must deserialize every command with info: None"
+        );
+
+        config.commands[0].info = Some("Nécessite le VPN".to_string());
+        let serialized = serde_json::to_string(&config).expect("serialize failed");
+        let value: serde_json::Value = serde_json::from_str(&serialized).expect("re-parse failed");
+        let commands = value["commands"].as_array().expect("commands array");
+
+        let cmd_entry = commands
+            .iter()
+            .find(|c| c["id"] == "cmd")
+            .expect("cmd entry");
+        assert!(
+            cmd_entry.get("info").is_none(),
+            "info key must be absent for commands without an info note"
+        );
+        let notepad_entry = commands
+            .iter()
+            .find(|c| c["id"] == "notepad")
+            .expect("notepad entry");
+        assert_eq!(notepad_entry["info"], "Nécessite le VPN");
     }
 
     #[test]

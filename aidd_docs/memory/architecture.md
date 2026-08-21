@@ -82,9 +82,11 @@ interpreter cascade for both launch paths:
   `cfg(windows)` gate), `launch_captured()`. Backs both the Terminal panel's
   own launch button **and**, since the `actions-launch-and-variants` plan
   (`aidd_docs/tasks/2026_08/2026_08_15_actions-launch-and-variants/`), the
-  Actions card grid's click-to-launch: a click on a simple card's body (icon +
-  name, outside the Favori button) or "Lancer" on a grouped/variant card
-  launches through this same function. The card grid uses a launch-state slot
+  Actions card grid's click-to-launch: a click on any card's body (icon +
+  name) — simple or grouped alike — or "Lancer" on a grouped/variant card
+  launches through this same function; both card kinds share the
+  `render_card_shell` helper, which is what makes the grouped card's body
+  clickable too. The card grid uses a launch-state slot
   dedicated to it (`EguiApp::action_rx`/`action_running`, drained by
   `drain_action_events`), separate from the Terminal view's own
   `terminal_rx`/`terminal_running`, so a card launch and a Terminal-view
@@ -94,6 +96,16 @@ interpreter cascade for both launch paths:
   `egui::ComboBox` variant selector plus a dedicated "Lancer" button, rather
   than one card per variant — `EguiApp::selected_variant` (session-only, never
   persisted to `config.json`) tracks the chosen variant per group.
+
+  Any command may also carry an optional free-text `Command::info` string
+  (editable in the action form's "Information" field, omitted from JSON when
+  empty). When set — or when the card is unconfigured for this machine — a
+  small circled "i" badge is painted in the card's top-right corner via
+  `Ui::new_child`, so it costs no layout space, and its text shows only as a
+  hover tooltip. `badge_message` decides the tooltip content: the
+  unconfigured diagnostic first, then the free-text note, blank-line
+  separated. The badge sits outside `add_enabled_ui`, otherwise egui would
+  drop its tooltip on a disabled card.
 
 Four consequences bind any script exposed either way:
 
@@ -169,6 +181,155 @@ confirm modals). Key mechanics:
 - Volume sizes are merged into the existing snapshot **by name, without a
   refetch** — a refetch would drop them (`docker volume ls` always reports
   `Size:"N/A"`).
+
+### Ports, dates and dormancy
+
+`src/ui/ports.rs` is an OS-neutral, dependency-free **pure port model** that
+knows nothing about docker: `PortBinding` / `PortOwner` / `PortConflict`,
+`parse_ps_ports` (reads `docker ps`'s flat `Ports` string),
+`find_conflicts`, `format_bindings`. It sits under `src/ui/` rather than
+`src/linux/` because Part 2's compose stacks feed it *declared* ports with no
+daemon involved (`OwnerKind::DeclaredStack`). Measured traps it encodes:
+
+- One publish is reported twice, once IPv4 and once IPv6 (`0.0.0.0:5656->…,
+  [::]:5656->…`). De-duplication happens in `PortOwner::new`, **not** in the
+  parser — `ContainerEntry.ports` stays a faithful image of what docker said.
+- A conflict needs two *distinct* owner keys and overlapping interfaces
+  (a wildcard bind overlaps everything), so a container never conflicts with
+  itself.
+
+Dates come from a **grouped `docker inspect` pass** (`inspect_containers` /
+`inspect_dates`, chunked 50 ids per call) because the listings cannot supply
+them. Three measured contracts:
+
+- `docker inspect --format` does **not** expand `\t` — it prints the two
+  literal characters. The templates therefore emit NDJSON via `{{json …}}`,
+  which also lets Part 2 append `.Config.Labels` without inventing a
+  separator. A `the_inspect_templates_emit_json_fields…` test guards this.
+- `inspect` returns 64-char / `sha256:`-prefixed ids while the listings
+  return 12-char ones: **both sides of the join go through `normalize_id`**,
+  or the date column silently stays empty forever.
+- `docker inspect` exits non-zero when a single id is unknown (a resource
+  removed between the listing and the inspect) while still printing every id
+  it resolved. `run_command_capturing` therefore returns
+  `CommandOutput { success, stdout, stderr }` and reserves `Err` for spawn
+  failure/timeout only; `run_command_with_timeout` is a thin wrapper over it.
+
+Dormancy itself is pure and **clock-injected** (`DockerViewState.now_epoch_secs`),
+so every badge is assertable in a test: `parse_rfc3339` (a real parser, not a
+lexicographic compare — `docker volume inspect` returns a local offset
+`+02:00` while container/image inspects return `…Z`), `cutoff_epoch`,
+`days_since`, `is_dormant`. `ZERO_DOCKER_DATE` (`0001-01-01T00:00:00Z`) means
+*no date at all*, never "very old". Dormancy **refines** the existing signals
+rather than standing alone — a running container, a used image and a
+non-orphan volume are never dormant however old their dates are, because
+docker stores no "last used" date to justify it.
+
+### Grouped deletion (selection bar)
+
+A selection lives in `EguiApp` (`docker_selection: HashSet<SelectionKey>`),
+never in the view — it has to survive the refetch that follows every action.
+`refetch_docker` is the **single** entry point for `docker_view::fetch()`
+precisely so `sanitize_selection` runs on every new snapshot: a key whose
+resource vanished (deleted here, or from another terminal) stops being a
+target instead of producing an unactionable failure. Contracts worth keeping:
+
+- Sizes are **SI**, like docker's own `units.HumanSize`: `kB` = 1000, and
+  `parse_human_size` reads only what precedes `" ("` so a container's
+  `767kB (virtual 148MB)` contributes its writable layer, not its image
+  layers. An unreadable size makes the batch total print as `≥ X` rather
+  than silently counting as zero.
+- A row is selectable **iff** its own « Supprimer » button would be enabled —
+  plus one selection-aware rule: an image whose every `used_by` container is
+  itself selected becomes selectable, since the batch deletes those first.
+  `sanitize_selection` validates images against the containers it has already
+  kept, so unticking a container unticks the image on the same frame. An
+  image `used` with an *empty* `used_by` (the "used on doubt" case) can never
+  be freed by any selection. Volumes have no equivalent rule.
+- `ResourceKind`'s **declaration order is the deletion order** (containers →
+  images → volumes), consumed by `order_targets`' stable sort.
+- The batch is N per-item `docker` calls, deliberately not `docker rm a b c`:
+  that is what makes continue-on-failure and a per-item report possible.
+  `remove_batch_with` takes the removal closure so both are testable with no
+  daemon; `remove_batch` is the usual cfg-split façade over it.
+- Only the *succeeded* items leave the selection; failures stay ticked so a
+  retry is one click. The report is cleared by the next selection change or a
+  manual refresh, never by a timer.
+- `egui::Modal` centres itself only once it knows its size, so its first
+  frame is off-centre: a kittest that clicks a dialog button must `run()` to
+  settle, not `run_steps(n)`, or the click lands on the backdrop and reads as
+  a dismissal. Multi-line dialog messages also keep the modal narrower than
+  the window.
+
+### Compose stacks (Stacks section, Linux-only)
+
+Same three layers as above: `src/linux/compose.rs` (CLI + `walkdir`) →
+`src/ui/compose_view.rs` (every OS-neutral type, façade, pure render) →
+`src/ui/egui_app.rs` (state, worker threads, dispatch). `StackConfig` /
+`StackService` / `ScanOutcome` live in `compose_view.rs`, **not** in the
+Linux module, because `src/ui/` is compiled on Windows too — the Linux module
+only converts its private `ConfigWire` into them. Measured contracts:
+
+- `docker compose -f <file> config --format json` needs **no daemon** and
+  costs ~89 ms, which is why DevToolBox parses no YAML itself. It is not the
+  `--format json` banned for the listings: different subcommand, different
+  flag family. Its `level=warning` diagnostics go to **stderr**, so only
+  stdout is parsed.
+- A sibling `.env` resolves from the compose file's own directory even when
+  the process' cwd is elsewhere (measured with cwd `/`), so
+  `run_command_with_timeout` needed **no** `cwd` parameter — the plan's
+  planned change to it was annulled. `up -d` still runs with the file's
+  parent as working directory, for relative build contexts.
+- `published` is a string in the measured output and a number in other
+  schema versions (`#[serde(untagged)]`); `ports` is `null` for a service
+  that publishes nothing; `host_ip` is absent and defaults to the wildcard.
+- The stack↔container link reads `com.docker.compose.project` and
+  `…project.config_files` from the **grouped inspect's** `.Config.Labels`,
+  never from `docker ps`'s flat `Labels` string (which joins labels with the
+  same `,` that separates a multi-file `config_files` value). Zero extra
+  docker calls — Part 1's inspect template was extended.
+- `Exited (0)` is a normally-finished one-shot, never a failure
+  (`compose_view::is_failing`), or the `db-init` containers would pin healthy
+  stacks to `partielle` forever. `exit_code` is parsed from the **listing's**
+  status text, not from the inspect, which may come back empty on a race.
+- `up -d` / `stop` / `down` are **detached**, streamed through
+  `terminal_view::launch_captured_program` on their own channel — never the
+  30 s `run_docker` path, which cannot represent a minutes-long image pull.
+  `down` never carries `-v`. Only `down` is confirmed by a modal.
+- The `$HOME` walk has **no depth cap** (a depth-6 cap missed 3 of the 13
+  real files here); it prunes by directory name via `filter_entry`, which is
+  what keeps a `node_modules` tree from being descended at all, and never
+  truncates silently — past `SCAN_WARN_MS` the outcome carries a warning.
+- The command's output goes to an **anchored bottom panel**
+  (`compose_view::render_log_panel`, `egui::Panel::bottom`), not into the
+  tab's flow and not into the Terminal view. Two constraints decided this.
+  Inline, the panel appeared and vanished mid-run and shoved the Docker
+  sections below it while the user was reading them. Rerouting to Terminal
+  was rejected on a harder ground: `command_busy()` deliberately excludes
+  `compose_running` so a build can run while the user does something else,
+  and a shared `terminal_lines` would interleave two live streams — adding
+  `compose_running` to the guard would freeze the Actions tab for the length
+  of an image pull. The panel is also where the *result* is not: `down`'s
+  result is the row flipping to « arrêtée », which a view switch would hide.
+  `render_log_panel` must be called **before** the tab's other content (egui
+  shrinks the parent cursor when a panel claims an edge), keys its visibility
+  on `log_target`, and its ✕ is disabled while `busy` — closing mid-run would
+  drop the buffer and the panel would reopen on the next output line anyway.
+  A kittest driving a `busy` panel needs `run_steps`, not `run`: the spinner
+  repaints forever and `run`'s settle loop trips its own ceiling. The
+  opposite of the modal trap — an anchored panel's rect is final on frame 1.
+- The three resource lists are **tabs**, not stacked sections
+  (`docker_view::DockerList` + `render_list_tabs`, selected via
+  `DockerAction::SelectList`, held in `EguiApp.docker_active_list` as session
+  state — a tab choice is not a `config.json` setting). Only the active list
+  is laid out, which is also why the per-section `ui.strong` headings are
+  gone: the tab label names and counts the list. The non-obvious constraint:
+  the batch selection **spans** the three lists (ticking a container is what
+  makes its image selectable), so each tab label carries its own selection
+  count — `Volumes (3 · 1 sél.)` — or « Supprimer la sélection » would act on
+  rows the user cannot see ticked. The selection bar and the batch report
+  stay **above** the tab strip, outside the scroll area, and switching tabs
+  triggers no refetch and never clears the report.
 
 Some commands need a different literal launch string per machine (e.g. a
 path or app name that only exists on one host). `Command.machine_specific:
