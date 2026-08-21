@@ -211,25 +211,57 @@ fn stream_output<R: Read + Send + 'static>(
 /// passes through unchanged.
 pub fn launch_captured(command: &str, sender: Sender<TerminalEvent>) -> Result<u32, String> {
     let spec = resolve_action(command, &action_root())?;
+    launch_captured_program(
+        &spec.program,
+        &spec.args,
+        spec.working_directory.as_deref(),
+        command,
+        sender,
+    )
+}
 
-    let mut process = std::process::Command::new(&spec.program);
+/// Launch an already-resolved `program args...`, streaming the same
+/// [`TerminalEvent`]s to `sender`. Returns the spawned process's pid.
+///
+/// Split out of [`launch_captured`] for the Docker tab's compose commands
+/// (Part 2): their argv is *built*, not parsed — a compose file path can hold
+/// spaces, and round-tripping it through a command **string** just so
+/// [`resolve_action`] can split it again would be a quoting bug waiting to
+/// happen. `label` is what the `Started` event reports, purely for display.
+///
+/// `working_dir` matters for compose specifically: `up -d` resolves relative
+/// build contexts and `env_file` paths against the *current* directory when
+/// the compose file is given as an absolute `-f`, so the caller passes the
+/// file's own directory.
+pub fn launch_captured_program(
+    program: &str,
+    args: &[String],
+    working_dir: Option<&Path>,
+    label: &str,
+    sender: Sender<TerminalEvent>,
+) -> Result<u32, String> {
+    let mut process = std::process::Command::new(program);
     process
-        .args(&spec.args)
+        .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Kept from the Windows branch through the compose extraction: without
+    // it a console-subsystem child opens its own window, and closing that
+    // window kills the child (see this module's header).
     #[cfg(windows)]
     process.creation_flags(CREATE_NO_WINDOW);
-    if let Some(directory) = &spec.working_directory {
+    if let Some(directory) = working_dir {
         process.current_dir(directory);
     }
 
     let mut child = process
         .spawn()
-        .map_err(|error| format!("{}: {error}", spec.program))?;
+        .map_err(|error| format!("{program}: {error}"))?;
     let pid = child.id();
 
     let _ = sender.send(TerminalEvent::Started {
-        command: command.to_string(),
+        command: label.to_string(),
         pid,
     });
 

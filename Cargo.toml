@@ -24,6 +24,12 @@ serde_json = "1.0"
 log = "0.4"
 env_logger = "0.10"
 
+# Recursive $HOME walk for the Docker tab's compose-file discovery. Chosen
+# over a hand-rolled `std::fs` recursion for one reason: `filter_entry`
+# prunes an excluded directory *without descending into it*, which is what
+# keeps a `node_modules` or a `.cache` tree from being walked at all.
+walkdir = "2.5"
+
 [target.'cfg(windows)'.dependencies]
 # Windows APIs
 windows = { version = "0.52", features = [

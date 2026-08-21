@@ -14,8 +14,8 @@ flowchart TD
 
     subgraph Native["Native modules"]
         WINMOD["src/windows/ - registry, task_scheduler, process"]
-        LINMOD["src/linux/ - automations, autostart, icon_theme, docker (all cfg target_os = linux)"]
-        UIMOD["src/ui/ - egui app, terminal, applications view, docker view, icon_picker, command_form"]
+        LINMOD["src/linux/ - automations, autostart, icon_theme, docker, compose (all cfg target_os = linux)"]
+        UIMOD["src/ui/ - egui app, terminal, applications view, docker view, compose view, icon_picker, command_form, ports"]
         STOREMOD["src/storage/ - models, json, categories, commands, slug, machine_commands"]
         ASSETS["src/assets/ - custom icons"]
         APPMOD["src/applications/ - process matching and usage history"]

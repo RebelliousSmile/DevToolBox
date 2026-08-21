@@ -76,7 +76,7 @@
 //! ```
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
@@ -96,8 +96,14 @@ use crate::ui::applications_view::{self, ApplicationFilters};
 use crate::ui::automations_view::{self, AutomationRow};
 use crate::ui::cleanup_view::{self, CleanupAction, CleanupViewState, LastRun};
 use crate::ui::command_form::CommandFormWidget;
+use crate::ui::compose_view::{
+    self, ComposeViewState, ScanOutcome, StackAction, StackEntry, StackState, StackTarget,
+};
 use crate::ui::dialogs::{self, DialogKind, DialogOutcome};
-use crate::ui::docker_view::{self, DockerAction, DockerSnapshot, DockerViewState};
+use crate::ui::docker_view::{
+    self, BatchOutcome, BatchTarget, DockerAction, DockerList, DockerSnapshot, DockerViewState,
+    SelectionKey,
+};
 use crate::ui::icon_picker;
 use crate::ui::terminal_view::{self, TerminalEvent};
 
@@ -128,6 +134,11 @@ struct CardData {
     /// current machine id and the mapping file path, shown on the disabled
     /// card.
     disabled_message: Option<String>,
+    /// The command's optional free-text note (`storage::Command::info`),
+    /// surfaced in the card's "i" badge tooltip. Independent of
+    /// `disabled_message`: both can be present, and the badge then shows
+    /// them one after the other.
+    info: Option<String>,
     /// The resolved shell command to run on click — empty when
     /// `is_configured` is `false` (an unconfigured card is never clickable,
     /// so there is nothing meaningful to launch).
@@ -158,6 +169,7 @@ struct VariantCardData {
     is_favorite: bool,
     is_configured: bool,
     disabled_message: Option<String>,
+    info: Option<String>,
     command: String,
 }
 
@@ -206,6 +218,179 @@ fn resolution_fields(
 /// building a full app/harness.
 fn can_launch_card(is_configured: bool, command_busy: bool) -> bool {
     is_configured && !command_busy
+}
+
+/// Human-readable tail line for a finished command. `code` is `None` when
+/// the child was killed by a signal (Unix) rather than exiting on its own,
+/// which `{code:?}` used to surface as the raw `Some(0)`/`None` debug form.
+/// Kept as a free function so both drain loops share one wording and it is
+/// directly unit-testable.
+fn format_exit_line(code: Option<i32>) -> String {
+    match code {
+        Some(0) => "(terminé — succès)".to_string(),
+        Some(code) => format!("(terminé — code {code})"),
+        None => "(terminé — interrompu par un signal)".to_string(),
+    }
+}
+
+/// Text shown in a card's "i" badge tooltip, or `None` when the card has
+/// nothing to say. The unconfigured diagnostic comes first (it explains why
+/// the card is greyed out), then the command's own free-text `info` note;
+/// when both are present they are separated by a blank line. Kept as a free
+/// function so the precedence is unit-testable without a harness.
+fn badge_message(disabled_message: Option<&str>, info: Option<&str>) -> Option<String> {
+    let info = info.map(str::trim).filter(|s| !s.is_empty());
+    match (disabled_message, info) {
+        (Some(disabled), Some(info)) => Some(format!("{disabled}\n\n{info}")),
+        (Some(disabled), None) => Some(disabled.to_owned()),
+        (None, Some(info)) => Some(info.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// Diameter of the circled "i" info badge, in points.
+const BADGE_DIAMETER: f32 = 16.0;
+
+/// Draws the small circled "i" badge that stands in for a card's inline
+/// message: the text itself only shows as a hover tooltip, so a long
+/// diagnostic (machine id + mapping file path) no longer stretches the card
+/// into a wall of italics. Painted by hand rather than typeset as "ⓘ"/"ℹ"
+/// because neither glyph is guaranteed to exist in egui's default font
+/// stack, whereas an ASCII "i" drawn over a circle always renders.
+///
+/// Callers must place it *outside* any `add_enabled_ui(false)` scope: a
+/// disabled response drops `on_hover_text`, which would silently swallow
+/// the very message the badge exists to surface.
+fn info_badge(ui: &mut egui::Ui, message: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(BADGE_DIAMETER, BADGE_DIAMETER),
+        egui::Sense::hover(),
+    );
+    if ui.is_rect_visible(rect) {
+        let color = ui.visuals().warn_fg_color;
+        let painter = ui.painter();
+        painter.circle_stroke(
+            rect.center(),
+            BADGE_DIAMETER / 2.0 - 1.0,
+            egui::Stroke::new(1.0, color),
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "i",
+            egui::FontId::proportional(11.0),
+            color,
+        );
+    }
+    // Keeps the badge queryable by its message in `egui_kittest` (and
+    // readable by screen readers) even though nothing is typeset on screen.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, message));
+    response.on_hover_text(message.to_owned())
+}
+
+/// Overlays [`info_badge`] on the top-right corner of an already-laid-out
+/// card frame. Goes through `Ui::new_child` — which, unlike `scope_builder`,
+/// does *not* advance the parent's cursor — so the badge costs zero layout
+/// space: a card carrying a message keeps exactly the size it would have
+/// without one, instead of gaining a row and shifting everything below it.
+fn card_corner_badge(ui: &mut egui::Ui, card_rect: egui::Rect, message: &str) {
+    const MARGIN: f32 = 3.0;
+    let badge_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            card_rect.right() - BADGE_DIAMETER - MARGIN,
+            card_rect.top() + MARGIN,
+        ),
+        egui::vec2(BADGE_DIAMETER, BADGE_DIAMETER),
+    );
+    let mut badge_ui = ui.new_child(egui::UiBuilder::new().max_rect(badge_rect));
+    info_badge(&mut badge_ui, message);
+}
+
+/// What [`render_card_shell`] reports back to its caller.
+struct CardShell {
+    /// Outer frame rect, for [`card_corner_badge`] to hang the info badge on.
+    rect: egui::Rect,
+    /// `true` when the icon+title block was clicked this frame. Always
+    /// `false` while `body_enabled` is `false` — `add_enabled_ui` swallows
+    /// clicks — but callers still re-check through [`can_launch_card`].
+    body_clicked: bool,
+}
+
+/// The chrome every card shares: fixed-width frame, centered icon, title,
+/// and the icon+title click target that launches the card. Simple and
+/// variant-grouped cards differ only in what they add *below* the title, so
+/// that difference is all `extra` carries — previously both bodies were
+/// written out twice, which is why the grouped card silently missed the
+/// clickable body the simple one had.
+///
+/// `extra` runs inside the frame but *outside* the `add_enabled_ui` scope,
+/// so a grouped card's variant picker stays usable even when the selected
+/// variant is unconfigured (you must be able to switch away from it).
+fn render_card_shell(
+    ui: &mut egui::Ui,
+    visual: &IconVisual,
+    title: &str,
+    body_enabled: bool,
+    extra: impl FnOnce(&mut egui::Ui),
+) -> CardShell {
+    let mut body_clicked = false;
+    let frame = ui.group(|ui| {
+        ui.set_width(96.0);
+        ui.vertical_centered(|ui| {
+            ui.add_enabled_ui(body_enabled, |ui| {
+                // The whole icon+name block is the click target, not just
+                // the name text — a text-only target left most of the card
+                // (icon, padding) dead to clicks in real mouse use, even
+                // though it passed kittest (which clicks the accessibility
+                // node's rect, so a small target still gets hit).
+                // `.interact(Sense::click())` upgrades the container
+                // response's existing rect/id, and an explicit
+                // `widget_info` keeps it discoverable via
+                // `egui_kittest::Queryable::get_by_label(title)`.
+                let body_response = ui
+                    .vertical_centered(|ui| {
+                        match visual {
+                            IconVisual::Texture(texture) => {
+                                let size = texture.size_vec2();
+                                let display_size =
+                                    egui::vec2(48.0, 48.0).min(size.max(egui::vec2(1.0, 1.0)));
+                                ui.add(egui::Image::new((texture.id(), display_size)));
+                            }
+                            IconVisual::Emoji(text) => {
+                                // `selectable(false)`: a plain `ui.label` is
+                                // selectable text by default, which gives it
+                                // its own click+drag sense — that widget then
+                                // wins hit-testing over the card's own
+                                // `.interact(click)` below, silently eating
+                                // every click.
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(text).size(28.0))
+                                        .selectable(false),
+                                );
+                            }
+                        }
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(title).strong()).selectable(false),
+                        );
+                    })
+                    .response
+                    .interact(egui::Sense::click());
+                body_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title)
+                });
+                if body_response.clicked() {
+                    body_clicked = true;
+                }
+            });
+
+            extra(ui);
+        });
+    });
+
+    CardShell {
+        rect: frame.response.rect,
+        body_clicked,
+    }
 }
 
 /// Groups commands for [`partition_by_variant_group`]: every command with a
@@ -266,6 +451,7 @@ fn partition_by_variant_group(
                         is_favorite: first.is_favorite,
                         is_configured,
                         disabled_message,
+                        info: first.info.clone(),
                         command,
                         group_name: None,
                         variants: Vec::new(),
@@ -284,6 +470,7 @@ fn partition_by_variant_group(
                                 is_favorite: c.is_favorite,
                                 is_configured,
                                 disabled_message,
+                                info: c.info.clone(),
                                 command,
                             }
                         })
@@ -299,6 +486,7 @@ fn partition_by_variant_group(
                         is_favorite: members.iter().any(|c| c.is_favorite),
                         is_configured: false,
                         disabled_message: None,
+                        info: None,
                         command: String::new(),
                         group_name: Some(group_name),
                         variants,
@@ -450,6 +638,7 @@ fn fallback_config() -> Config {
             theme: "light".to_string(),
             launch_at_startup: false,
             show_descriptions: true,
+            dormant_after_days: 60,
         },
         categories: Vec::new(),
         commands: vec![
@@ -465,6 +654,7 @@ fn fallback_config() -> Config {
                 group_name: None,
                 variant_label: None,
                 machine_specific: false,
+                info: None,
             },
             Command {
                 id: "cmd".into(),
@@ -478,6 +668,7 @@ fn fallback_config() -> Config {
                 group_name: None,
                 variant_label: None,
                 machine_specific: false,
+                info: None,
             },
             Command {
                 id: "ipconfig".into(),
@@ -491,8 +682,13 @@ fn fallback_config() -> Config {
                 group_name: None,
                 variant_label: None,
                 machine_specific: false,
+                info: None,
             },
         ],
+        // Empty on purpose: a fallback config is what boots when the real one
+        // could not be read, and inventing compose-file paths there would put
+        // rows in the Docker tab that no scan ever produced.
+        docker_stacks: Vec::new(),
         // Suppresses an "unused struct field" concern for readers: this
         // mirrors app.rs's fallback exactly — `categories` stays empty, so
         // all three fallback commands land in the synthetic "Sans
@@ -523,7 +719,8 @@ struct CategoryForm {
 /// Covers every editable field: `name`, executable+arguments (via Part 2's
 /// `command_form` widget), `category` (dropdown id, `""` = "Sans
 /// catégorie"), `icon` (via Part 2's `icon_picker` widget), `is_favorite`,
-/// and `shortcut`.
+/// `shortcut`, and `info` (free-text note surfaced as an "i" badge on the
+/// card; empty means no badge).
 struct ActionForm {
     editing_id: Option<String>,
     name: String,
@@ -532,6 +729,7 @@ struct ActionForm {
     icon: String,
     is_favorite: bool,
     shortcut: String,
+    info: String,
 }
 
 impl ActionForm {
@@ -544,6 +742,7 @@ impl ActionForm {
             icon: String::new(),
             is_favorite: false,
             shortcut: String::new(),
+            info: String::new(),
         }
     }
 
@@ -557,6 +756,7 @@ impl ActionForm {
             icon: command.icon.clone(),
             is_favorite: command.is_favorite,
             shortcut: command.shortcut.clone().unwrap_or_default(),
+            info: command.info.clone().unwrap_or_default(),
         }
     }
 }
@@ -612,10 +812,28 @@ enum PendingAction {
     RemoveCommand(String),
     RemoveCommandGroup(String),
     CleanModule(String),
-    StopContainer { id: String, name: String },
-    RemoveContainer { id: String, name: String },
-    RemoveImage { reference: String, name: String },
+    StopContainer {
+        id: String,
+        name: String,
+    },
+    RemoveContainer {
+        id: String,
+        name: String,
+    },
+    RemoveImage {
+        reference: String,
+        name: String,
+    },
     RemoveVolume(String),
+    /// `docker compose down` — confirmed like every other action that
+    /// destroys containers (`docker rm`, `docker rmi`). `up -d` and `stop`
+    /// are not: neither destroys anything, and `stop` is undone by `up -d`.
+    ComposeDown(StackTarget),
+    /// The whole batch, already ordered by `docker_view::order_targets`.
+    /// Carries the targets rather than re-reading the selection on confirm:
+    /// what the dialog described is exactly what runs, even though a refetch
+    /// could have pruned the selection in between.
+    DeleteSelection(Vec<BatchTarget>),
 }
 
 /// A confirmed Docker action stored by [`EguiApp::resolve_pending_action`]
@@ -650,6 +868,10 @@ enum DeferredDockerAction {
     /// variants: `docker system df -v` takes ~5s on this machine, and running
     /// it inline would freeze the UI before the "Calcul…" status text paints.
     ComputeVolumeSizes,
+    /// One `docker` call per target, so this is the slowest deferred action
+    /// of them all — all the more reason for it to run after its "Suppression
+    /// de N ressource(s)…" status has painted.
+    DeleteSelection(Vec<BatchTarget>),
 }
 
 /// The dialog currently blocking the rest of the UI (see `ui_content`'s
@@ -767,7 +989,104 @@ pub struct EguiApp {
     /// assertion "Oui triggers exactly one façade call" reads this rather
     /// than trying to intercept `docker_view`'s free functions.
     docker_action_invocations: u32,
+    /// Rows ticked for the next batch. Lives here, not in `docker_view`,
+    /// because it has to survive the refetch that follows every action —
+    /// and be pruned against it (`prune_docker_selection`).
+    docker_selection: HashSet<SelectionKey>,
+    /// Per-item result of the last batch, shown until the selection changes
+    /// or the user refreshes. Never cleared on a timer: it is the only trace
+    /// of what a partially-failed batch actually did.
+    docker_batch_report: Vec<BatchOutcome>,
+    /// Which of the three resource lists the Docker tab shows. Session-only,
+    /// deliberately absent from `config.json`: a tab choice is not a setting,
+    /// and « Conteneurs » is the right thing to reopen on.
+    docker_active_list: DockerList,
+
+    // --- Compose stacks (Part 2) -------------------------------------------
+    /// `docker compose` plugin availability, probed once the first time the
+    /// Docker tab is rendered. `None` until then — probing it at startup
+    /// would run a `docker` command for a tab the user may never open.
+    compose_plugin: Option<bool>,
+    /// The stack rows, rebuilt by the background scan/reload worker. Their
+    /// `runs`/`state` are recomputed from the live container list on every
+    /// frame by `compose_view::link_runs`, so nothing here goes stale.
+    compose_stacks: Vec<StackEntry>,
+    /// `true` once the memorized `config.docker_stacks` have been handed to
+    /// the worker, so the reload fires once per session rather than per frame.
+    compose_loaded: bool,
+    compose_scanning: bool,
+    compose_scan_rx: Option<Receiver<ComposeScanResult>>,
+    /// A slow-scan warning kept from the last walk, shown until the next one.
+    compose_scan_warning: Option<String>,
+    /// The in-flight compose command's streamed output. One command at a
+    /// time, so this always has exactly one owner.
+    compose_rx: Option<Receiver<TerminalEvent>>,
+    compose_log: Vec<String>,
+    /// File path of the row `compose_log` belongs to.
+    compose_log_target: Option<String>,
+    compose_running: bool,
+    /// Same role as `docker_action_invocations`: lets a kittest assert that a
+    /// click reached the launcher without a real `docker` process ever
+    /// existing.
+    compose_invocations: u32,
 }
+
+/// What the compose worker thread hands back.
+struct ComposeScanResult {
+    entries: Vec<StackEntry>,
+    /// `Some` for a `$HOME` walk, `None` for a reload of the memorized list —
+    /// which is exactly what tells the main thread whether to rewrite
+    /// `config.docker_stacks`.
+    outcome: Option<ScanOutcome>,
+}
+
+/// Read every file in `files` through `docker compose config` and turn each
+/// into a row.
+///
+/// Runs on the worker thread: ~89 ms per file here, so the 13 real files
+/// would stall the UI for over a second if this ran inline. A file that is
+/// gone becomes a `Missing` row rather than disappearing — the user asked for
+/// it once, and « Oublier » is how it leaves the list.
+fn build_compose_entries(files: &[String]) -> Vec<StackEntry> {
+    files
+        .iter()
+        .map(|file| {
+            let path = Path::new(file);
+            if !path.is_file() {
+                return StackEntry {
+                    file: file.clone(),
+                    project: compose_view::default_project_name(file),
+                    services: Vec::new(),
+                    runs: Vec::new(),
+                    state: StackState::Missing,
+                    error: None,
+                };
+            }
+            match compose_view::read_config(path) {
+                Ok(config) => StackEntry {
+                    file: file.clone(),
+                    // Compose is the authority on its own project naming; the
+                    // derived fallback only covers a `name`-less payload.
+                    project: if config.name.trim().is_empty() {
+                        compose_view::default_project_name(file)
+                    } else {
+                        config.name
+                    },
+                    services: config.services,
+                    runs: Vec::new(),
+                    state: StackState::Stopped,
+                    error: None,
+                },
+                Err(error) => StackEntry::failed(file.clone(), error),
+            }
+        })
+        .collect()
+}
+
+/// Past this many lines the inline compose log drops its oldest — the same
+/// bounded-buffer rule as the Terminal view, at a tenth of the size since a
+/// compose command is short-lived.
+const COMPOSE_LOG_MAX: usize = 400;
 
 impl EguiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -910,6 +1229,20 @@ impl EguiApp {
             deferred_docker_action: None,
             docker_actions_enabled: report_spawning_enabled,
             docker_action_invocations: 0,
+            docker_selection: HashSet::new(),
+            docker_batch_report: Vec::new(),
+            docker_active_list: DockerList::default(),
+            compose_plugin: None,
+            compose_stacks: Vec::new(),
+            compose_loaded: false,
+            compose_scanning: false,
+            compose_scan_rx: None,
+            compose_scan_warning: None,
+            compose_rx: None,
+            compose_log: Vec::new(),
+            compose_log_target: None,
+            compose_running: false,
+            compose_invocations: 0,
         }
     }
 
@@ -1122,11 +1455,13 @@ impl EguiApp {
         resolve_icon(icon, dirs)
     }
 
-    /// Renders one card. The clickable/launch-relevant body (icon + name +
-    /// disabled-state message) is scoped inside `ui.add_enabled_ui`, keyed
-    /// on `card.is_configured` — `false` only for a `machine_specific: true`
-    /// command with no matching per-machine mapping entry (Part 3). Favorite
-    /// management lives exclusively in Préférences now, not here — see
+    /// Renders one card. Both shapes go through [`render_card_shell`], so
+    /// they share the same frame, icon, title and clickable body; the body
+    /// is scoped inside `ui.add_enabled_ui`, keyed on whether the command
+    /// (or, for a grouped card, the selected variant) is configured —
+    /// `false` only for a `machine_specific: true` command with no matching
+    /// per-machine mapping entry (Part 3). Favorite management lives
+    /// exclusively in Préférences now, not here — see
     /// `render_preferences_view`'s per-action favorite toggle.
     fn render_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         if card.variants.is_empty() {
@@ -1138,78 +1473,28 @@ impl EguiApp {
 
     fn render_simple_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         let visual = self.icon_visual(&card.icon);
-        let mut body_clicked = false;
-        ui.group(|ui| {
-            ui.set_width(96.0);
-            ui.vertical_centered(|ui| {
-                ui.add_enabled_ui(card.is_configured, |ui| {
-                    // The whole icon+name block is the click target, not
-                    // just the name text — a text-only target left most of
-                    // the card (icon, padding) dead to clicks in real
-                    // mouse use, even though it passed kittest (which
-                    // clicks by accessibility label regardless of hit
-                    // size). `.interact(Sense::click())` upgrades the
-                    // container response's existing rect/id, and an
-                    // explicit `widget_info` keeps it discoverable via
-                    // `egui_kittest::Queryable::get_by_label(&card.name)`.
-                    let body_response = ui
-                        .vertical_centered(|ui| {
-                            match visual {
-                                IconVisual::Texture(texture) => {
-                                    let size = texture.size_vec2();
-                                    let display_size =
-                                        egui::vec2(48.0, 48.0).min(size.max(egui::vec2(1.0, 1.0)));
-                                    ui.add(egui::Image::new((texture.id(), display_size)));
-                                }
-                                IconVisual::Emoji(text) => {
-                                    // `selectable(false)`: a plain `ui.label`
-                                    // is selectable text by default, which
-                                    // gives it its own click+drag sense —
-                                    // that widget then wins hit-testing over
-                                    // the card's own `.interact(click)`
-                                    // below, silently eating every click.
-                                    ui.add(
-                                        egui::Label::new(egui::RichText::new(text).size(28.0))
-                                            .selectable(false),
-                                    );
-                                }
-                            }
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&card.name).strong())
-                                    .selectable(false),
-                            );
-                        })
-                        .response
-                        .interact(egui::Sense::click());
-                    body_response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &card.name)
-                    });
-                    if body_response.clicked() {
-                        body_clicked = true;
-                    }
+        let shell = render_card_shell(ui, &visual, &card.name, card.is_configured, |_ui| {});
 
-                    if let Some(message) = &card.disabled_message {
-                        ui.label(egui::RichText::new(message).small().italics())
-                            .on_hover_text(message.clone());
-                    }
-                });
-            });
-        });
+        if let Some(message) = badge_message(card.disabled_message.as_deref(), card.info.as_deref())
+        {
+            card_corner_badge(ui, shell.rect, &message);
+        }
 
         // `add_enabled_ui` already suppresses `clicked()` for an
         // unconfigured card, so `card.is_configured` is redundant with
         // `body_clicked` here — kept explicit as the same guard
         // `can_launch_card` exposes for its pure unit test.
-        if body_clicked && can_launch_card(card.is_configured, self.command_busy()) {
+        if shell.body_clicked && can_launch_card(card.is_configured, self.command_busy()) {
             self.launch_command(&card.command_id, &card.command);
         }
     }
 
-    /// Grouped card: a `ComboBox` selects among `card.variants` (session
-    /// state in `self.selected_variant`, keyed by `card.group_name`) and an
-    /// explicit "Lancer" button launches the selected variant's resolved
-    /// command — unlike a simple card, the body itself is not clickable, so
-    /// interacting with the dropdown never risks an accidental launch.
+    /// Grouped card: same clickable body as a simple card — it launches the
+    /// currently selected variant — plus a `ComboBox` picking among
+    /// `card.variants` (session state in `self.selected_variant`, keyed by
+    /// `card.group_name`) and an explicit "Lancer" button. The picker sits
+    /// outside the body's click target, so choosing a variant never launches
+    /// anything by accident.
     fn render_grouped_card(&mut self, ui: &mut egui::Ui, card: &CardData) {
         let visual = self.icon_visual(&card.icon);
         let group_key = card
@@ -1230,58 +1515,42 @@ impl EguiApp {
         let selected_command = selected.command.clone();
         let selected_label = selected.label.clone();
         let selected_is_configured = selected.is_configured;
-        let selected_disabled_message = selected.disabled_message.clone();
+        let selected_badge_message = badge_message(
+            selected.disabled_message.as_deref(),
+            selected.info.as_deref(),
+        );
+        let can_launch = can_launch_card(selected_is_configured, self.command_busy());
 
         let mut requested_variant: Option<String> = None;
         let mut launch_clicked = false;
 
-        ui.group(|ui| {
-            ui.set_width(96.0);
-            ui.vertical_centered(|ui| {
-                match visual {
-                    IconVisual::Texture(texture) => {
-                        let size = texture.size_vec2();
-                        let display_size =
-                            egui::vec2(48.0, 48.0).min(size.max(egui::vec2(1.0, 1.0)));
-                        ui.add(egui::Image::new((texture.id(), display_size)));
-                    }
-                    IconVisual::Emoji(text) => {
-                        ui.label(egui::RichText::new(text).size(28.0));
-                    }
-                }
-                ui.label(egui::RichText::new(&card.name).strong());
-
-                egui::ComboBox::from_id_salt(&group_key)
-                    .selected_text(&selected_label)
-                    .show_ui(ui, |ui| {
-                        for variant in &card.variants {
-                            let is_selected = variant.command_id == selected_command_id;
-                            if ui.selectable_label(is_selected, &variant.label).clicked() {
-                                requested_variant = Some(variant.command_id.clone());
-                            }
+        let shell = render_card_shell(ui, &visual, &card.name, selected_is_configured, |ui| {
+            egui::ComboBox::from_id_salt(&group_key)
+                .selected_text(&selected_label)
+                .show_ui(ui, |ui| {
+                    for variant in &card.variants {
+                        let is_selected = variant.command_id == selected_command_id;
+                        if ui.selectable_label(is_selected, &variant.label).clicked() {
+                            requested_variant = Some(variant.command_id.clone());
                         }
-                    });
+                    }
+                });
 
-                if let Some(message) = &selected_disabled_message {
-                    ui.label(egui::RichText::new(message).small().italics())
-                        .on_hover_text(message.clone());
+            ui.add_enabled_ui(can_launch, |ui| {
+                if ui.button("Lancer").clicked() {
+                    launch_clicked = true;
                 }
-
-                ui.add_enabled_ui(
-                    can_launch_card(selected_is_configured, self.command_busy()),
-                    |ui| {
-                        if ui.button("Lancer").clicked() {
-                            launch_clicked = true;
-                        }
-                    },
-                );
             });
         });
+
+        if let Some(message) = &selected_badge_message {
+            card_corner_badge(ui, shell.rect, message);
+        }
 
         if let Some(variant_id) = requested_variant {
             self.selected_variant.insert(group_key, variant_id);
         }
-        if launch_clicked && can_launch_card(selected_is_configured, self.command_busy()) {
+        if (launch_clicked || shell.body_clicked) && can_launch {
             self.launch_command(&selected_command_id, &selected_command);
         }
     }
@@ -1501,6 +1770,10 @@ impl EguiApp {
                     Err(err) => self.set_status(err.to_string(), true),
                 }
             }
+            PendingAction::ComposeDown(target) => {
+                let args = compose_view::down_args(&target);
+                self.launch_compose(&target, args, "Destruction de la stack");
+            }
             PendingAction::CleanModule(module) => {
                 // Re-check the single-command slot: another command may have
                 // started while the dialog was open (risk register, part 3).
@@ -1547,6 +1820,11 @@ impl EguiApp {
                 self.deferred_docker_action = Some(DeferredDockerAction::RemoveVolume { name });
                 self.set_status(message, false);
             }
+            PendingAction::DeleteSelection(targets) => {
+                let message = format!("Suppression de {} ressource(s)…", targets.len());
+                self.deferred_docker_action = Some(DeferredDockerAction::DeleteSelection(targets));
+                self.set_status(message, false);
+            }
         }
     }
 
@@ -1569,6 +1847,33 @@ impl EguiApp {
         };
         self.docker_action_invocations = self.docker_action_invocations.saturating_add(1);
         if !self.docker_actions_enabled {
+            return;
+        }
+        // The batch has its own shape too: N results instead of one, and a
+        // report to keep. Handled here rather than in the uniform `match`
+        // below for the same reason as `ComputeVolumeSizes`.
+        if let DeferredDockerAction::DeleteSelection(targets) = &action {
+            let report = docker_view::remove_batch(targets);
+            let failures = report.iter().filter(|o| o.result.is_err()).count();
+            let succeeded = report.len() - failures;
+            // `remove_batch` runs `order_targets`' order, so zipping the two
+            // pairs each outcome with the target that produced it — the only
+            // way back from a label to its key.
+            for (target, outcome) in docker_view::order_targets(targets).iter().zip(&report) {
+                if outcome.result.is_ok() {
+                    self.docker_selection.remove(&target.key);
+                }
+            }
+            // A failed target stays ticked on purpose: « réessayer » is one
+            // click, and unticking it would hide what still needs attention.
+            self.docker_batch_report = report;
+            let message = if failures == 0 {
+                format!("{succeeded} ressource(s) supprimée(s).")
+            } else {
+                format!("{succeeded} supprimée(s), {failures} en échec — voir le rapport.")
+            };
+            self.set_status(message, failures > 0);
+            self.refetch_docker();
             return;
         }
         // `ComputeVolumeSizes` returns a different shape (a name/size list,
@@ -1600,7 +1905,9 @@ impl EguiApp {
                 docker_view::remove_image(reference)
             }
             DeferredDockerAction::RemoveVolume { name } => docker_view::remove_volume(name),
-            DeferredDockerAction::ComputeVolumeSizes => unreachable!("handled above"),
+            DeferredDockerAction::ComputeVolumeSizes | DeferredDockerAction::DeleteSelection(_) => {
+                unreachable!("handled above")
+            }
         };
         match result {
             Ok(()) => {
@@ -1617,12 +1924,40 @@ impl EguiApp {
                     DeferredDockerAction::RemoveVolume { name } => {
                         format!("Volume {name} supprimé.")
                     }
-                    DeferredDockerAction::ComputeVolumeSizes => unreachable!("handled above"),
+                    DeferredDockerAction::ComputeVolumeSizes
+                    | DeferredDockerAction::DeleteSelection(_) => unreachable!("handled above"),
                 };
                 self.set_status(message, false);
-                self.docker = Some(docker_view::fetch());
+                self.refetch_docker();
             }
             Err(err) => self.set_status(err, true),
+        }
+    }
+
+    /// Re-read the Docker state and re-validate the selection against it.
+    ///
+    /// The single entry point for both, because the invariant only holds if
+    /// it holds at *every* refetch: a key whose resource has just been
+    /// deleted — by this app, by another terminal, by anything — must stop
+    /// being a batch target, or the next batch would run `docker rm` on a
+    /// container that no longer exists and report a failure the user cannot
+    /// act on.
+    fn refetch_docker(&mut self) {
+        self.docker = Some(docker_view::fetch());
+        self.prune_docker_selection();
+    }
+
+    /// Drop every selected key the current snapshot no longer allows. A
+    /// failed fetch clears the selection outright: there is nothing left to
+    /// validate against, and keeping keys would mean acting on a state that
+    /// could not be read.
+    fn prune_docker_selection(&mut self) {
+        match self.docker.as_ref() {
+            Some(Ok(snapshot)) => {
+                self.docker_selection =
+                    docker_view::sanitize_selection(&self.docker_selection, snapshot);
+            }
+            _ => self.docker_selection.clear(),
         }
     }
 
@@ -1638,8 +1973,14 @@ impl EguiApp {
     fn open_docker_confirm(&mut self, action: DockerAction) {
         let snapshot = self.docker.as_ref().and_then(|result| result.as_ref().ok());
         let (title, message, on_confirm) = match action {
-            DockerAction::Refresh | DockerAction::Retry | DockerAction::ComputeVolumeSizes => {
-                unreachable!("Refresh/Retry/ComputeVolumeSizes are handled directly in render_docker_view, never opened as a confirm dialog")
+            DockerAction::Refresh
+            | DockerAction::Retry
+            | DockerAction::ComputeVolumeSizes
+            | DockerAction::ToggleSelection(_)
+            | DockerAction::SelectDormant
+            | DockerAction::ClearSelection
+            | DockerAction::SelectList(_) => {
+                unreachable!("the non-destructive actions are handled directly in render_docker_view, never opened as a confirm dialog")
             }
             DockerAction::StopContainer(id) => {
                 let name = snapshot
@@ -1774,6 +2115,38 @@ impl EguiApp {
                     PendingAction::RemoveVolume(name),
                 )
             }
+            DockerAction::DeleteSelection(targets) => {
+                let keys: HashSet<SelectionKey> =
+                    targets.iter().map(|target| target.key.clone()).collect();
+                let (containers, images, volumes) = docker_view::selection_counts(&keys);
+                // No snapshot means no size to quote — announced as unknown
+                // rather than as `0B`, which would read as "frees nothing".
+                let size = snapshot.map(|snapshot| docker_view::selection_size(&keys, snapshot));
+                // Laid out on several short lines rather than one long
+                // sentence: `egui::Modal` sizes itself to its content, and a
+                // 160-character line makes it wider than the window — wide
+                // enough for « Oui » to land outside it, where a click reads
+                // as a backdrop dismissal instead of a confirmation.
+                let mut message = format!(
+                    "Suppression définitive, dans cet ordre :\n\
+                     • {containers} conteneur(s) — docker rm\n\
+                     • {images} image(s) — docker rmi\n\
+                     • {volumes} volume(s) — docker volume rm\n\n"
+                );
+                match size {
+                    Some((bytes, partial)) => message.push_str(&format!(
+                        "Libérera environ {}.\n",
+                        docker_view::format_selection_size(bytes, partial)
+                    )),
+                    None => message.push_str("Espace récupéré inconnu.\n"),
+                }
+                message.push_str("Continuer ?");
+                (
+                    "Supprimer la sélection".to_string(),
+                    message,
+                    PendingAction::DeleteSelection(targets),
+                )
+            }
         };
         self.active_dialog = Some(ActiveDialog {
             kind: dialogs::confirm(title, message),
@@ -1846,6 +2219,15 @@ impl EguiApp {
             }
         };
 
+        let info = {
+            let trimmed = form.info.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        };
+
         match &form.editing_id {
             None => {
                 let existing_ids: Vec<String> =
@@ -1863,6 +2245,7 @@ impl EguiApp {
                     group_name: None,
                     variant_label: None,
                     machine_specific: false,
+                    info,
                 };
                 match storage::add_command(&mut self.config, command) {
                     Ok(()) => match self.persist() {
@@ -1904,6 +2287,7 @@ impl EguiApp {
                     group_name: existing.group_name,
                     variant_label: existing.variant_label,
                     machine_specific: existing.machine_specific,
+                    info,
                 };
                 match storage::update_command(&mut self.config, id, updated) {
                     Ok(()) => match self.persist() {
@@ -1996,6 +2380,10 @@ impl EguiApp {
         let shortcut_label = ui.label("raccourci");
         ui.text_edit_singleline(&mut form.shortcut)
             .labelled_by(shortcut_label.id);
+
+        let info_label = ui.label("Information");
+        ui.text_edit_singleline(&mut form.info)
+            .labelled_by(info_label.id);
 
         let mut submit_clicked = false;
         let mut cancel_clicked = false;
@@ -2354,6 +2742,39 @@ impl EguiApp {
 
             ui.separator();
             self.render_action_form(ui);
+
+            // Self-contained Docker block, deliberately last: it only reads
+            // and writes `default_settings.dormant_after_days`, so it adds no
+            // coupling to anything above it.
+            ui.separator();
+            ui.strong("Docker");
+            let mut persist_threshold = false;
+            ui.horizontal(|ui| {
+                let label = ui.label("Seuil de dormance (jours)");
+                let response = ui
+                    .add(
+                        egui::DragValue::new(&mut self.config.default_settings.dormant_after_days)
+                            .range(1..=3650)
+                            .speed(1.0),
+                    )
+                    .labelled_by(label.id)
+                    .on_hover_text(
+                        "Un conteneur arrêté, une image inutilisée ou un volume orphelin \
+                         plus ancien que ce seuil est signalé « dormant ».",
+                    );
+                // A `DragValue` reports `changed()` on *every frame* of a
+                // drag; persisting there would rewrite config.json dozens of
+                // times per second.
+                if response.drag_stopped() || response.lost_focus() {
+                    persist_threshold = true;
+                }
+            });
+            if persist_threshold {
+                match self.persist() {
+                    Ok(()) => self.set_status("Seuil de dormance mis à jour.", false),
+                    Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+                }
+            }
         });
     }
 
@@ -2407,6 +2828,14 @@ impl EguiApp {
         self.drain_action_events();
         self.drain_application_events();
         self.drain_cleanup_events();
+        self.drain_compose_events();
+        self.drain_scan_events();
+        if self.compose_running || self.compose_scanning {
+            // Same polling rationale as `cleanup_job`: the worker's events
+            // only land on a repaint.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if self.cleanup_job.is_some() {
             // Same polling rationale as `terminal_running` below: the
             // cleanup thread's events only land on a repaint.
@@ -2547,6 +2976,172 @@ impl EguiApp {
         }
     }
 
+    /// Hand `files` — or a fresh `$HOME` walk when `root` is `Some` — to a
+    /// worker thread that resolves each one through `docker compose config`.
+    ///
+    /// Off the UI thread on purpose: the walk takes ~1 s here and each
+    /// `config` call ~89 ms, so doing this inline would freeze the window for
+    /// well over a second every time the Docker tab opens.
+    fn start_compose_job(&mut self, root: Option<PathBuf>) {
+        if self.compose_scanning {
+            return;
+        }
+        self.compose_invocations = self.compose_invocations.saturating_add(1);
+        // Same seam as `docker_actions_enabled`: a kittest harness must never
+        // shell out. The flag is left `true` only in production.
+        if !self.docker_actions_enabled {
+            return;
+        }
+        let memorized = self.config.docker_stacks.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = root.as_deref().map(compose_view::discover);
+            let files = match &outcome {
+                Some(outcome) => outcome.files.clone(),
+                None => memorized,
+            };
+            let entries = build_compose_entries(&files);
+            let _ = tx.send(ComposeScanResult { entries, outcome });
+        });
+        self.compose_scan_rx = Some(rx);
+        self.compose_scanning = true;
+    }
+
+    /// Collect a finished scan/reload, and persist the file list when it was
+    /// a real scan.
+    fn drain_scan_events(&mut self) {
+        let Some(rx) = &self.compose_scan_rx else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.compose_scan_rx = None;
+        self.compose_scanning = false;
+        self.compose_stacks = result.entries;
+
+        let Some(outcome) = result.outcome else {
+            // A reload of the memorized list changes nothing on disk.
+            return;
+        };
+        self.compose_scan_warning = outcome.warning.clone();
+        // The scan result *replaces* the memorized list: a file the walk no
+        // longer finds is genuinely gone from `$HOME`. One that is still
+        // running from a vanished path is not lost either — `link_runs` gives
+        // it a `Missing` row of its own, built from the container labels.
+        let files: Vec<String> = self
+            .compose_stacks
+            .iter()
+            .map(|stack| stack.file.clone())
+            .collect();
+        if files != self.config.docker_stacks {
+            self.config.docker_stacks = files;
+            if let Err(error) = self.persist() {
+                self.set_status(format!("Échec de sauvegarde: {error}"), true);
+                return;
+            }
+        }
+        self.set_status(
+            format!(
+                "{} fichier(s) compose trouvé(s) en {} ms.",
+                outcome.files.len(),
+                outcome.elapsed_ms
+            ),
+            false,
+        );
+    }
+
+    /// Spawn one detached `docker compose …` command, streaming its output
+    /// into the inline log of the row it belongs to.
+    ///
+    /// Detached, unlike every Part 1 Docker action: `up -d` on a stack that
+    /// has to pull images can run for minutes, which the blocking
+    /// `run_docker` path (30 s ceiling, no output until it returns) cannot
+    /// represent at all.
+    /// Drop the log panel's content *and* its owner, which is what makes it
+    /// disappear: `render_log_panel` keys its visibility on `log_target`, so
+    /// clearing the lines alone would leave an empty panel anchored.
+    fn close_compose_log(&mut self) {
+        self.compose_log.clear();
+        self.compose_log_target = None;
+    }
+
+    fn launch_compose(&mut self, target: &StackTarget, args: Vec<String>, label: &str) {
+        if self.compose_running || self.compose_scanning {
+            self.set_status("Une commande compose est déjà en cours.", true);
+            return;
+        }
+        self.compose_invocations = self.compose_invocations.saturating_add(1);
+        self.compose_log.clear();
+        self.compose_log_target = Some(target.file.clone());
+        if !self.docker_actions_enabled {
+            return;
+        }
+        // The compose file's own directory: `up -d` resolves relative build
+        // contexts and `env_file` paths against the current directory.
+        let working_dir = Path::new(&target.file).parent().map(Path::to_path_buf);
+        let (tx, rx) = std::sync::mpsc::channel();
+        match terminal_view::launch_captured_program(
+            "docker",
+            &args,
+            working_dir.as_deref(),
+            label,
+            tx,
+        ) {
+            Ok(_pid) => {
+                self.compose_rx = Some(rx);
+                self.compose_running = true;
+                self.set_status(format!("{label}…"), false);
+            }
+            Err(error) => {
+                self.compose_log.push(format!("(erreur: {error})"));
+                self.set_status(format!("Échec du lancement: {error}"), true);
+            }
+        }
+    }
+
+    /// Drain the in-flight compose command's output into the inline log, and
+    /// refetch the Docker snapshot once it settles so the row's state catches
+    /// up with what the command just did.
+    fn drain_compose_events(&mut self) {
+        let Some(rx) = &self.compose_rx else {
+            return;
+        };
+        let mut settled: Option<bool> = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                TerminalEvent::Started { .. } => {}
+                TerminalEvent::Output(line) => self.compose_log.push(line),
+                TerminalEvent::Finished { code } => {
+                    self.compose_log.push(format_exit_line(code));
+                    settled = Some(code == Some(0));
+                }
+                TerminalEvent::Failed(error) => {
+                    self.compose_log.push(format!("(erreur: {error})"));
+                    settled = Some(false);
+                }
+            }
+        }
+        if self.compose_log.len() > COMPOSE_LOG_MAX {
+            let excess = self.compose_log.len() - COMPOSE_LOG_MAX;
+            self.compose_log.drain(..excess);
+        }
+
+        let Some(succeeded) = settled else {
+            return;
+        };
+        self.compose_rx = None;
+        self.compose_running = false;
+        if succeeded {
+            self.set_status("Commande compose terminée.", false);
+        } else {
+            self.set_status("Commande compose en échec — voir le journal.", true);
+        }
+        // Whatever the outcome: `up -d` can fail *after* starting half the
+        // services, so the row's state must be re-read, not inferred.
+        self.refetch_docker();
+    }
+
     /// Drain any pending [`TerminalEvent`]s from the running command, if
     /// any, appending complete lines to `terminal_lines` (already
     /// newline-split by `terminal_view::stream_output`, so no `feed_text`
@@ -2567,8 +3162,7 @@ impl EguiApp {
                     terminal_view::trim_lines(&mut self.terminal_lines);
                 }
                 TerminalEvent::Finished { code } => {
-                    self.terminal_lines
-                        .push_back(format!("(terminé — code {code:?})"));
+                    self.terminal_lines.push_back(format_exit_line(code));
                     settled = true;
                 }
                 TerminalEvent::Failed(err) => {
@@ -2605,8 +3199,7 @@ impl EguiApp {
                     terminal_view::trim_lines(&mut self.terminal_lines);
                 }
                 TerminalEvent::Finished { code } => {
-                    self.terminal_lines
-                        .push_back(format!("(terminé — code {code:?})"));
+                    self.terminal_lines.push_back(format_exit_line(code));
                     outcome = Some(Ok(()));
                     settled = true;
                 }
@@ -2805,7 +3398,26 @@ impl EguiApp {
         }
 
         if self.docker.is_none() {
-            self.docker = Some(docker_view::fetch());
+            self.refetch_docker();
+        }
+
+        // --- Stacks -------------------------------------------------------
+        // Probed once per process: `docker compose version` costs a fork, and
+        // a plugin does not appear or vanish while the app runs.
+        if self.compose_plugin.is_none() {
+            self.compose_plugin = Some(if self.docker_actions_enabled {
+                compose_view::plugin_available()
+            } else {
+                false
+            });
+        }
+        // One-shot reload of the memorized list, so reopening the tab shows
+        // the stacks found by the last scan without re-walking `$HOME`.
+        if !self.compose_loaded {
+            self.compose_loaded = true;
+            if !self.config.docker_stacks.is_empty() {
+                self.start_compose_job(None);
+            }
         }
 
         let (snapshot, error) = match &self.docker {
@@ -2813,17 +3425,98 @@ impl EguiApp {
             Some(Err(err)) => (None, Some(err.as_str())),
             None => unreachable!("populated just above if it was None"),
         };
+        // The runs come from the snapshot's containers; when the snapshot
+        // itself failed there is nothing to link against, and every row must
+        // read `Unknown` rather than claim « arrêtée ».
+        let stacks = match snapshot {
+            Some(snapshot) => {
+                compose_view::link_runs(&self.compose_stacks, &snapshot.containers, &|file| {
+                    Path::new(file).is_file()
+                })
+            }
+            None => self
+                .compose_stacks
+                .iter()
+                .cloned()
+                .map(|mut stack| {
+                    stack.runs.clear();
+                    stack.state = StackState::Unknown;
+                    stack
+                })
+                .collect(),
+        };
+        let container_owners = snapshot
+            .map(docker_view::container_port_owners)
+            .unwrap_or_default();
+        let conflicts = compose_view::all_conflicts(container_owners, &stacks);
+        let compose_state = ComposeViewState {
+            stacks: &stacks,
+            conflicts: &conflicts,
+            plugin_available: self.compose_plugin.unwrap_or(false),
+            scanning: self.compose_scanning,
+            busy: self.compose_running || self.deferred_docker_action.is_some(),
+            log: &self.compose_log,
+            log_target: self.compose_log_target.as_deref(),
+            scan_warning: self.compose_scan_warning.as_deref(),
+        };
+        // The log panel first: egui shrinks the parent's cursor when a panel
+        // claims its edge, so everything below has to be laid out after it.
+        let mut stack_actions = compose_view::render_log_panel(ui, &compose_state);
+        stack_actions.extend(compose_view::render(ui, &compose_state));
+        // The declared owners the container sections need to badge their own
+        // rows — same computation the conflicts above already ran, kept as a
+        // separate slice because `docker_view` owns its side of the merge.
+        let declared = compose_view::declared_owners(&stacks);
         let state = DockerViewState {
             snapshot,
             error,
-            busy: self.deferred_docker_action.is_some(),
+            busy: self.deferred_docker_action.is_some() || self.compose_running,
+            dormant_after_days: self.config.default_settings.dormant_after_days,
+            now_epoch_secs: now_epoch_secs(),
+            extra_port_owners: &declared,
+            selection: &self.docker_selection,
+            batch_report: &self.docker_batch_report,
+            active_list: self.docker_active_list,
         };
         let actions = docker_view::render(ui, &state);
         for action in actions {
             match action {
                 DockerAction::Refresh | DockerAction::Retry => {
-                    self.docker = Some(docker_view::fetch());
+                    // A manual refresh is one of the two moments the plan
+                    // allows the report to disappear (the other being the
+                    // next selection change).
+                    self.docker_batch_report.clear();
+                    self.refetch_docker();
                 }
+                DockerAction::ToggleSelection(key) => {
+                    if !self.docker_selection.remove(&key) {
+                        self.docker_selection.insert(key);
+                    }
+                    self.docker_batch_report.clear();
+                    // Re-validated on every toggle, not only on refetch:
+                    // unticking a container has to untick, on the same
+                    // frame, every image that was only selectable because of
+                    // it.
+                    self.prune_docker_selection();
+                }
+                DockerAction::SelectDormant => {
+                    let cutoff = docker_view::cutoff_epoch(
+                        now_epoch_secs(),
+                        self.config.default_settings.dormant_after_days,
+                    );
+                    if let Some(Ok(snapshot)) = self.docker.as_ref() {
+                        self.docker_selection = docker_view::dormant_selection(snapshot, cutoff);
+                    }
+                    self.docker_batch_report.clear();
+                }
+                DockerAction::ClearSelection => {
+                    self.docker_selection.clear();
+                    self.docker_batch_report.clear();
+                }
+                // Pure view state: no refetch, and the batch report survives
+                // — switching tabs to check what a batch did to the volumes
+                // must not be what makes the report disappear.
+                DockerAction::SelectList(list) => self.docker_active_list = list,
                 // Not destructive — must never go through open_docker_confirm
                 // (no confirm dialog), unlike the four Remove*/Stop* actions.
                 DockerAction::ComputeVolumeSizes => {
@@ -2834,7 +3527,87 @@ impl EguiApp {
                 destructive => self.open_docker_confirm(destructive),
             }
         }
+
+        // Deliberately after the Docker dispatch: every arm below mutates
+        // `self`, which the `snapshot` borrow held by `DockerViewState`
+        // forbids until `docker_view::render` has returned.
+        for action in stack_actions {
+            match action {
+                StackAction::Scan => match compose_scan_root() {
+                    Some(root) => {
+                        self.set_status("Recherche des fichiers compose…", false);
+                        self.start_compose_job(Some(root));
+                    }
+                    None => self.set_status("Dossier personnel introuvable.", true),
+                },
+                StackAction::Up(target) => {
+                    let args = compose_view::up_args(&target);
+                    self.launch_compose(&target, args, "Démarrage de la stack");
+                }
+                StackAction::Stop(target) => {
+                    let args = compose_view::stop_args(&target);
+                    self.launch_compose(&target, args, "Arrêt de la stack");
+                }
+                // The only destructive compose action — `down` removes the
+                // containers and the project network, so it is confirmed like
+                // `docker rm`/`docker rmi` are.
+                StackAction::Down(target) => {
+                    let label = target
+                        .project
+                        .clone()
+                        .unwrap_or_else(|| compose_view::default_project_name(&target.file));
+                    self.active_dialog = Some(ActiveDialog {
+                        kind: dialogs::confirm(
+                            "Détruire la stack".to_string(),
+                            format!(
+                                "Le projet « {label} » va être détruit (docker compose down). Les volumes sont conservés. Continuer ?"
+                            ),
+                        ),
+                        on_confirm: Some(PendingAction::ComposeDown(target)),
+                    });
+                }
+                StackAction::CloseLog => self.close_compose_log(),
+                StackAction::Forget(file) => {
+                    self.config
+                        .docker_stacks
+                        .retain(|memorized| *memorized != file);
+                    self.compose_stacks.retain(|stack| stack.file != file);
+                    if self.compose_log_target.as_deref() == Some(file.as_str()) {
+                        self.close_compose_log();
+                    }
+                    match self.persist() {
+                        Ok(()) => self.set_status("Fichier oublié.", false),
+                        Err(error) => {
+                            self.set_status(format!("Échec de sauvegarde: {error}"), true)
+                        }
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Root of the compose-file walk: the user's home directory.
+///
+/// Read from the environment rather than through `platform::` — the walk is a
+/// user-facing "scan my projects" gesture, so it must start where the user's
+/// files are, not in the app's config/data directory.
+fn compose_scan_root() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Wall-clock seconds since the Unix epoch, for the Docker tab's dormancy
+/// cutoff. A clock before 1970 (or an unset RTC) reads as 0, which simply
+/// puts every date in the future and badges nothing — the same fail-safe the
+/// rest of the dormancy path uses.
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Empty-state message for the Automations view. Both Windows
@@ -2869,6 +3642,7 @@ mod tests {
 
     fn sample_config() -> Config {
         Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: Settings {
                 show_categories: true,
@@ -2876,6 +3650,7 @@ mod tests {
                 theme: "light".to_string(),
                 launch_at_startup: false,
                 show_descriptions: true,
+                dormant_after_days: 60,
             },
             categories: vec![Category {
                 id: "system".into(),
@@ -2895,6 +3670,7 @@ mod tests {
                     group_name: None,
                     variant_label: None,
                     machine_specific: false,
+                    info: None,
                 },
                 Command {
                     id: "cmd".into(),
@@ -2908,6 +3684,7 @@ mod tests {
                     group_name: None,
                     variant_label: None,
                     machine_specific: false,
+                    info: None,
                 },
             ],
         }
@@ -2937,6 +3714,7 @@ mod tests {
             group_name: Some(group_name.into()),
             variant_label: Some(variant_label.into()),
             machine_specific: false,
+            info: None,
         }
     }
 
@@ -3000,6 +3778,7 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: false,
+            info: None,
         });
 
         let groups = build_display_groups(&config, &MachineCommands::default(), "test-machine");
@@ -3198,6 +3977,7 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: true,
+            info: None,
         });
 
         // Empty mapping: "deploy" has no override for "laptop-x".
@@ -3244,6 +4024,7 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: true,
+            info: None,
         });
 
         let mut per_command = std::collections::BTreeMap::new();
@@ -3867,6 +4648,13 @@ mod tests {
         harness.get_by_label("raccourci").type_text("Ctrl+K");
         harness.run();
 
+        harness.get_by_label("Information").focus();
+        harness.run();
+        harness
+            .get_by_label("Information")
+            .type_text("Ouvre la calculatrice");
+        harness.run();
+
         harness.get_by_label("Enregistrer").click_accesskit();
         harness.run();
 
@@ -3881,6 +4669,7 @@ mod tests {
         assert_eq!(created.icon, "🚀");
         assert!(created.is_favorite);
         assert_eq!(created.shortcut.as_deref(), Some("Ctrl+K"));
+        assert_eq!(created.info.as_deref(), Some("Ouvre la calculatrice"));
 
         // Appears immediately in the Actions view, no restart.
         harness.get_by_label("Actions").click();
@@ -3941,11 +4730,22 @@ mod tests {
             assert_eq!(form.icon, "📝");
             assert!(form.is_favorite);
             assert_eq!(form.shortcut, "");
+            assert_eq!(
+                form.info, "",
+                "an info-less command must open with an empty Information field"
+            );
         }
 
         harness.get_by_label("raccourci").focus();
         harness.run();
         harness.get_by_label("raccourci").type_text("Ctrl+Shift+N");
+        harness.run();
+
+        harness.get_by_label("Information").focus();
+        harness.run();
+        harness
+            .get_by_label("Information")
+            .type_text("Éditeur de texte simple");
         harness.run();
 
         // Reassign to "Sans catégorie" (risk register item 3's flip side —
@@ -3978,6 +4778,7 @@ mod tests {
             "reassigning to Sans catégorie must persist as an empty category field"
         );
         assert_eq!(updated.shortcut.as_deref(), Some("Ctrl+Shift+N"));
+        assert_eq!(updated.info.as_deref(), Some("Éditeur de texte simple"));
         assert!(
             !updated.is_favorite,
             "toggling favori off via the action form must persist"
@@ -4324,6 +5125,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn format_exit_line_spells_out_the_exit_status_instead_of_the_debug_form() {
+        assert_eq!(format_exit_line(Some(0)), "(terminé — succès)");
+        assert_eq!(format_exit_line(Some(2)), "(terminé — code 2)");
+        assert_eq!(
+            format_exit_line(None),
+            "(terminé — interrompu par un signal)",
+            "a signal-killed child must not surface as the raw `None` debug form"
+        );
+    }
+
+    // -- Optional per-command info badge ------------------------------------
+
+    #[test]
+    fn badge_message_combines_the_disabled_diagnostic_and_the_free_text_info() {
+        assert_eq!(badge_message(None, None), None);
+        assert_eq!(
+            badge_message(None, Some("Nécessite le VPN")).as_deref(),
+            Some("Nécessite le VPN")
+        );
+        assert_eq!(
+            badge_message(Some("Non configuré"), None).as_deref(),
+            Some("Non configuré")
+        );
+        assert_eq!(
+            badge_message(Some("Non configuré"), Some("Nécessite le VPN")).as_deref(),
+            Some("Non configuré\n\nNécessite le VPN"),
+            "the unconfigured diagnostic must come first, then the free-text note"
+        );
+        assert_eq!(
+            badge_message(None, Some("   ")),
+            None,
+            "a whitespace-only info string must not raise a badge"
+        );
+    }
+
+    #[test]
+    fn a_commands_info_string_reaches_its_card_and_its_variants() {
+        let mut config = sample_config();
+        config.default_settings.show_categories = false;
+        config.commands.push(Command {
+            id: "vpn-card".into(),
+            name: "VPN".into(),
+            command: "vpn up".into(),
+            category: "system".into(),
+            icon: "🔧".into(),
+            is_favorite: true,
+            shortcut: None,
+            variant_group: None,
+            group_name: None,
+            variant_label: None,
+            machine_specific: false,
+            info: Some("Nécessite le VPN".into()),
+        });
+        config.commands.push(Command {
+            id: "grouped-card".into(),
+            name: "Rapport complet".into(),
+            command: "report --full".into(),
+            category: "system".into(),
+            icon: "🔧".into(),
+            is_favorite: true,
+            shortcut: None,
+            variant_group: Some("report".into()),
+            group_name: Some("Rapport".into()),
+            variant_label: Some("Complet".into()),
+            machine_specific: false,
+            info: Some("Prend 3 minutes".into()),
+        });
+
+        let groups = build_display_groups(&config, &MachineCommands::default(), "laptop-x");
+        let cards: Vec<&CardData> = groups.iter().flat_map(|g| &g.cards).collect();
+
+        let simple = cards
+            .iter()
+            .find(|c| c.command_id == "vpn-card")
+            .expect("the 'vpn-card' card must be present");
+        assert_eq!(simple.info.as_deref(), Some("Nécessite le VPN"));
+
+        let grouped = cards
+            .iter()
+            .find(|c| c.group_name.as_deref() == Some("Rapport"))
+            .expect("the grouped 'Rapport' card must be present");
+        assert_eq!(
+            grouped.variants[0].info.as_deref(),
+            Some("Prend 3 minutes"),
+            "a grouped card carries its info per variant, not on the group itself"
+        );
+    }
+
+    #[test]
+    fn a_configured_card_with_an_info_string_still_renders_its_badge() {
+        let mut config = sample_config();
+        config.default_settings.show_categories = false;
+        config.commands.push(Command {
+            id: "vpn-card".into(),
+            name: "VPN".into(),
+            command: "vpn up".into(),
+            category: "system".into(),
+            icon: "🔧".into(),
+            is_favorite: true,
+            shortcut: None,
+            variant_group: None,
+            group_name: None,
+            variant_label: None,
+            machine_specific: false,
+            info: Some("Nécessite le VPN".into()),
+        });
+
+        let app = EguiApp::new_for_test(config, PathBuf::from("unused-config.json"));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+        harness.run();
+
+        assert!(
+            harness.query_by_label("Nécessite le VPN").is_some(),
+            "a configured card whose command carries an info string must expose the badge"
+        );
+        assert!(
+            harness.query_by_label("Bloc-notes").is_some(),
+            "the info-less sample cards must still render"
+        );
+    }
+
     // -- Card click-to-launch tests (this phase's acceptance criteria) -------
 
     #[test]
@@ -4365,6 +5295,7 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: false,
+            info: None,
         });
 
         let app = EguiApp::new_for_test(config, config_path.clone());
@@ -4435,6 +5366,7 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: true,
+            info: None,
         });
 
         // Empty mapping: "deploy" has no override for "test-machine" (the
@@ -4543,6 +5475,138 @@ mod tests {
             saw_success,
             "expected a success status naming the selected variant 'sync-perso', not the default 'sync-pro'; got {:?}",
             harness.state().status.as_ref().map(|s| &s.text)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A grouped card's body launches the selected variant, exactly like a
+    /// simple card's — the behavior `render_card_shell` now shares between
+    /// both shapes instead of only the simple one having it.
+    #[test]
+    fn clicking_a_grouped_cards_body_launches_the_selected_variant() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "variant-body-click"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let commands = vec![
+            variant_command(
+                "sync-pro",
+                "sync",
+                "Synchroniser",
+                "Pro",
+                "echo hello-from-pro",
+                "system",
+                true,
+            ),
+            variant_command(
+                "sync-perso",
+                "sync",
+                "Synchroniser",
+                "Perso",
+                "echo hello-from-perso",
+                "system",
+                true,
+            ),
+        ];
+        let config = config_with_commands(commands);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness.get_by_value("Pro").click();
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Perso")
+            .click();
+        harness.run();
+
+        // The card body itself — not the "Lancer" button.
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Synchroniser")
+            .click();
+        harness.run_steps(1);
+
+        let mut saw_success = false;
+        for _ in 0..200 {
+            saw_success =
+                saw_success
+                    || harness.state().status.as_ref().is_some_and(|status| {
+                        !status.is_error && status.text.contains("sync-perso")
+                    });
+            if saw_success && harness.state().action_running.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            harness.run_steps(1);
+        }
+
+        assert!(
+            saw_success,
+            "clicking a grouped card's body must launch the selected variant; got {:?}",
+            harness.state().status.as_ref().map(|s| &s.text)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The body click obeys the same configuration guard as "Lancer": an
+    /// unconfigured selected variant must stay inert.
+    #[test]
+    fn clicking_a_grouped_cards_body_is_inert_when_the_selected_variant_is_unconfigured() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-{}",
+            std::process::id(),
+            "variant-body-click-unconfigured"
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("config.json");
+
+        let mut pro = variant_command(
+            "sync-pro",
+            "sync",
+            "Synchroniser",
+            "Pro",
+            "echo hello-from-pro",
+            "system",
+            true,
+        );
+        // No override exists for "test-machine" in the empty `MachineCommands`
+        // used by `new_for_test`, so this variant resolves as unconfigured.
+        pro.machine_specific = true;
+        let config = config_with_commands(vec![pro]);
+
+        let app = EguiApp::new_for_test(config, config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.run();
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Button, "Synchroniser")
+            .click();
+        harness.run();
+
+        assert!(
+            harness.state().action_running.is_none(),
+            "clicking the body of a card whose selected variant is unconfigured must not launch"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -5340,6 +6404,11 @@ mod tests {
                 state: docker_view::ContainerState::Exited,
                 status: "Exited (0) 2 hours ago".to_string(),
                 rw_size: "767kB".to_string(),
+                ports: Vec::new(),
+                last_activity: None,
+                compose_project: None,
+                compose_files: Vec::new(),
+                exit_code: None,
             }],
             images: vec![],
             volumes: vec![],
@@ -5417,6 +6486,237 @@ mod tests {
     }
 
     #[test]
+    fn batch_delete_goes_through_the_same_confirm_and_executes_exactly_once() {
+        let (mut app, dir) = cleanup_test_app("docker-batch");
+        app.docker_available = true;
+        app.docker = Some(Ok(sample_docker_snapshot()));
+        app.docker_selection = HashSet::from([SelectionKey::container("c1")]);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Supprimer la sélection").click();
+        // `run()` rather than a fixed step count: `egui::Modal` centres
+        // itself only once it knows its own size, so its first frame lands
+        // off-centre and a click queued from that layout would miss the
+        // buttons and read as a backdrop dismissal.
+        harness.run();
+        // A batch is destructive like any other deletion: same blocking
+        // dialog, same deferral, no shortcut.
+        assert!(matches!(
+            harness.state().active_dialog,
+            Some(ActiveDialog {
+                on_confirm: Some(PendingAction::DeleteSelection(_)),
+                ..
+            })
+        ));
+        assert_eq!(harness.state().docker_action_invocations, 0);
+
+        harness.get_by_label("Oui").click();
+        harness.run_steps(1);
+        assert_eq!(harness.state().docker_action_invocations, 0);
+        harness.step();
+        assert_eq!(harness.state().docker_action_invocations, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_selection_is_pruned_against_every_new_snapshot() {
+        let (mut app, dir) = cleanup_test_app("docker-prune");
+        app.docker = Some(Ok(sample_docker_snapshot()));
+        app.docker_selection = HashSet::from([
+            SelectionKey::container("c1"),
+            // Removed from another terminal between two fetches.
+            SelectionKey::container("disparu"),
+        ]);
+        app.prune_docker_selection();
+        assert_eq!(
+            app.docker_selection,
+            HashSet::from([SelectionKey::container("c1")])
+        );
+
+        // A failed fetch leaves nothing to validate against: the selection
+        // must not survive it.
+        app.docker = Some(Err("daemon Docker inaccessible".to_string()));
+        app.prune_docker_selection();
+        assert!(app.docker_selection.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A stopped stack and a running one, both memorized, with the container
+    /// carrying the compose labels that `link_runs` matches on.
+    ///
+    /// `with_missing` is opt-in because a `Missing` row renders its own
+    /// (disabled) « Détruire » button, which would make a bare
+    /// `get_by_label` click ambiguous.
+    fn compose_test_app(name: &str, with_missing: bool) -> (EguiApp, PathBuf) {
+        let (mut app, dir) = cleanup_test_app(name);
+        app.docker_available = true;
+        // The lazy probe must not shell out to `docker compose version`.
+        app.compose_plugin = Some(true);
+        app.compose_loaded = true;
+        let running_file = "/tmp/lab/docker-compose.yml".to_string();
+        app.config.docker_stacks = vec![running_file.clone()];
+        app.compose_stacks = vec![StackEntry {
+            file: running_file.clone(),
+            project: "lab".to_string(),
+            services: Vec::new(),
+            runs: Vec::new(),
+            state: StackState::Stopped,
+            error: None,
+        }];
+        if with_missing {
+            app.config
+                .docker_stacks
+                .push("/gone/compose.yml".to_string());
+            let mut gone = StackEntry::failed("/gone/compose.yml", "fichier introuvable");
+            gone.state = StackState::Missing;
+            app.compose_stacks.push(gone);
+        }
+        let mut container = docker_view::ContainerEntry {
+            id: "lab1".to_string(),
+            name: "lab-web-1".to_string(),
+            image: "nginx:alpine".to_string(),
+            state: docker_view::ContainerState::Running,
+            status: "Up 4 hours".to_string(),
+            rw_size: "1MB".to_string(),
+            ports: Vec::new(),
+            last_activity: None,
+            compose_project: Some("lab".to_string()),
+            compose_files: vec![running_file],
+            exit_code: None,
+        };
+        container.compose_project = Some("lab".to_string());
+        app.docker = Some(Ok(DockerSnapshot {
+            containers: vec![container],
+            images: vec![],
+            volumes: vec![],
+        }));
+        (app, dir)
+    }
+
+    #[test]
+    fn destroying_a_stack_confirms_first_and_launches_exactly_one_command() {
+        let (app, dir) = compose_test_app("compose-down", false);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Détruire").click();
+        harness.run_steps(2);
+        // `down` is the only destructive compose action, so it is confirmed
+        // like `docker rm`/`docker rmi` are — `up -d` and `stop` are not.
+        assert!(matches!(
+            harness.state().active_dialog,
+            Some(ActiveDialog {
+                on_confirm: Some(PendingAction::ComposeDown(_)),
+                ..
+            })
+        ));
+        assert_eq!(harness.state().compose_invocations, 0);
+
+        // `run()`, not `run_steps`: the modal needs a settled frame before
+        // its centered position is final, and clicking a stale rect lands on
+        // the backdrop — which `Modal::should_close` reads as a cancel.
+        harness.run();
+        harness.get_by_label("Oui").click();
+        harness.run_steps(2);
+        assert!(harness.state().active_dialog.is_none());
+        assert_eq!(harness.state().compose_invocations, 1);
+        // The seam held: nothing was actually spawned, so no command is in
+        // flight and the log stays empty.
+        assert!(!harness.state().compose_running);
+        assert!(harness.state().compose_log.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_log_panel_is_anchored_and_dismissable_without_touching_the_stack() {
+        let (mut app, dir) = compose_test_app("compose-log-panel", false);
+        app.compose_log_target = Some("/tmp/lab/docker-compose.yml".to_string());
+        app.compose_log = vec!["Container lab-web-1 Removed".to_string()];
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        assert!(harness.query_by_label("Journal — lab").is_some());
+
+        harness.get_by_label("✕").click();
+        harness.run();
+        // The panel is gone, and so is its owner — clearing only the lines
+        // would leave an empty strip anchored to the bottom edge.
+        assert!(harness.state().compose_log.is_empty());
+        assert!(harness.state().compose_log_target.is_none());
+        assert!(harness.query_by_label("Journal — lab").is_none());
+        // Dismissing a log is not forgetting a stack: the row it belonged to
+        // is untouched, memorized list included.
+        assert_eq!(harness.state().compose_stacks.len(), 1);
+        assert_eq!(harness.state().config.docker_stacks.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn forgetting_a_vanished_file_drops_it_from_the_memorized_list_and_persists() {
+        let (app, dir) = compose_test_app("compose-forget", true);
+        let path = app
+            .config_path
+            .clone()
+            .expect("test app writes to a real path");
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Oublier").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().config.docker_stacks,
+            vec!["/tmp/lab/docker-compose.yml".to_string()]
+        );
+        assert!(harness
+            .state()
+            .compose_stacks
+            .iter()
+            .all(|stack| stack.file != "/gone/compose.yml"));
+        // Persisted, not just dropped in memory: without the write the dead
+        // row would come back on the next launch.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("/gone/compose.yml"));
+        assert!(written.contains("/tmp/lab/docker-compose.yml"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scanning_never_shells_out_when_the_seam_is_closed() {
+        let (app, dir) = compose_test_app("compose-scan", false);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        harness.get_by_label("Scanner").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().compose_invocations, 1);
+        // `docker_actions_enabled` is false in every test app, so the worker
+        // thread is never spawned and the flag never latches.
+        assert!(!harness.state().compose_scanning);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn compute_volume_sizes_never_opens_a_dialog_and_executes_exactly_once() {
         let (mut app, dir) = cleanup_test_app("docker-compute-volume-sizes");
         app.docker_available = true;
@@ -5428,6 +6728,12 @@ mod tests {
         harness.run();
         harness.get_by_label("Docker").click();
         harness.run();
+        // The button lives on the Volumes tab; this click also covers the
+        // `SelectList` dispatch — the tab strip labels every list with its
+        // row count, and this snapshot has no volume.
+        harness.get_by_label("Volumes (0)").click();
+        harness.run();
+        assert_eq!(harness.state().docker_active_list, DockerList::Volumes);
         harness.get_by_label("Calculer les tailles").click();
         // Unlike the destructive-action flow (which defers only once the
         // user confirms a dialog, itself a later click), the click here

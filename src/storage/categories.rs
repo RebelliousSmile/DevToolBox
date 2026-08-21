@@ -314,6 +314,7 @@ mod tests {
             theme: "light".to_string(),
             launch_at_startup: false,
             show_descriptions: true,
+            dormant_after_days: 60,
         }
     }
 
@@ -338,11 +339,13 @@ mod tests {
             group_name: None,
             variant_label: None,
             machine_specific: false,
+            info: None,
         }
     }
 
     fn three_category_config() -> Config {
         Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: make_settings(),
             categories: vec![
@@ -456,6 +459,7 @@ mod tests {
     #[test]
     fn empty_config_produces_no_groups() {
         let config = Config {
+            docker_stacks: Vec::new(),
             version: "0.1.0".to_string(),
             default_settings: make_settings(),
             categories: Vec::new(),

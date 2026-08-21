@@ -47,6 +47,20 @@ This document outlines the testing strategy for DevToolBox.
 - A spinner (busy state) requests continuous repaint, so `Harness::run()`
   panics ("still requesting repaints") — use `harness.run_steps(2)` instead
   when the UI under test can be busy.
+- The **opposite** trap, and the one that bites first: a `Modal` centres
+  itself only once it knows its size, so a click after `run_steps(n)` lands
+  on the backdrop and reads as a dismissal — a dialog needs `run()`. Rule of
+  thumb: `run()` for anything whose rect is computed over several frames
+  (modals), `run_steps` for anything that never settles (spinners). An
+  anchored `egui::Panel` is safe either way: its rect is final on frame 1.
+- Only one tab's list is laid out (`docker_view::DockerList`), so a test
+  whose subject is an image or a volume row must open that tab first —
+  `State::with_snapshot(..).on_list(DockerList::Images)`. Querying a hidden
+  list returns zero widgets, which looks like a rendering bug and is not one.
+- Test state structs get new fields often (`selection`, `batch_report`,
+  `active_list` each broke every literal at once with `E0063`). Build them
+  through a constructor plus small `self`-returning setters, never by
+  copy-pasting a literal into each test.
 - One-frame-deferred actions (see `DeferredDockerAction` in
   `src/ui/egui_app.rs`) need an extra `harness.step()` before asserting their
   effect; tests gate real side effects behind a `docker_actions_enabled`
