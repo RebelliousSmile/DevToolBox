@@ -3,7 +3,7 @@
 //! `aidd_docs/tasks/2026_08/2026_08_21-docker-compose-ports-cleanup-master.md`).
 //!
 //! Same split as [`crate::ui::docker_view`]: every type the UI names lives
-//! here, compiled on every OS, and `crate::linux::compose` (which compiles to
+//! here, compiled on every OS, and `crate::docker::compose` (which compiles to
 //! nothing off Linux) is the only module that knows how to *produce* them from
 //! `docker compose` output. Putting [`StackConfig`] / [`StackService`] in the
 //! Linux-only module would break the Windows build the moment [`StackEntry`]
@@ -20,7 +20,7 @@
 //! - It writes `level=warning` lines (unset `.env` variables, mostly) to
 //!   **stderr** while stdout stays clean JSON. Reading the two merged — the
 //!   obvious `2>&1` reflex — corrupts the parse on 6 of the 13 files here.
-//!   [`crate::linux::compose::read_config`] therefore consumes stdout only.
+//!   [`crate::docker::compose::read_config`] therefore consumes stdout only.
 //! - `published` is a **string** (`"8081"`) in every one of the 13 files.
 //!   Other schema versions emit a number, so [`PublishedPort`] accepts both.
 //! - `host_ip` is **absent** from every published port here; a service that
@@ -39,6 +39,7 @@ use std::path::Path;
 use eframe::egui;
 
 use crate::ui::docker_view::{ContainerEntry, ContainerState};
+use crate::ui::port_plan;
 use crate::ui::ports::{self, OwnerKind, PortBinding, PortConflict, PortOwner};
 
 // ---------------------------------------------------------------------------
@@ -411,12 +412,48 @@ pub fn declared_owners(stacks: &[StackEntry]) -> Vec<PortOwner> {
             if bindings.is_empty() {
                 return None;
             }
-            Some(PortOwner::new(
-                stack.file.clone(),
-                format!("stack {}", stack.project),
-                OwnerKind::DeclaredStack,
-                bindings,
-            ))
+            Some(
+                PortOwner::new(
+                    stack.file.clone(),
+                    format!("stack {}", stack.project),
+                    OwnerKind::DeclaredStack,
+                    bindings,
+                )
+                .with_source(stack.file.clone()),
+            )
+        })
+        .collect()
+}
+
+/// Every published port declared by every discovered stack, in the form the
+/// reassignment planner takes.
+///
+/// The filter is deliberately the opposite of [`declared_owners`]'s. That one
+/// answers "what would collide if this were started", so a `Running` stack is
+/// excluded — its containers already speak for it. This one answers "what does
+/// the *file* say", which is the only thing a rewrite can act on, so a running
+/// stack is very much included: its declaration is exactly what has to move
+/// when it is the one that has to give up the port.
+///
+/// A `Missing` row is still excluded, for a reason that survives the change of
+/// question: its file is gone, so there is no `ports:` line to rewrite.
+pub fn declared_ports(stacks: &[StackEntry]) -> Vec<port_plan::DeclaredPort> {
+    stacks
+        .iter()
+        .filter(|stack| !matches!(stack.state, StackState::Missing))
+        .flat_map(|stack| {
+            stack.services.iter().flat_map(move |service| {
+                service
+                    .ports
+                    .iter()
+                    .map(move |binding| port_plan::DeclaredPort {
+                        file: stack.file.clone(),
+                        service: service.name.clone(),
+                        host_port: binding.host_port,
+                        container_port: binding.container_port,
+                        protocol: binding.protocol.clone(),
+                    })
+            })
         })
         .collect()
 }
@@ -465,14 +502,8 @@ pub fn plugin_available() -> bool {
     plugin_available_impl()
 }
 
-#[cfg(target_os = "linux")]
 fn plugin_available_impl() -> bool {
-    crate::linux::compose::plugin_available()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn plugin_available_impl() -> bool {
-    false
+    crate::docker::compose::plugin_available()
 }
 
 /// Walk `root` for compose files.
@@ -480,14 +511,8 @@ pub fn discover(root: &Path) -> ScanOutcome {
     discover_impl(root)
 }
 
-#[cfg(target_os = "linux")]
 fn discover_impl(root: &Path) -> ScanOutcome {
-    crate::linux::compose::discover(root)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn discover_impl(_root: &Path) -> ScanOutcome {
-    ScanOutcome::default()
+    crate::docker::compose::discover(root)
 }
 
 /// Read one compose file. The error string is already a formatted, French,
@@ -497,14 +522,8 @@ pub fn read_config(file: &Path) -> Result<StackConfig, String> {
     read_config_impl(file)
 }
 
-#[cfg(target_os = "linux")]
 fn read_config_impl(file: &Path) -> Result<StackConfig, String> {
-    crate::linux::compose::read_config(file).map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_config_impl(_file: &Path) -> Result<StackConfig, String> {
-    Err("Docker Compose n'est pas pris en charge sur cet OS.".to_string())
+    crate::docker::compose::read_config(file).map_err(|error| error.to_string())
 }
 
 /// argv for `docker compose … up -d` on `target`.
@@ -943,6 +962,8 @@ mod tests {
             } else {
                 Vec::new()
             },
+            compose_service: None,
+            declared_host_ports: std::collections::BTreeSet::new(),
             exit_code: None,
         }
     }
@@ -1198,6 +1219,65 @@ mod tests {
         assert_eq!(linked.len(), 1, "no duplicate row for a known file");
         assert_eq!(linked[0].state, StackState::Missing);
         assert_eq!(linked[0].runs.len(), 1, "its run is still listed");
+    }
+
+    // --- declared_ports -----------------------------------------------------
+
+    /// The whole point of the split from `declared_owners`: the stack that is
+    /// up is the one whose file may need rewriting.
+    #[test]
+    fn declared_ports_covers_running_stacks_unlike_declared_owners() {
+        let mut up = stack("/a/compose.yml", "a", vec![service("web", &[8080])]);
+        up.state = StackState::Running;
+        let ports = declared_ports(&[up.clone()]);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].service, "web");
+        assert!(
+            declared_owners(&[up]).is_empty(),
+            "the owner view still excludes it, on purpose"
+        );
+    }
+
+    /// No file, no `ports:` line, nothing to rewrite.
+    #[test]
+    fn a_missing_file_declares_nothing() {
+        let mut gone = stack("/gone/compose.yml", "gone", vec![service("web", &[8080])]);
+        gone.state = StackState::Missing;
+        assert!(declared_ports(&[gone]).is_empty());
+    }
+
+    #[test]
+    fn each_binding_carries_its_own_file_and_service() {
+        let ports = declared_ports(&[
+            stack(
+                "/a/compose.yml",
+                "a",
+                vec![service("web", &[8080, 8443]), service("db", &[5432])],
+            ),
+            stack("/b/compose.yml", "b", vec![service("web", &[8080])]),
+        ]);
+        let seen: Vec<(String, String, u16)> = ports
+            .iter()
+            .map(|port| (port.file.clone(), port.service.clone(), port.host_port))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("/a/compose.yml".to_string(), "web".to_string(), 8080),
+                ("/a/compose.yml".to_string(), "web".to_string(), 8443),
+                ("/a/compose.yml".to_string(), "db".to_string(), 5432),
+                ("/b/compose.yml".to_string(), "web".to_string(), 8080),
+            ]
+        );
+    }
+
+    /// A `network_mode: host` service publishes nothing, so it has nothing to
+    /// reassign — and there is no line in the file to reassign it on.
+    #[test]
+    fn a_service_publishing_nothing_contributes_nothing() {
+        let mut silent = service("proxy", &[]);
+        silent.host_network = true;
+        assert!(declared_ports(&[stack("/a/compose.yml", "a", vec![silent])]).is_empty());
     }
 
     // --- declared_owners / conflicts ----------------------------------------

@@ -1,6 +1,7 @@
 //! Best-effort Windows process observation through native process APIs.
-
-#![cfg(windows)]
+//!
+//! `applications::mod` already declares this module under `#[cfg(windows)]`;
+//! repeating the gate here is what clippy flags as a duplicated attribute.
 
 use std::io;
 use std::path::PathBuf;

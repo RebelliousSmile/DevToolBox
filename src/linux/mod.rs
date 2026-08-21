@@ -13,6 +13,4 @@
 
 pub mod automations;
 pub mod autostart;
-pub mod compose;
-pub mod docker;
 pub mod icon_theme;

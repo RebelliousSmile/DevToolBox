@@ -23,12 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::mpsc::Sender;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-/// `CREATE_NO_WINDOW` — suppresses a stray console window when spawning
-/// console sub-processes (cmd.exe, ipconfig, …).
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use crate::process_flags::hide_console_window;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -362,9 +357,7 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, LaunchError>
 fn build_command(program: &str, args: &[String]) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     cmd.args(args);
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    hide_console_window(&mut cmd);
 
     cmd
 }
@@ -430,13 +423,6 @@ mod tests {
     #[test]
     fn tokenize_whitespace_only_returns_error() {
         assert!(matches!(tokenize("   \t  "), Err(LaunchError::Empty)));
-    }
-
-    // --- CREATE_NO_WINDOW constant ---
-
-    #[test]
-    fn create_no_window_flag_value() {
-        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 
     // --- Error mapping ---

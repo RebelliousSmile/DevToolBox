@@ -1,6 +1,6 @@
 //! Docker Compose data source (Linux-only).
 //!
-//! Same contract as [`crate::linux::docker`]: this module knows how to *talk*
+//! Same contract as [`crate::docker::engine`]: this module knows how to *talk*
 //! to the compose plugin and maps its output onto the OS-neutral types of
 //! [`crate::ui::compose_view`], which is where every type the UI names lives.
 //! Nothing here is referenced from `src/ui/` except through that module's
@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use walkdir::{DirEntry, WalkDir};
 
-use crate::linux::docker::{
+use crate::docker::engine::{
     binary_available, run_command_with_timeout, DockerError, OperationClass,
 };
 use crate::ui::compose_view::{ScanOutcome, StackConfig, StackService};
@@ -51,13 +51,30 @@ const COMPOSE_TIMEOUT: Duration = Duration::from_secs(15);
 /// means the exclusion list is missing something big on this machine.
 const SCAN_WARN_MS: u128 = 20_000;
 
-/// The four names compose itself looks for.
+/// The four names compose itself looks for with no `-f` flag.
 const COMPOSE_FILE_NAMES: [&str; 4] = [
     "docker-compose.yml",
     "docker-compose.yaml",
     "compose.yml",
     "compose.yaml",
 ];
+
+/// Stems a variant file may carry, i.e. the part before the middle segment.
+const COMPOSE_STEMS: [&str; 2] = ["docker-compose", "compose"];
+
+/// Extensions a compose file may carry.
+const COMPOSE_EXTENSIONS: [&str; 2] = ["yml", "yaml"];
+
+/// The one middle segment that never denotes a stack of its own.
+///
+/// `docker-compose.override.yml` is loaded *automatically* alongside the
+/// canonical file, so it is a fragment by definition: listing it separately
+/// would put a second row on screen for a stack that is already there, and
+/// its `config` would describe the override in isolation rather than the
+/// merge compose actually runs. Every other middle segment (`dev`, `prod`,
+/// `test`, …) is only ever loaded through an explicit `-f`, which is exactly
+/// what DevToolBox does, so those are real launchable stacks.
+const OVERRIDE_SEGMENT: &str = "override";
 
 /// Directory names never descended into.
 ///
@@ -110,11 +127,50 @@ pub fn plugin_available() -> bool {
 // ---------------------------------------------------------------------------
 
 fn is_compose_file(entry: &DirEntry) -> bool {
-    entry.file_type().is_file()
-        && entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| COMPOSE_FILE_NAMES.contains(&name))
+    entry.file_type().is_file() && entry.file_name().to_str().is_some_and(is_compose_file_name)
+}
+
+/// Whether `name` denotes a compose file DevToolBox can launch.
+///
+/// Two shapes qualify: the canonical [`COMPOSE_FILE_NAMES`], and the
+/// `<stem>.<middle>.<ext>` variants (`docker-compose.dev.yml`,
+/// `compose.prod.yaml`, …) minus the [`OVERRIDE_SEGMENT`] fragment.
+///
+/// Variants are included because ignoring them does not make their stacks go
+/// away — it makes them arrive through the back door. A container started
+/// from `docker-compose.dev.yml` still carries that path in its
+/// `config_files` label, so the Stacks list showed it as a run with no file
+/// behind it (« hors scan · services et ports inconnus »): no services, no
+/// declared ports, no conflict detection, and a disabled action button.
+/// Measured on this machine: `suddenly`'s three containers, whose
+/// `docker-compose.dev.yml` sits right next to the canonical file.
+///
+/// Whether a variant is genuinely standalone is **not** decided here — the
+/// `config` call that follows discovery already decides it, and stores the
+/// error on the row when a fragment cannot stand alone.
+///
+/// Matching stays case-sensitive, as it was for the canonical names alone:
+/// compose itself is case-sensitive about them, and following the Windows
+/// filesystem's case-insensitivity here would make the two OSes disagree
+/// about which files exist.
+fn is_compose_file_name(name: &str) -> bool {
+    if COMPOSE_FILE_NAMES.contains(&name) {
+        return true;
+    }
+
+    let segments: Vec<&str> = name.split('.').collect();
+    // `<stem>.<middle…>.<ext>`: at least one middle segment, or this is a
+    // canonical name that the check above already answered.
+    if segments.len() < 3 {
+        return false;
+    }
+    let (stem, extension) = (segments[0], segments[segments.len() - 1]);
+    let middle = &segments[1..segments.len() - 1];
+
+    COMPOSE_STEMS.contains(&stem)
+        && COMPOSE_EXTENSIONS.contains(&extension)
+        && middle.iter().all(|segment| !segment.is_empty())
+        && !middle.contains(&OVERRIDE_SEGMENT)
 }
 
 /// Whether the walk should descend into `entry`.
@@ -462,6 +518,75 @@ mod tests {
         root
     }
 
+    /// Truth table for the file-name rule, canonical and variant alike.
+    #[test]
+    fn compose_file_names_accept_canonical_and_variant_shapes() {
+        for name in [
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            "compose.yml",
+            "compose.yaml",
+            "docker-compose.dev.yml",
+            "docker-compose.prod.yaml",
+            "compose.test.yml",
+            // Several middle segments are still one variant, not a fragment.
+            "docker-compose.dev.local.yml",
+        ] {
+            assert!(is_compose_file_name(name), "should accept {name}");
+        }
+
+        for name in [
+            // Loaded automatically with the canonical file: a fragment, and a
+            // duplicate row if listed.
+            "docker-compose.override.yml",
+            "compose.override.yaml",
+            "docker-compose.dev.override.yml",
+            // Not compose files at all.
+            "docker-compose.txt",
+            "docker-compose.yml.bak",
+            "compose.json",
+            "notes.yml",
+            "my-docker-compose.yml",
+            // Empty middle segment: `docker-compose..yml`.
+            "docker-compose..yml",
+        ] {
+            assert!(!is_compose_file_name(name), "should reject {name}");
+        }
+    }
+
+    /// The measured `suddenly` case: a variant sitting next to the canonical
+    /// file. Both are real, launchable stacks and both must be listed —
+    /// before this, the variant's running containers showed up as a run with
+    /// no file behind it.
+    #[test]
+    fn discover_lists_a_variant_alongside_its_canonical_sibling() {
+        let root = temp_tree("variant-sibling");
+        let app = root.join("app");
+        fs::create_dir_all(&app).expect("project dir");
+        fs::write(app.join("docker-compose.yml"), "services: {}").expect("write");
+        fs::write(app.join("docker-compose.dev.yml"), "services: {}").expect("write");
+        fs::write(app.join("docker-compose.override.yml"), "services: {}").expect("write");
+
+        let outcome = discover(&root);
+
+        assert_eq!(outcome.files.len(), 2, "found: {:?}", outcome.files);
+        assert!(outcome
+            .files
+            .iter()
+            .any(|file| Path::new(file).ends_with("app/docker-compose.yml")));
+        assert!(outcome
+            .files
+            .iter()
+            .any(|file| Path::new(file).ends_with("app/docker-compose.dev.yml")));
+        assert!(
+            !outcome.files.iter().any(|file| file.contains("override")),
+            "the override fragment must not get a row: {:?}",
+            outcome.files
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn discover_finds_the_four_compose_names_and_ignores_others() {
         let root = temp_tree("names");
@@ -493,7 +618,14 @@ mod tests {
 
         let outcome = discover(&root);
         assert_eq!(outcome.files.len(), 1, "found: {:?}", outcome.files);
-        assert!(outcome.files[0].ends_with("app/docker-compose.yml"));
+        // Compared as a `Path`, not as a `String`: `files` holds native
+        // separators, so a literal `str::ends_with("app/docker-compose.yml")`
+        // only ever matched on Linux.
+        assert!(
+            Path::new(&outcome.files[0]).ends_with("app/docker-compose.yml"),
+            "found: {:?}",
+            outcome.files
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

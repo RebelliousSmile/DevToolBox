@@ -29,5 +29,6 @@ pub mod egui_app;
 pub mod fonts;
 pub mod format;
 pub mod icon_picker;
+pub mod port_plan;
 pub mod ports;
 pub mod terminal_view;
