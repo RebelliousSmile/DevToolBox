@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] - 2026-08-21
+
+### Added
+- Docker tab on Windows: the engine and compose bridges moved out of
+  `src/linux/` into an OS-neutral `src/docker/`, resolve `docker.exe` on
+  `PATH` and spawn with `CREATE_NO_WINDOW`, so the tab is drawn and usable
+  on Windows instead of being compiled out
+- Ports tab: a read-only host-port allocation table listing every published
+  port with its owner (running container, stopped container or compose
+  declaration) and flagging the collisions
+- Ports tab: « Scanner les ports de l'hôte » — `netstat -ano` + `tasklist` on
+  Windows, `ss -lntuHp` elsewhere — so a port held outside Docker (IIS, a
+  local Postgres, a hand-started `node`) shows up next to the Docker ones
+- Ports tab: « Proposer une réattribution » computes a conflict-free port
+  plan (free ports in `[1024, 49151]`, never moving a port held by a live
+  container) and, after an explicit confirmation, rewrites the `ports:`
+  entries in the compose files — comments, quoting and CRLF preserved,
+  interpolated / ranged / ambiguous entries refused rather than guessed, and
+  every touched file backed up outside the repository first
+
+### Changed
+- Compose discovery also accepts the variant file names
+  (`docker-compose.yaml`, `compose.yml`, `compose.yaml`)
+- Spawn, capture and timeout handling extracted to `src/command_runner.rs`,
+  shared by the Docker bridge and the host-port scan
+
+### Fixed
+- Port conflicts: a stopped container whose binding was never declared no
+  longer counts (docker picks a free port at every start, but `docker ps -a`
+  still prints the last run's number), and two containers instantiating the
+  same compose file and service now count as one declaration
+
 ## [0.7.0] - 2026-08-21
 
 ### Added
