@@ -22,10 +22,13 @@
 //!   `system df`, plus the stop/rm/rmi actions.
 //! - [`compose`] — `docker compose`, which is a separate CLI plugin that
 //!   can be absent even when the daemon is healthy.
+//! - [`compose_edit`] — the one path that *writes* to a compose file, to
+//!   apply a port reassignment plan.
 //!
-//! Neither knows anything about the UI's state: they return the row types
+//! None of them knows anything about the UI's state: they return the row types
 //! declared in `crate::ui::docker_view` / `crate::ui::compose_view` and let
 //! the views own presentation.
 
 pub mod compose;
+pub mod compose_edit;
 pub mod engine;

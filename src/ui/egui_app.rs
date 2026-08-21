@@ -105,6 +105,7 @@ use crate::ui::docker_view::{
     SelectionKey,
 };
 use crate::ui::icon_picker;
+use crate::ui::port_plan;
 use crate::ui::terminal_view::{self, TerminalEvent};
 
 /// A resolved, cached representation of a command/category `icon` field,
@@ -829,6 +830,9 @@ enum PendingAction {
     /// destroys containers (`docker rm`, `docker rmi`). `up -d` and `stop`
     /// are not: neither destroys anything, and `stop` is undone by `up -d`.
     ComposeDown(StackTarget),
+    /// The moves the confirm dialog described, carried rather than re-read
+    /// from `docker_port_plan`: what gets written is what was shown.
+    ApplyPortReassignment(Vec<crate::ui::port_plan::PortMove>),
     /// The whole batch, already ordered by `docker_view::order_targets`.
     /// Carries the targets rather than re-reading the selection on confirm:
     /// what the dialog described is exactly what runs, even though a refetch
@@ -873,6 +877,11 @@ enum DeferredDockerAction {
     /// `netstat -ano` plus `tasklist` take ~1 s on this machine, long enough
     /// to drop a frame if run inline.
     ScanHostPorts,
+    /// The only deferred action that writes to a file the user owns. Deferred
+    /// like the rest so the « Réattribution… » status paints before the reads,
+    /// backups and writes happen — and gated by `docker_actions_enabled`, so
+    /// no kittest run can ever touch a real compose file.
+    ApplyPortReassignment(Vec<crate::ui::port_plan::PortMove>),
     /// One `docker` call per target, so this is the slowest deferred action
     /// of them all — all the more reason for it to run after its "Suppression
     /// de N ressource(s)…" status has painted.
@@ -1014,6 +1023,18 @@ pub struct EguiApp {
     /// rm` would add a second of latency to each one. The « Rescanner l'hôte »
     /// button is how it gets refreshed.
     docker_host_ports: Option<Vec<crate::net::ListeningPort>>,
+    /// The port reassignment proposal currently on screen, `None` until the
+    /// user asks for one.
+    ///
+    /// Stored rather than recomputed every frame on purpose: the user reads a
+    /// table and then clicks « Appliquer », and a plan that silently changed
+    /// in between — because a container stopped, or a scan landed — would
+    /// write something they never saw.
+    docker_port_plan: Option<crate::ui::port_plan::ReassignmentPlan>,
+    /// What the last application wrote, one entry per compose file. Cleared
+    /// whenever a new plan is computed, so a stale report cannot be read as
+    /// the result of the plan currently displayed.
+    docker_port_edits: Vec<crate::docker::compose_edit::FileReport>,
 
     // --- Compose stacks (Part 2) -------------------------------------------
     /// `docker compose` plugin availability, probed once the first time the
@@ -1246,6 +1267,8 @@ impl EguiApp {
             docker_batch_report: Vec::new(),
             docker_active_list: DockerList::default(),
             docker_host_ports: None,
+            docker_port_plan: None,
+            docker_port_edits: Vec::new(),
             compose_plugin: None,
             compose_stacks: Vec::new(),
             compose_loaded: false,
@@ -1834,6 +1857,12 @@ impl EguiApp {
                 self.deferred_docker_action = Some(DeferredDockerAction::RemoveVolume { name });
                 self.set_status(message, false);
             }
+            PendingAction::ApplyPortReassignment(moves) => {
+                let message = format!("Réattribution de {} port(s)…", moves.len());
+                self.deferred_docker_action =
+                    Some(DeferredDockerAction::ApplyPortReassignment(moves));
+                self.set_status(message, false);
+            }
             PendingAction::DeleteSelection(targets) => {
                 let message = format!("Suppression de {} ressource(s)…", targets.len());
                 self.deferred_docker_action = Some(DeferredDockerAction::DeleteSelection(targets));
@@ -1912,6 +1941,26 @@ impl EguiApp {
             }
             return;
         }
+        // Writes files, reports per file, and must not refetch: rewriting a
+        // `ports:` line changes nothing about the containers Docker currently
+        // holds — that is exactly the caveat the view warns about.
+        if let DeferredDockerAction::ApplyPortReassignment(moves) = &action {
+            let reports = crate::docker::compose_edit::apply(moves);
+            let written: usize = reports.iter().map(|report| report.applied.len()).sum();
+            let refused: usize = reports.iter().map(|report| report.refused.len()).sum();
+            self.docker_port_edits = reports;
+            // The proposal is dropped whatever happened: half of it may now be
+            // stale, and re-clicking « Appliquer » on an already-applied plan
+            // would look for ports that are no longer in the file.
+            self.docker_port_plan = None;
+            let message = if refused == 0 {
+                format!("{written} port(s) réécrit(s). Relancer les stacks avec --force-recreate.")
+            } else {
+                format!("{written} port(s) réécrit(s), {refused} refusé(s) — voir le détail.")
+            };
+            self.set_status(message, refused > 0);
+            return;
+        }
         // Same shape argument as `ComputeVolumeSizes`: the result is a list,
         // not a `Result<(), String>`, and it must not trigger a refetch — the
         // Docker snapshot has nothing to do with what the host is listening on.
@@ -1938,6 +1987,7 @@ impl EguiApp {
             DeferredDockerAction::RemoveVolume { name } => docker_view::remove_volume(name),
             DeferredDockerAction::ComputeVolumeSizes
             | DeferredDockerAction::ScanHostPorts
+            | DeferredDockerAction::ApplyPortReassignment(_)
             | DeferredDockerAction::DeleteSelection(_) => {
                 unreachable!("handled above")
             }
@@ -1959,6 +2009,7 @@ impl EguiApp {
                     }
                     DeferredDockerAction::ComputeVolumeSizes
                     | DeferredDockerAction::ScanHostPorts
+                    | DeferredDockerAction::ApplyPortReassignment(_)
                     | DeferredDockerAction::DeleteSelection(_) => unreachable!("handled above"),
                 };
                 self.set_status(message, false);
@@ -2011,11 +2062,30 @@ impl EguiApp {
             | DockerAction::Retry
             | DockerAction::ComputeVolumeSizes
             | DockerAction::ScanHostPorts
+            | DockerAction::PlanPortReassignment
+            | DockerAction::ClearPortPlan
             | DockerAction::ToggleSelection(_)
             | DockerAction::SelectDormant
             | DockerAction::ClearSelection
             | DockerAction::SelectList(_) => {
                 unreachable!("the non-destructive actions are handled directly in render_docker_view, never opened as a confirm dialog")
+            }
+            DockerAction::ApplyPortReassignment(moves) => {
+                let files = {
+                    let mut files: Vec<&str> =
+                        moves.iter().map(|entry| entry.file.as_str()).collect();
+                    files.sort_unstable();
+                    files.dedup();
+                    files.len()
+                };
+                (
+                    "Réattribuer les ports".to_string(),
+                    format!(
+                        "{} port(s) vont être réécrits dans {files} fichier(s) compose.                          Une copie de chaque fichier est enregistrée avant modification.                          Les conteneurs déjà créés gardent leur port jusqu'à un                          « docker compose up -d --force-recreate ». Continuer ?",
+                        moves.len()
+                    ),
+                    PendingAction::ApplyPortReassignment(moves),
+                )
             }
             DockerAction::StopContainer(id) => {
                 let name = snapshot
@@ -3486,7 +3556,7 @@ impl EguiApp {
         let container_owners = snapshot
             .map(docker_view::container_port_owners)
             .unwrap_or_default();
-        let conflicts = compose_view::all_conflicts(container_owners, &stacks);
+        let conflicts = compose_view::all_conflicts(container_owners.clone(), &stacks);
         let compose_state = ComposeViewState {
             stacks: &stacks,
             conflicts: &conflicts,
@@ -3516,6 +3586,8 @@ impl EguiApp {
             batch_report: &self.docker_batch_report,
             active_list: self.docker_active_list,
             host_ports: self.docker_host_ports.as_deref(),
+            port_plan: self.docker_port_plan.as_ref(),
+            port_edits: &self.docker_port_edits,
         };
         let actions = docker_view::render(ui, &state);
         for action in actions {
@@ -3568,6 +3640,45 @@ impl EguiApp {
                     self.deferred_docker_action = Some(DeferredDockerAction::ScanHostPorts);
                     self.set_status("Analyse des ports de l'hôte…", false);
                     ui.ctx().request_repaint();
+                }
+                // Non-destructive too, and cheap enough to run inline: the
+                // planner is pure arithmetic over lists already in memory —
+                // no `docker` call, no `netstat`, nothing to defer.
+                DockerAction::PlanPortReassignment => {
+                    let declarations = compose_view::declared_ports(&stacks);
+                    // Container owners only — the clone made above, and not
+                    // a fresh `snapshot` read, because touching `snapshot`
+                    // here would hold `self.docker` borrowed across the whole
+                    // dispatch loop and lock every `set_status` out of it.
+                    //
+                    // Container owners are also the *right* input: they are
+                    // the ones carrying a `com.docker.compose.*` declaration
+                    // key, which is how the planner tells which side of a
+                    // collision is actually up. `declared_owners` sets no such
+                    // key, so feeding it in would make every declared stack
+                    // look like a container created outside compose.
+                    let listeners = self.docker_host_ports.clone().unwrap_or_default();
+                    let plan =
+                        port_plan::plan_reassignment(&declarations, &container_owners, &listeners);
+                    let message = if plan.is_empty() {
+                        "Aucun conflit de port à corriger.".to_string()
+                    } else {
+                        format!(
+                            "{} réattribution(s) proposée(s), {} conflit(s) non réglable(s).",
+                            plan.moves.len(),
+                            plan.blocked.len()
+                        )
+                    };
+                    // A report from a previous application describes files as
+                    // they were before this plan was computed; keeping it next
+                    // to a fresh proposal would read as its result.
+                    self.docker_port_edits.clear();
+                    self.docker_port_plan = Some(plan);
+                    self.set_status(message, false);
+                }
+                DockerAction::ClearPortPlan => {
+                    self.docker_port_plan = None;
+                    self.docker_port_edits.clear();
                 }
                 destructive => self.open_docker_confirm(destructive),
             }
@@ -6796,6 +6907,137 @@ mod tests {
         // actually spawned and the result stays `None` — the point here is
         // the dispatch, not `netstat` itself (covered in `crate::net`).
         assert!(harness.state().docker_host_ports.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two real compose files, both publishing 8080. Real files because
+    /// `link_runs` resolves a stack's state with `Path::is_file`, and a
+    /// `Missing` stack declares nothing — a fabricated path would test the
+    /// empty case by accident.
+    fn colliding_stacks_app(name: &str) -> (EguiApp, PathBuf) {
+        let (mut app, dir) = cleanup_test_app(name);
+        app.docker_available = true;
+        app.docker = Some(Ok(DockerSnapshot::default()));
+        app.compose_plugin = Some(true);
+        app.compose_loaded = true;
+        let body = "services:\n  web:\n    image: nginx\n    ports:\n      - \"8080:80\"\n";
+        for project in ["alpha", "beta"] {
+            let folder = dir.join(project);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("docker-compose.yml"), body).unwrap();
+            let file = folder
+                .join("docker-compose.yml")
+                .to_string_lossy()
+                .into_owned();
+            app.config.docker_stacks.push(file.clone());
+            app.compose_stacks.push(StackEntry {
+                file,
+                project: project.to_string(),
+                services: vec![compose_view::StackService {
+                    name: "web".to_string(),
+                    ports: vec![crate::ui::ports::PortBinding {
+                        host_ip: "0.0.0.0".to_string(),
+                        host_port: 8080,
+                        container_port: 80,
+                        protocol: "tcp".to_string(),
+                    }],
+                    host_network: false,
+                }],
+                runs: Vec::new(),
+                state: StackState::Stopped,
+                error: None,
+            });
+        }
+        (app, dir)
+    }
+
+    #[test]
+    fn planning_a_reassignment_never_opens_a_dialog_and_moves_one_of_the_two_stacks() {
+        let (app, dir) = colliding_stacks_app("docker-plan-ports");
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        // The tab label counts the allocation rows, and this app declares
+        // ports without running a container, so the count is neither 0 nor
+        // a number worth pinning here.
+        harness.get_by_label_contains("Ports (").click();
+        harness.run();
+        harness.get_by_label("Proposer une réattribution").click();
+        harness.run();
+
+        assert!(
+            harness.state().active_dialog.is_none(),
+            "computing a proposal writes nothing, so it must not ask"
+        );
+        assert_eq!(
+            harness.state().docker_action_invocations,
+            0,
+            "the planner is pure arithmetic — nothing is deferred for it"
+        );
+        let plan = harness
+            .state()
+            .docker_port_plan
+            .as_ref()
+            .expect("a plan was computed");
+        assert_eq!(plan.moves.len(), 1, "one of the two stacks keeps 8080");
+        assert_eq!(plan.moves[0].from, 8080);
+        assert_eq!(plan.moves[0].to, 8081);
+        assert!(
+            plan.moves[0].file.contains("beta"),
+            "the tie-break is the file path, so alpha keeps the port: {}",
+            plan.moves[0].file
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The one action of the Docker tab that writes to a file the user owns.
+    /// It must ask first — and, with the seam closed, still write nothing.
+    #[test]
+    fn applying_a_reassignment_asks_before_writing_anything() {
+        let (app, dir) = colliding_stacks_app("docker-apply-ports");
+        let before = std::fs::read_to_string(dir.join("beta").join("docker-compose.yml")).unwrap();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+
+        harness.run();
+        harness.get_by_label("Docker").click();
+        harness.run();
+        // The tab label counts the allocation rows, and this app declares
+        // ports without running a container, so the count is neither 0 nor
+        // a number worth pinning here.
+        harness.get_by_label_contains("Ports (").click();
+        harness.run();
+        harness.get_by_label("Proposer une réattribution").click();
+        harness.run();
+        harness.get_by_label("Appliquer la réattribution").click();
+        harness.run_steps(1);
+
+        assert!(matches!(
+            harness.state().active_dialog,
+            Some(ActiveDialog {
+                on_confirm: Some(PendingAction::ApplyPortReassignment(_)),
+                ..
+            })
+        ));
+        assert_eq!(harness.state().docker_action_invocations, 0);
+
+        harness.run();
+        harness.get_by_label("Oui").click();
+        harness.run_steps(2);
+        assert!(harness.state().active_dialog.is_none());
+        assert_eq!(harness.state().docker_action_invocations, 1);
+        // `docker_actions_enabled` is false in a test app, so the write half
+        // never runs: the file on disk is the one the test wrote.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("beta").join("docker-compose.yml")).unwrap(),
+            before
+        );
+        assert!(harness.state().docker_port_edits.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

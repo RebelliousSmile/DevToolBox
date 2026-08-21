@@ -266,6 +266,47 @@ rather than standing alone — a running container, a used image and a
 non-orphan volume are never dormant however old their dates are, because
 docker stores no "last used" date to justify it.
 
+### Port reassignment (`src/ui/port_plan.rs`, `src/docker/compose_edit.rs`)
+
+The Ports tab does not stop at *reporting* a conflict: « Proposer une
+réattribution » computes a plan, and applying it rewrites the compose files.
+The two halves are deliberately separate modules.
+
+`port_plan.rs` is pure arithmetic over three inputs — the declared ports
+(`compose_view::declared_ports`, which keeps *running* stacks, the exact
+opposite filter of `declared_owners`), the **container** owners, and the host
+listeners. It picks a free port in `[1024, 49151]` (upward, then wrapping),
+never touches a port held by a live container, and reports what it cannot fix
+as `Blocked` rather than moving something at random. Feeding it declared
+owners instead of container ones would break it silently: `declared_owners`
+builds `PortOwner`s with no `declaration` key, so every stack would look like
+a compose-less container and be blocked.
+
+`compose_edit.rs` is the **only** place in the program that writes to a file
+the user owns. Three rules it encodes:
+
+- **No YAML round-trip.** Writing back a parsed document (or
+  `docker compose config`'s output) canonicalises the file: comments gone,
+  anchors expanded, `${VAR}` frozen. The rewrite is a byte-span splice of the
+  host-port digits, so quoting, spacing, trailing comments and CRLF survive —
+  guarded by a test asserting `text.replace("8081", "8080") == original`.
+- **Refuse rather than guess.** Interpolated (`${WEB_PORT}`), ranged
+  (`8080-8090`), container-only (`- 80`) and ambiguous (two entries on the
+  same host port) entries are reported as refused. A half-applied plan is
+  worse than a refused one: the preview claimed the collision was gone.
+- **Back up outside the repo.** `platform::data_dir()/compose-backups/`, the
+  whole path folded into the file name (half the compose files on a machine
+  are called `docker-compose.yml`); never a sibling `.bak` that `git add -A`
+  would commit. A file whose backup fails is not rewritten.
+
+The plan is **stored** in `EguiApp` (`docker_port_plan`), not recomputed at
+render time, so the table the user reads is the one they confirm; applying
+drops it (half of it is stale after the write) and computing a new one clears
+the previous edit report. Both the plan panel and the confirm dialog state the
+caveat that motivated the whole design: rewriting a `ports:` line does not
+touch the container already created from it, so the stacks have to be
+restarted with `docker compose up -d --force-recreate`.
+
 ### Grouped deletion (selection bar)
 
 A selection lives in `EguiApp` (`docker_selection: HashSet<SelectionKey>`),

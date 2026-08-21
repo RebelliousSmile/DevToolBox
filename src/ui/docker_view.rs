@@ -22,7 +22,9 @@ use eframe::egui;
 
 use std::collections::BTreeSet;
 
+use crate::docker::compose_edit::FileReport;
 use crate::net::ListeningPort;
+use crate::ui::port_plan::{PortMove, ReassignmentPlan};
 use crate::ui::ports::{self, OwnerKind, PortAllocation, PortBinding, PortConflict, PortOwner};
 
 /// One row of the Docker tab's "Conteneurs" section.
@@ -1028,6 +1030,17 @@ pub struct DockerViewState<'a> {
     /// column only in the second case, the same way the volume list hides its
     /// size column until a scan has filled it.
     pub host_ports: Option<&'a [ListeningPort]>,
+    /// The reassignment proposal currently on screen, `None` when the user
+    /// has not asked for one (or has dismissed it).
+    ///
+    /// Held by `EguiApp` rather than recomputed each frame so the table the
+    /// user is reading cannot change under them between the moment they read
+    /// it and the moment they click « Appliquer » — the plan they confirm is
+    /// literally the plan they saw.
+    pub port_plan: Option<&'a ReassignmentPlan>,
+    /// What the last application of a plan did to each file. Empty until one
+    /// has run, and cleared when a new plan is computed.
+    pub port_edits: &'a [FileReport],
 }
 
 /// One user intent emitted by `render`. Each destructive variant's `String`
@@ -1062,6 +1075,17 @@ pub enum DockerAction {
     /// command can: whether a declared port is already taken by something
     /// that is not a container.
     ScanHostPorts,
+    /// Not destructive — computes a [`ReassignmentPlan`] and shows it. The
+    /// plan is a proposal on screen; nothing is written until
+    /// [`DockerAction::ApplyPortReassignment`].
+    PlanPortReassignment,
+    /// Not destructive — drops the proposal from the screen.
+    ClearPortPlan,
+    /// Destructive, and the only action of the whole view that touches a file
+    /// the user owns: it rewrites the `ports:` lines the moves name. Carries
+    /// the moves rather than letting `EguiApp` re-read its own plan, so what
+    /// gets written is exactly what the confirmed dialog described.
+    ApplyPortReassignment(Vec<PortMove>),
 }
 
 /// Reason a container's « Arrêter » button is disabled, or `None` when
@@ -1530,25 +1554,40 @@ fn render_images_section(
 fn render_ports_section(
     ui: &mut egui::Ui,
     rows: &[PortAllocation],
-    host_ports: Option<&[ListeningPort]>,
+    state: &DockerViewState,
     buttons_enabled: bool,
     actions: &mut Vec<DockerAction>,
 ) {
+    let host_ports = state.host_ports;
     // Above the empty-table short-circuit on purpose: "no container publishes
     // anything" is exactly when knowing what the *host* holds is most useful,
     // since every port is then free as far as Docker is concerned.
-    if ui
-        .add_enabled(
-            buttons_enabled,
-            egui::Button::new(match host_ports {
-                None => "Scanner les ports de l'hôte",
-                Some(_) => "Rescanner l'hôte",
-            }),
-        )
-        .clicked()
-    {
-        actions.push(DockerAction::ScanHostPorts);
-    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                buttons_enabled,
+                egui::Button::new(match host_ports {
+                    None => "Scanner les ports de l'hôte",
+                    Some(_) => "Rescanner l'hôte",
+                }),
+            )
+            .clicked()
+        {
+            actions.push(DockerAction::ScanHostPorts);
+        }
+        let propose = ui
+            .add_enabled(
+                buttons_enabled,
+                egui::Button::new("Proposer une réattribution"),
+            )
+            .on_hover_text(
+                "Cherche un port libre pour chaque déclaration compose en conflit.                  Rien n'est écrit avant confirmation.",
+            );
+        if propose.clicked() {
+            actions.push(DockerAction::PlanPortReassignment);
+        }
+    });
+    render_port_plan(ui, state, buttons_enabled, actions);
 
     if rows.is_empty() {
         ui.label("Aucun port publié.");
@@ -1620,6 +1659,139 @@ fn render_ports_section(
                 });
         });
     render_host_only_ports(ui, host_ports, rows);
+}
+
+/// The reassignment proposal, when there is one: the moves, what the plan
+/// deliberately leaves alone, and the result of the last application.
+///
+/// Everything here is a *preview*. The « Appliquer » button emits a
+/// destructive action that `EguiApp` puts behind a confirm dialog — this
+/// function never writes anything and never decides anything.
+fn render_port_plan(
+    ui: &mut egui::Ui,
+    state: &DockerViewState,
+    buttons_enabled: bool,
+    actions: &mut Vec<DockerAction>,
+) {
+    render_port_edits(ui, state.port_edits);
+    let Some(plan) = state.port_plan else {
+        return;
+    };
+    ui.separator();
+
+    if plan.is_empty() {
+        ui.label("Aucun conflit de port à corriger.");
+        if ui.button("Fermer la proposition").clicked() {
+            actions.push(DockerAction::ClearPortPlan);
+        }
+        return;
+    }
+
+    if !plan.moves.is_empty() {
+        ui.label(format!(
+            "{} réattribution(s) proposée(s) dans {} fichier(s) compose.",
+            plan.moves.len(),
+            plan.files().len()
+        ));
+        // The one caveat that makes the difference between "réglé" and "réglé
+        // au prochain démarrage". A container keeps the port it was created
+        // with, whatever the file says afterwards, so an edit that is not
+        // followed by a recreate changes nothing at all.
+        ui.colored_label(
+            CONFLICT_COLOR,
+            "Les conteneurs déjà créés gardent leur port : après application, relancer les stacks concernées avec « docker compose up -d --force-recreate ».",
+        );
+
+        let columns = [
+            ("Fichier", 0.30),
+            ("Service", 0.14),
+            ("Actuel", 0.10),
+            ("Nouveau", 0.10),
+            ("Raison", 0.36),
+        ];
+        let total_width = ui.available_width();
+        egui::ScrollArea::horizontal()
+            .id_salt("docker-port-plan-scroll")
+            .show(ui, |ui| {
+                egui::Grid::new("docker-port-plan-grid")
+                    .striped(true)
+                    .min_col_width(70.0)
+                    .show(ui, |ui| {
+                        header_row(ui, total_width, &columns);
+                        for entry in &plan.moves {
+                            ui.label(&entry.file);
+                            ui.label(&entry.service);
+                            ui.label(format!("{}/{}", entry.from, entry.protocol));
+                            ui.label(entry.to.to_string());
+                            ui.label(entry.reason.text());
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
+    // Listed even when there is nothing to apply: a plan whose whole content
+    // is « je ne peux pas » still has to say so out loud.
+    if !plan.blocked.is_empty() {
+        ui.separator();
+        ui.label(format!(
+            "{} conflit(s) non réglé(s) par cette proposition :",
+            plan.blocked.len()
+        ));
+        for blocked in &plan.blocked {
+            ui.label(format!(
+                "• {}/{} — {} ({})",
+                blocked.host_port,
+                blocked.protocol,
+                blocked.reason,
+                blocked.owners.join(", ")
+            ));
+        }
+    }
+
+    ui.horizontal(|ui| {
+        let apply = ui.add_enabled(
+            buttons_enabled && !plan.moves.is_empty(),
+            egui::Button::new("Appliquer la réattribution"),
+        );
+        if apply.clicked() {
+            actions.push(DockerAction::ApplyPortReassignment(plan.moves.clone()));
+        }
+        if ui.button("Fermer la proposition").clicked() {
+            actions.push(DockerAction::ClearPortPlan);
+        }
+    });
+}
+
+/// What the last application actually wrote, one block per file.
+///
+/// Shown above the proposal rather than replacing it: a plan can be applied
+/// in part — some files rewritten, some entries refused for being interpolated
+/// — and the two lists have to be readable side by side.
+fn render_port_edits(ui: &mut egui::Ui, edits: &[FileReport]) {
+    if edits.is_empty() {
+        return;
+    }
+    ui.separator();
+    for report in edits {
+        ui.label(format!(
+            "{} : {} port(s) réécrit(s).",
+            report.file,
+            report.applied.len()
+        ));
+        for edit in &report.applied {
+            ui.label(format!(
+                "• {} : {} → {} (ligne {})",
+                edit.service, edit.from, edit.to, edit.line
+            ));
+        }
+        for refused in &report.refused {
+            ui.colored_label(CONFLICT_COLOR, format!("• {refused}"));
+        }
+        if let Some(backup) = &report.backup {
+            ui.label(format!("Sauvegarde : {backup}"));
+        }
+    }
 }
 
 /// The « Hôte » cell: whether this port is bound on the machine right now.
@@ -1876,13 +2048,9 @@ pub fn render(ui: &mut egui::Ui, state: &DockerViewState<'_>) -> Vec<DockerActio
                 DockerList::Volumes => {
                     render_volumes_section(ui, &snapshot.volumes, &ctx, &mut actions)
                 }
-                DockerList::Ports => render_ports_section(
-                    ui,
-                    &allocations,
-                    state.host_ports,
-                    buttons_enabled,
-                    &mut actions,
-                ),
+                DockerList::Ports => {
+                    render_ports_section(ui, &allocations, state, buttons_enabled, &mut actions)
+                }
             }
         });
 
@@ -2093,6 +2261,8 @@ mod tests {
         batch_report: Vec<BatchOutcome>,
         active_list: DockerList,
         host_ports: Option<Vec<ListeningPort>>,
+        port_plan: Option<ReassignmentPlan>,
+        port_edits: Vec<FileReport>,
     }
 
     impl State {
@@ -2108,6 +2278,8 @@ mod tests {
                 batch_report: Vec::new(),
                 active_list: DockerList::Containers,
                 host_ports: None,
+                port_plan: None,
+                port_edits: Vec::new(),
             }
         }
 
@@ -2115,6 +2287,19 @@ mod tests {
         /// `ScanHostPorts`. `None` (the default) is "never scanned".
         fn with_host_ports(mut self, ports: Vec<ListeningPort>) -> Self {
             self.host_ports = Some(ports);
+            self
+        }
+
+        /// Hand the view a computed proposal, as `EguiApp` does after a
+        /// `PlanPortReassignment`.
+        fn with_port_plan(mut self, plan: ReassignmentPlan) -> Self {
+            self.port_plan = Some(plan);
+            self
+        }
+
+        /// Hand the view the outcome of an application.
+        fn with_port_edits(mut self, edits: Vec<FileReport>) -> Self {
+            self.port_edits = edits;
             self
         }
 
@@ -2149,6 +2334,8 @@ mod tests {
                         batch_report: &state.batch_report,
                         active_list: state.active_list,
                         host_ports: state.host_ports.as_deref(),
+                        port_plan: state.port_plan.as_ref(),
+                        port_edits: &state.port_edits,
                     };
                     let emitted = render(ui, &view_state);
                     // Applied here, like `EguiApp` does, so a test can click a
@@ -2458,6 +2645,8 @@ mod tests {
             batch_report: Vec::new(),
             active_list: DockerList::Containers,
             host_ports: None,
+            port_plan: None,
+            port_edits: Vec::new(),
         };
         let mut harness = build_harness(state);
         assert_eq!(harness.query_all_by_label("Réessayer").count(), 1);
@@ -2505,6 +2694,8 @@ mod tests {
                 batch_report: Vec::new(),
                 active_list: list,
                 host_ports: None,
+                port_plan: None,
+                port_edits: Vec::new(),
             };
             let mut harness = build_harness(state);
             for button in buttons {
@@ -2613,6 +2804,8 @@ mod tests {
             batch_report: Vec::new(),
             active_list: DockerList::Containers,
             host_ports: None,
+            port_plan: None,
+            port_edits: Vec::new(),
         };
         let harness = build_harness(state);
         assert_eq!(
@@ -3127,6 +3320,211 @@ mod tests {
             harness.query_all_by_label("Rescanner l'hôte").count(),
             1,
             "a scan that ran turns the button into a rescan"
+        );
+    }
+
+    // --- render(): the Ports tab's reassignment proposal ---------------------
+
+    use crate::docker::compose_edit::AppliedEdit;
+    use crate::ui::port_plan::{Blocked, MoveReason};
+
+    fn a_move(service: &str, from: u16, to: u16, reason: MoveReason) -> PortMove {
+        PortMove {
+            file: "/srv/app/docker-compose.yml".to_string(),
+            service: service.to_string(),
+            protocol: "tcp".to_string(),
+            from,
+            to,
+            reason,
+        }
+    }
+
+    /// Every proposal test opens on the Ports list with one stopped publisher:
+    /// the plan panel is rendered above the allocation table, so the table's
+    /// content is irrelevant to them but its list has to be the visible one.
+    fn ports_harness(state: State) -> Harness<'static, State> {
+        build_harness(state.on_list(DockerList::Ports))
+    }
+
+    fn stopped_publisher() -> DockerSnapshot {
+        publishing_snapshot("lab", "0.0.0.0:8080->80/tcp", ContainerState::Exited)
+    }
+
+    #[test]
+    fn clicking_the_proposal_button_emits_plan_port_reassignment() {
+        let mut harness = ports_harness(State::with_snapshot(stopped_publisher()));
+        harness.get_by_label("Proposer une réattribution").click();
+        harness.run();
+        assert!(harness
+            .state()
+            .actions
+            .contains(&DockerAction::PlanPortReassignment));
+    }
+
+    /// A plan with nothing in it is a *result*, not an absence of one: it says
+    /// the ports are already consistent.
+    #[test]
+    fn an_empty_plan_says_there_is_nothing_to_fix() {
+        let harness = ports_harness(
+            State::with_snapshot(stopped_publisher()).with_port_plan(ReassignmentPlan::default()),
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("Aucun conflit de port à corriger.")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("Appliquer la réattribution")
+                .count(),
+            0,
+            "nothing to apply, so nothing to click"
+        );
+    }
+
+    /// The warning is the whole reason this is not a one-click fix: the file
+    /// changes, the container already created from it does not.
+    #[test]
+    fn a_plan_lists_its_moves_and_warns_about_force_recreate() {
+        let plan = ReassignmentPlan {
+            moves: vec![a_move(
+                "web",
+                8080,
+                8081,
+                MoveReason::TakenByHost("nginx.exe (PID 12)".to_string()),
+            )],
+            blocked: Vec::new(),
+        };
+        let harness = ports_harness(State::with_snapshot(stopped_publisher()).with_port_plan(plan));
+        assert_eq!(
+            harness
+                .query_all_by_label("1 réattribution(s) proposée(s) dans 1 fichier(s) compose.")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("port déjà tenu par nginx.exe (PID 12)")
+                .count(),
+            1,
+            "a move without its reason is an unreviewable diff"
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label(
+                    "Les conteneurs déjà créés gardent leur port : après application, relancer les stacks concernées avec « docker compose up -d --force-recreate »."
+                )
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn applying_a_plan_emits_exactly_the_moves_it_displayed() {
+        let moves = vec![a_move(
+            "web",
+            8080,
+            8081,
+            MoveReason::TakenByStack("api (/other/compose.yml)".to_string()),
+        )];
+        let plan = ReassignmentPlan {
+            moves: moves.clone(),
+            blocked: Vec::new(),
+        };
+        let mut harness =
+            ports_harness(State::with_snapshot(stopped_publisher()).with_port_plan(plan));
+        harness.get_by_label("Appliquer la réattribution").click();
+        harness.run();
+        assert!(harness
+            .state()
+            .actions
+            .contains(&DockerAction::ApplyPortReassignment(moves)));
+    }
+
+    /// The failure mode this guards against: a plan that fixes nothing reading
+    /// like a plan that fixed everything.
+    #[test]
+    fn a_plan_that_can_only_report_blockers_offers_nothing_to_apply() {
+        let plan = ReassignmentPlan {
+            moves: Vec::new(),
+            blocked: vec![Blocked {
+                host_port: 8080,
+                protocol: "tcp".to_string(),
+                owners: vec!["lab".to_string()],
+                reason:
+                    "au moins un conteneur n'a pas de déclaration compose : à corriger à la main"
+                        .to_string(),
+            }],
+        };
+        let mut harness =
+            ports_harness(State::with_snapshot(stopped_publisher()).with_port_plan(plan));
+        assert_eq!(
+            harness
+                .query_all_by_label("1 conflit(s) non réglé(s) par cette proposition :")
+                .count(),
+            1
+        );
+        harness.get_by_label("Appliquer la réattribution").click();
+        harness.run();
+        assert!(
+            !harness
+                .state()
+                .actions
+                .iter()
+                .any(|action| matches!(action, DockerAction::ApplyPortReassignment(_))),
+            "the button is present but disabled, and a disabled button must not emit"
+        );
+    }
+
+    #[test]
+    fn closing_the_proposal_emits_clear_port_plan() {
+        let mut harness = ports_harness(
+            State::with_snapshot(stopped_publisher()).with_port_plan(ReassignmentPlan::default()),
+        );
+        harness.get_by_label("Fermer la proposition").click();
+        harness.run();
+        assert!(harness
+            .state()
+            .actions
+            .contains(&DockerAction::ClearPortPlan));
+    }
+
+    /// A partly-applied plan is the normal case — one entry literal, one
+    /// interpolated — so both halves have to be on screen at once.
+    #[test]
+    fn an_edit_report_shows_what_was_written_and_what_was_refused() {
+        let harness = ports_harness(State::with_snapshot(stopped_publisher()).with_port_edits(
+            vec![FileReport {
+                file: "/srv/app/docker-compose.yml".to_string(),
+                applied: vec![AppliedEdit {
+                    service: "web".to_string(),
+                    from: 8080,
+                    to: 8081,
+                    line: 12,
+                }],
+                refused: vec!["db : port interpolé — à modifier à la main".to_string()],
+                backup: Some("/data/compose-backups/42-srv.yml".to_string()),
+            }],
+        ));
+        assert_eq!(
+            harness
+                .query_all_by_label("• web : 8080 → 8081 (ligne 12)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("• db : port interpolé — à modifier à la main")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .query_all_by_label("Sauvegarde : /data/compose-backups/42-srv.yml")
+                .count(),
+            1,
+            "an edit whose backup location is not stated is an edit the user cannot undo"
         );
     }
 
