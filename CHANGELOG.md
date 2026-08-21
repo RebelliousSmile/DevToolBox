@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-08-21
+
+### Added
+- Docker tab: compose stacks — `$HOME` walk for the four names compose itself
+  looks for (`docker-compose.y{a,}ml`, `compose.y{a,}ml`), pruning
+  `node_modules`, `target`, `.venv` and friends; per-stack state (running /
+  partial / stopped / unknown) and `up -d` / `down` / `restart` launched
+  detached with their output streamed into an anchored bottom log panel
+- Docker tab: published-port column on containers, with conflict detection
+  across running containers and compose declarations so two stacks fighting
+  for the same host port are visible before launch
+- Docker tab: dormancy badges (last-used date against the configurable
+  `dormant_after_days` threshold, persisted in `config.json`) on containers,
+  images and volumes, plus a cross-list batch selection and a single grouped
+  « Supprimer la sélection » that reports per-item success or failure instead
+  of aborting on the first error
+- Full monochrome Noto Emoji font (`assets/fonts/NotoEmoji-Regular.ttf`, OFL)
+  appended to egui's fallback chain: user-picked action and category icons
+  (🧹, 🏗, 🤖, 🧪) no longer render as tofu
+
+### Changed
+- Docker tab: the three lists (Conteneurs / Images / Volumes) become tabs
+  instead of one long stacked scroll; each tab label carries its row count and,
+  when a batch spans several lists, its selected count
+- Command-form reorder buttons use ⬆/⬇ and the collapsing headers ⏵/⏷, the
+  plain ↑/↓ and ▸/▾ being covered by no font in the chain
+
+### Fixed
+- Windows: the temp path built from the libtest thread name is sanitized, its
+  `:` separators being illegal in Windows filenames (OS error 123)
+- `@python` action resolution delegates to `python_runtime::python_for_script`
+  and so honours the host's venv layout (`.venv/bin/python` on POSIX,
+  `.venv\Scripts\python.exe` on Windows)
+
 ## [0.6.0] - 2026-08-19
 
 ### Added
