@@ -337,12 +337,13 @@ class MigrationValidation:
     catalog: str = "not-run"
     load: str = "not-run"
     inference: str = "not-run"
+    workflow: str = "not-run"
     destination_digest: str | None = None
     message: str | None = None
 
     def __post_init__(self) -> None:
-        allowed = {"not-run", "passed", "failed", "unavailable"}
-        for name in ("identity", "catalog", "load", "inference"):
+        allowed = {"not-run", "passed", "failed", "unavailable", "none", "weak"}
+        for name in ("identity", "catalog", "load", "inference", "workflow"):
             if getattr(self, name) not in allowed:
                 raise ValueError(f"invalid validation state for {name}")
 
@@ -392,6 +393,34 @@ class MigrationResult:
     confirmation_token: str | None = None
     error_code: str | None = None
     message: str | None = None
+
+
+@dataclass
+class ManualStep:
+    step_id: str
+    source_path: str
+    destination_tool: str
+    documented_action: str
+    expected_reference: str
+    resume_condition: str
+    state: str = "pending"
+
+
+@dataclass
+class GuidedMigration:
+    migration_id: str
+    source_artifact_id: str
+    source_path: str
+    source_sha256: str
+    destination_tool: str
+    category: str | None
+    state: str = "prepared"
+    manual_step: ManualStep | None = None
+    owned_config_path: str | None = None
+    registration_created: bool = False
+    config_allocation_id: str | None = None
+    validation: MigrationValidation = field(default_factory=MigrationValidation)
+    retirement_eligible: bool = False
 
 
 @dataclass

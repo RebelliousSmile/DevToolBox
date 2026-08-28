@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Instruction: Integrate Jan and ComfyUI without private unsafe mutation

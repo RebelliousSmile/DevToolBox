@@ -53,6 +53,11 @@ disk cost, and supported methods before delegating to the documented Ollama or
 LM Studio migration drivers. Migration journals and allocation evidence bound
 rollback to operation-created resources; success never creates deletion
 authority.
+Jan and ComfyUI integrations use persisted guided checkpoints when public
+non-interactive surfaces are insufficient. Jan metadata and arbitrary ComfyUI
+YAML are never rewritten; ComfyUI may instead consume one separately owned YAML
+through a documented DevToolBox launch hook. Visibility-only completion remains
+weak and never retirement-eligible.
 `local_ai/ollama_http.py` is the narrow
 caller-neutral loopback transport shared by that inventory and `winclean`;
 each caller translates technical failures into its own domain. The orchestrator

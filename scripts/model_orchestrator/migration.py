@@ -14,6 +14,8 @@ from typing import Callable, Protocol
 
 from .models import (
     LibraryRecord,
+    GuidedMigration,
+    ManualStep,
     MigrationPlan,
     MigrationResult,
     MigrationStep,
@@ -330,3 +332,117 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+class GuidedMigrationStore:
+    """Persist manual checkpoints and weak completion without deletion authority."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+
+    def create(
+        self,
+        *,
+        migration_id: str,
+        source: LibraryRecord,
+        destination_tool: str,
+        category: str | None = None,
+    ) -> GuidedMigration:
+        if _EXACT_ID.fullmatch(migration_id) is None:
+            raise MigrationError("guided-id-invalid", "Identifiant guidé invalide.")
+        if source.identity.state != "verified" or source.identity.value is None:
+            raise MigrationError("source-identity-unverified", "La source doit être vérifiée.")
+        migration = GuidedMigration(
+            migration_id=migration_id,
+            source_artifact_id=source.artifact_id,
+            source_path=source.path,
+            source_sha256=source.identity.value,
+            destination_tool=destination_tool,
+            category=category,
+        )
+        self.save(migration)
+        return migration
+
+    def save(self, migration: GuidedMigration) -> None:
+        if _EXACT_ID.fullmatch(migration.migration_id) is None:
+            raise MigrationError("guided-id-invalid", "Identifiant guidé invalide.")
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / f"{migration.migration_id}.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(asdict(migration), ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
+    def load(self, migration_id: str) -> GuidedMigration:
+        if _EXACT_ID.fullmatch(migration_id) is None:
+            raise MigrationError("guided-id-invalid", "Identifiant guidé invalide.")
+        payload = json.loads(
+            (self.root / f"{migration_id}.json").read_text(encoding="utf-8")
+        )
+        manual = payload.pop("manual_step", None)
+        validation = MigrationValidation(**payload.pop("validation", {}))
+        return GuidedMigration(
+            manual_step=ManualStep(**manual) if manual else None,
+            validation=validation,
+            **payload,
+        )
+
+    def revalidate_source(self, migration: GuidedMigration) -> None:
+        source = Path(migration.source_path)
+        if not source.is_file() or source.is_symlink() or _sha256(source) != migration.source_sha256:
+            raise MigrationError("guided-source-stale", "La source guidée a changé.")
+
+
+def observes_exact_guided_source(migration: GuidedMigration, observation) -> bool:
+    """Require same-file or verified digest evidence plus the destination reference."""
+
+    source = Path(migration.source_path)
+    for artifact in observation.artifacts:
+        if migration.category is not None and artifact.category != migration.category:
+            continue
+        referenced = any(
+            reference.tool == migration.destination_tool for reference in artifact.references
+        )
+        if not referenced:
+            continue
+        try:
+            if source.samefile(artifact.path):
+                return True
+        except OSError:
+            pass
+        if artifact.identity.exact_key == f"sha256:{migration.source_sha256}":
+            return True
+    return False
+
+
+def complete_guided_visibility(
+    migration: GuidedMigration,
+    *,
+    visible: bool,
+    load: str = "unavailable",
+    inference: str = "unavailable",
+    workflow: str = "unavailable",
+) -> GuidedMigration:
+    if not visible:
+        migration.state = "pending-manual" if migration.manual_step else "pending-validation"
+        if migration.manual_step:
+            migration.manual_step.state = "pending"
+        return migration
+    migration.validation = MigrationValidation(
+        identity="passed",
+        catalog="passed",
+        load=load,
+        inference=inference,
+        workflow=workflow,
+        destination_digest=migration.source_sha256,
+        message="Visibilité exacte confirmée; exécution publique non prouvée.",
+    )
+    migration.state = (
+        "completed" if load == "passed" or inference == "passed" else "completed-weak"
+    )
+    if migration.manual_step:
+        migration.manual_step.state = "completed"
+    migration.retirement_eligible = False
+    return migration

@@ -13,6 +13,13 @@ from ..models import (
     SourceError,
     ToolInstallation,
     ToolReference,
+    GuidedMigration,
+    ManualStep,
+)
+from ..migration import (
+    GuidedMigrationStore,
+    complete_guided_visibility,
+    observes_exact_guided_source,
 )
 from ..paths import file_evidence
 from . import (
@@ -166,3 +173,50 @@ class JanAdapter:
                     )
                 )
         return errors
+
+
+class JanGuidedIntegration:
+    """Checkpoint Jan's documented interactive Link Files flow without metadata edits."""
+
+    def __init__(self, store: GuidedMigrationStore):
+        self.store = store
+
+    def prepare(self, migration: GuidedMigration) -> GuidedMigration:
+        migration.manual_step = ManualStep(
+            step_id="jan-link-files",
+            source_path=migration.source_path,
+            destination_tool="jan",
+            documented_action=(
+                "Dans Jan, ouvrez la gestion des modèles, choisissez Import Model puis "
+                f"Link Files, et sélectionnez exactement {migration.source_path}."
+            ),
+            expected_reference=f"same-file:{migration.source_path}",
+            resume_condition=(
+                "Un nouvel inventaire Jan doit observer une référence vers le même fichier "
+                "ou le même SHA-256 vérifié."
+            ),
+        )
+        migration.state = "pending-manual"
+        self.store.save(migration)
+        return migration
+
+    def resume(
+        self,
+        migration: GuidedMigration,
+        observation: AdapterObservation,
+        *,
+        execution_validator=None,
+    ) -> GuidedMigration:
+        self.store.revalidate_source(migration)
+        visible = observes_exact_guided_source(migration, observation)
+        load = "unavailable"
+        inference = "unavailable"
+        if visible and execution_validator is not None:
+            loaded, inferred = execution_validator(migration)
+            load = "passed" if loaded else "failed"
+            inference = "passed" if inferred else "failed"
+        complete_guided_visibility(
+            migration, visible=visible, load=load, inference=inference
+        )
+        self.store.save(migration)
+        return migration

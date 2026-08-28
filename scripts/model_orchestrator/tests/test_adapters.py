@@ -143,6 +143,7 @@ class AdapterInventoryTests(unittest.TestCase):
                 env={
                     "COMFYUI_MODELS_DIR": str(models),
                     "COMFYUI_EXTRA_MODEL_PATHS": str(config),
+                    "COMFYUI_REGISTERED_MODEL_ROOTS": str(extra),
                     "COMFYUI_WORKFLOWS_DIR": str(workflows),
                 },
                 home=base,

@@ -9,12 +9,25 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from .adapters import AdapterContext
+from .adapters.comfyui import (
+    ComfyUIAdapter,
+    ComfyUIGuidedIntegration,
+    DevToolBoxComfyLaunchBackend,
+)
+from .adapters.jan import JanAdapter, JanGuidedIntegration
 from .adapters.lm_studio import LMSCliMigrationBackend, LMStudioMigrationDriver
 from .adapters.ollama import OllamaApiMigrationBackend, OllamaMigrationDriver
 from .catalog import build_snapshot, inventory_snapshot
 from .download import create_plan, execute_plan, public_offer, resolve_request
 from .library import NeutralLibrary
-from .migration import MigrationExecutor, create_migration_plan, revalidate_plan
+from .migration import (
+    GuidedMigrationStore,
+    MigrationExecutor,
+    create_migration_plan,
+    observes_exact_guided_source,
+    revalidate_plan,
+)
 from .models import (
     AcquisitionRequest,
     AdapterCapabilities,
@@ -71,6 +84,19 @@ def build_parser() -> argparse.ArgumentParser:
     migration_apply.add_argument("--plan", required=True)
     migration_apply.add_argument("--destination-installation", required=True)
     migration_apply.add_argument("--journal-root", required=True)
+    guided_create = subparsers.add_parser("guided-create", help="préparer une migration guidée")
+    guided_create.add_argument("--source-record", required=True)
+    guided_create.add_argument("--journal-root", required=True)
+    guided_create.add_argument("--migration-id", required=True)
+    guided_create.add_argument("--destination", choices=("jan", "comfyui"), required=True)
+    guided_create.add_argument("--category")
+    guided_create.add_argument("--owned-config-root")
+    guided_continue = subparsers.add_parser("guided-continue", help="reprendre après l'action guidée")
+    guided_continue.add_argument("--journal-root", required=True)
+    guided_continue.add_argument("--migration-id", required=True)
+    guided_validate = subparsers.add_parser("guided-validate", help="inspecter la condition de reprise")
+    guided_validate.add_argument("--journal-root", required=True)
+    guided_validate.add_argument("--migration-id", required=True)
     return parser
 
 
@@ -175,6 +201,57 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
         return 0 if result.success else 1
+    if args.command == "guided-create":
+        store = GuidedMigrationStore(args.journal_root)
+        migration = store.create(
+            migration_id=args.migration_id,
+            source=_library_record(Path(args.source_record)),
+            destination_tool=args.destination,
+            category=args.category,
+        )
+        if args.destination == "jan":
+            JanGuidedIntegration(store).prepare(migration)
+        else:
+            if not args.category or not args.owned_config_root:
+                raise ValueError("ComfyUI requiert --category et --owned-config-root")
+            observation = ComfyUIAdapter().inventory(AdapterContext())
+            launch_backend = DevToolBoxComfyLaunchBackend(
+                Path(args.journal_root) / "comfy-launch-hooks.json",
+                flag_supported=os.environ.get(
+                    "DEVTOOLBOX_COMFY_EXTRA_CONFIG_SUPPORTED", ""
+                ).lower()
+                in {"1", "true", "yes"},
+            )
+            ComfyUIGuidedIntegration(
+                store, args.owned_config_root, launch_backend
+            ).prepare(migration, observation)
+        print(json.dumps(asdict(migration), ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command in {"guided-continue", "guided-validate"}:
+        store = GuidedMigrationStore(args.journal_root)
+        migration = store.load(args.migration_id)
+        if migration.destination_tool == "jan":
+            observation = JanAdapter().inventory(AdapterContext())
+            visible = observes_exact_guided_source(migration, observation)
+            if args.command == "guided-continue":
+                JanGuidedIntegration(store).resume(migration, observation)
+        elif migration.destination_tool == "comfyui":
+            observation = ComfyUIAdapter().inventory(AdapterContext())
+            config_root = (
+                Path(migration.owned_config_path).parent
+                if migration.owned_config_path
+                else Path(args.journal_root) / "comfy-config"
+            )
+            integration = ComfyUIGuidedIntegration(store, config_root, _NoComfyHook())
+            visible = integration.live_visible(migration, observation)
+            if args.command == "guided-continue":
+                integration.resume(migration, observation)
+        else:
+            raise ValueError("Destination guidée inconnue")
+        payload = asdict(migration)
+        payload["resume_condition_met"] = visible
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
     if args.command != "fixture":
         raise AssertionError(f"commande non traitée : {args.command}")
     artifact = Artifact(
@@ -211,6 +288,17 @@ def _installation(path: Path) -> ToolInstallation:
         RootEvidence(**row) for row in payload.get("root_evidence", ())
     )
     return ToolInstallation(**payload)
+
+
+class _NoComfyHook:
+    def supported_hook(self):
+        return None
+
+    def register(self, config_path, hook):
+        raise RuntimeError("Aucun hook automatique configuré")
+
+    def unregister(self, config_path, hook):
+        raise RuntimeError("Aucun hook automatique configuré")
 
 
 if __name__ == "__main__":

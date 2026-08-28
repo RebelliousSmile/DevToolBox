@@ -7,7 +7,7 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from scripts.local_ai.ollama_http import LOOPBACK_HOSTS, RejectRedirects
@@ -20,6 +20,14 @@ from ..models import (
     SourceError,
     ToolInstallation,
     ToolReference,
+    GuidedMigration,
+    ManualStep,
+)
+from ..migration import (
+    GuidedMigrationStore,
+    MigrationError,
+    complete_guided_visibility,
+    observes_exact_guided_source,
 )
 from ..paths import file_evidence
 from . import AdapterContext, AdapterObservation, bounded_files, executable_version
@@ -121,48 +129,26 @@ class ComfyUIAdapter:
         configs = [Path(config)] if config else [roots[0][0].parent / "extra_model_paths.yaml"]
         errors: list[SourceError] = []
         for config_path in configs:
-            additions, error = self._extra_roots(config_path)
-            roots.extend((path, f"extra-model-paths:{config_path}", "high") for path in additions)
-            if error:
-                errors.append(error)
+            if config_path.exists():
+                errors.append(
+                    SourceError(
+                        self.name,
+                        "user-yaml-unparsed",
+                        f"{config_path}: YAML utilisateur laissé intact; racines attendues via un hook documenté.",
+                        confidence="medium",
+                    )
+                )
+        registered = context.env.get("COMFYUI_REGISTERED_MODEL_ROOTS", "").strip()
+        if registered:
+            roots.extend(
+                (Path(value), "documented-setting-or-launch-hook", "high")
+                for value in registered.split(os.pathsep)
+                if value
+            )
         unique: dict[str, tuple[Path, str, str]] = {}
         for row in roots:
             unique.setdefault(str(row[0].absolute()), row)
         return list(unique.values()), errors
-
-    def _extra_roots(self, config: Path) -> tuple[list[Path], SourceError | None]:
-        try:
-            lines = config.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError:
-            return [], None
-        except OSError as exc:
-            return [], SourceError(self.name, "config-inaccessible", str(exc))
-        roots: list[Path] = []
-        base: Path | None = None
-        active_category: str | None = None
-        try:
-            for raw in lines:
-                content = raw.split("#", 1)[0].strip()
-                if not content:
-                    continue
-                key, separator, value = content.partition(":")
-                if not separator:
-                    if active_category and raw[:1].isspace():
-                        candidate = Path(content.lstrip("- "))
-                        roots.append((base / candidate) if base and not candidate.is_absolute() else candidate)
-                        continue
-                    raise ValueError(f"ligne invalide: {raw}")
-                value = value.strip().strip("'\"")
-                if key.strip() == "base_path":
-                    base = Path(value)
-                elif key.strip() in CATEGORIES:
-                    active_category = key.strip()
-                    if value and value not in {"|", ">"}:
-                        candidate = Path(value)
-                        roots.append((base / candidate) if base and not candidate.is_absolute() else candidate)
-        except ValueError as exc:
-            return roots, SourceError(self.name, "config-payload-invalid", str(exc))
-        return roots, None
 
     def _api_names(self, context: AdapterContext, observation: AdapterObservation) -> set[str]:
         request = context.comfy_request
@@ -249,3 +235,223 @@ class ComfyUIAdapter:
         if len(parts) > 1:
             return CATEGORIES.get(parts[0])
         return CATEGORIES.get(root.name)
+
+
+class ComfyHookBackend(Protocol):
+    def supported_hook(self) -> str | None: ...
+    def register(self, config_path: str, hook: str) -> None: ...
+    def unregister(self, config_path: str, hook: str) -> None: ...
+
+
+class DevToolBoxComfyLaunchBackend:
+    """Register the documented CLI flag only in a DevToolBox-owned launcher file."""
+
+    def __init__(self, registry_path: str | Path, *, flag_supported: bool):
+        self.registry_path = Path(registry_path)
+        self.flag_supported = flag_supported
+
+    def supported_hook(self) -> str | None:
+        return "launch-arg" if self.flag_supported else None
+
+    def register(self, config_path: str, hook: str) -> None:
+        if hook != "launch-arg":
+            raise ValueError("Hook ComfyUI non pris en charge")
+        payload = self._load()
+        configs = payload.setdefault("extra_model_paths_configs", [])
+        if config_path not in configs:
+            configs.append(config_path)
+        self._save(payload)
+
+    def unregister(self, config_path: str, hook: str) -> None:
+        if hook != "launch-arg":
+            raise ValueError("Hook ComfyUI non pris en charge")
+        payload = self._load()
+        configs = payload.setdefault("extra_model_paths_configs", [])
+        payload["extra_model_paths_configs"] = [
+            value for value in configs if value != config_path
+        ]
+        self._save(payload)
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"schema_version": 1, "extra_model_paths_configs": []}
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != 1
+            or not isinstance(payload.get("extra_model_paths_configs"), list)
+        ):
+            raise ValueError("Registre de lancement DevToolBox invalide")
+        return payload
+
+    def _save(self, payload: dict[str, Any]) -> None:
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.registry_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, self.registry_path)
+
+
+_CATEGORY_CONFIG_KEYS = {
+    "checkpoint": "checkpoints",
+    "diffusion-model": "diffusion_models",
+    "vae": "vae",
+    "lora": "loras",
+    "controlnet": "controlnet",
+    "text-encoder": "text_encoders",
+    "clip-vision": "clip_vision",
+    "upscale": "upscale_models",
+}
+
+
+class ComfyUIGuidedIntegration:
+    """Own one separate YAML file and never rewrite arbitrary ComfyUI YAML."""
+
+    def __init__(
+        self,
+        store: GuidedMigrationStore,
+        owned_config_root: str | Path,
+        backend: ComfyHookBackend,
+    ):
+        self.store = store
+        self.owned_config_root = Path(owned_config_root)
+        self.backend = backend
+
+    def prepare(
+        self, migration: GuidedMigration, observation: AdapterObservation
+    ) -> GuidedMigration:
+        self.store.revalidate_source(migration)
+        if migration.category not in _CATEGORY_CONFIG_KEYS:
+            raise MigrationError("comfy-category-unsupported", "Catégorie ComfyUI invalide.")
+        already_observed = observes_exact_guided_source(migration, observation)
+        if already_observed:
+            if self.live_visible(migration, observation):
+                complete_guided_visibility(
+                    migration,
+                    visible=True,
+                    workflow=self.workflow_state(migration, observation),
+                )
+            else:
+                migration.state = "pending-validation"
+            self.store.save(migration)
+            return migration
+
+        self.owned_config_root.mkdir(parents=True, exist_ok=True)
+        config = self.owned_config_root / f"{migration.migration_id}.yaml"
+        if config.exists():
+            raise MigrationError(
+                "comfy-owned-config-collision", "Le fichier géré existe déjà."
+            )
+        migration.owned_config_path = str(config)
+        migration.state = "configuring"
+        self.store.save(migration)
+        category_key = _CATEGORY_CONFIG_KEYS[migration.category]
+        content = (
+            "devtoolbox:\n"
+            f"  base_path: {json.dumps(str(Path(migration.source_path).parent))}\n"
+            f"  {category_key}: "
+            + json.dumps(".")
+            + "\n"
+        )
+        temporary = config.with_suffix(".tmp")
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, config)
+        stat = config.lstat()
+        migration.config_allocation_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+        migration.state = "config-created"
+        self.store.save(migration)
+        hook = self.backend.supported_hook()
+        if hook is not None:
+            self.backend.register(str(config), hook)
+            migration.registration_created = True
+            migration.state = "pending-validation"
+        else:
+            migration.manual_step = ManualStep(
+                step_id="comfy-extra-model-paths",
+                source_path=migration.source_path,
+                destination_tool="comfyui",
+                documented_action=(
+                    "Chargez le fichier DevToolBox séparé avec le réglage Desktop documenté "
+                    f"ou --extra-model-paths-config {config}."
+                ),
+                expected_reference=f"live-category:{migration.category}:{Path(migration.source_path).name}",
+                resume_condition="L'API /models doit exposer ce fichier dans la catégorie exacte.",
+            )
+            migration.state = "pending-manual"
+        self.store.save(migration)
+        return migration
+
+    def resume(
+        self, migration: GuidedMigration, observation: AdapterObservation
+    ) -> GuidedMigration:
+        self.store.revalidate_source(migration)
+        visible = self.live_visible(migration, observation)
+        complete_guided_visibility(
+            migration,
+            visible=visible,
+            workflow=self.workflow_state(migration, observation) if visible else "unavailable",
+        )
+        self.store.save(migration)
+        return migration
+
+    def rollback(self, migration: GuidedMigration) -> GuidedMigration:
+        registration_unresolved = False
+        if migration.registration_created and migration.owned_config_path:
+            hook = self.backend.supported_hook()
+            if hook is not None:
+                try:
+                    self.backend.unregister(migration.owned_config_path, hook)
+                    migration.registration_created = False
+                except Exception:
+                    registration_unresolved = True
+            else:
+                registration_unresolved = True
+        if migration.owned_config_path:
+            config = Path(migration.owned_config_path)
+            if registration_unresolved:
+                migration.state = "rollback-incomplete"
+            elif config.is_file() and not config.is_symlink():
+                stat = config.lstat()
+                evidence = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+                if evidence == migration.config_allocation_id:
+                    config.unlink()
+                    migration.state = "rolled-back"
+                else:
+                    migration.state = "rollback-incomplete"
+        migration.retirement_eligible = False
+        self.store.save(migration)
+        return migration
+
+    @staticmethod
+    def live_visible(migration: GuidedMigration, observation: AdapterObservation) -> bool:
+        if not observes_exact_guided_source(migration, observation):
+            return False
+        source = Path(migration.source_path)
+        for artifact in observation.artifacts:
+            if artifact.category != migration.category:
+                continue
+            try:
+                same = source.samefile(artifact.path)
+            except OSError:
+                same = artifact.identity.exact_key == f"sha256:{migration.source_sha256}"
+            if same and any(
+                reference.tool == "comfyui" and reference.kind == "live-catalog"
+                for reference in artifact.references
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def workflow_state(migration: GuidedMigration, observation: AdapterObservation) -> str:
+        source = Path(migration.source_path)
+        for artifact in observation.artifacts:
+            try:
+                same = source.samefile(artifact.path)
+            except OSError:
+                same = artifact.identity.exact_key == f"sha256:{migration.source_sha256}"
+            if same and any(reference.workflow for reference in artifact.references):
+                return "passed"
+        return "none"
