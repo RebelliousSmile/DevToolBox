@@ -58,6 +58,13 @@ non-interactive surfaces are insufficient. Jan metadata and arbitrary ComfyUI
 YAML are never rewritten; ComfyUI may instead consume one separately owned YAML
 through a documented DevToolBox launch hook. Visibility-only completion remains
 weak and never retirement-eligible.
+Machine-local terminal observations are bounded in `history.py` and feed the
+deterministic recommendation policy in `ranking.py`; automatic fallback is
+limited to the same trusted content identity. `operations.py` exposes only
+capability-proven recovery actions on revalidated owned paths. `retirement.py`
+keeps deletion narrower still: v1 can retire only an unprotected, strongly
+validated Ollama owner reference through a short-lived state-bound token, then
+reports the remeasured freed space.
 `local_ai/ollama_http.py` is the narrow
 caller-neutral loopback transport shared by that inventory and `winclean`;
 each caller translates technical failures into its own domain. The orchestrator

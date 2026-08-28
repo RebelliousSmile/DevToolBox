@@ -274,6 +274,10 @@ class AcquisitionOffer:
     export_method: str | None = None
     duplicate_allocation_avoided: bool = False
     retirement_supported: bool = False
+    quantization: str | None = None
+    category: str | None = None
+    cached_bytes: int = 0
+    cache_verified: bool = False
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
@@ -281,6 +285,7 @@ class AcquisitionOffer:
         _non_negative(self.network_bytes, "network_bytes")
         _non_negative(self.local_copy_bytes, "local_copy_bytes")
         _non_negative(self.temporary_bytes, "temporary_bytes")
+        _non_negative(self.cached_bytes, "cached_bytes")
         if self.conversion_required and self.executable:
             raise ValueError("conversion-required offers are not executable in v1")
 
@@ -421,6 +426,85 @@ class GuidedMigration:
     config_allocation_id: str | None = None
     validation: MigrationValidation = field(default_factory=MigrationValidation)
     retirement_eligible: bool = False
+
+
+@dataclass(frozen=True)
+class PerformanceObservation:
+    provider: str
+    kind: str
+    timestamp: str
+    success: bool
+    elapsed_seconds: float
+    startup_seconds: float
+    network_bytes: int = 0
+    local_copy_bytes: int = 0
+    failure_code: str | None = None
+    network_seconds: float | None = None
+    local_copy_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.elapsed_seconds < 0 or self.startup_seconds < 0:
+            raise ValueError("performance durations must be non-negative")
+        _non_negative(self.network_bytes, "network_bytes")
+        _non_negative(self.local_copy_bytes, "local_copy_bytes")
+        if self.network_seconds is not None and self.network_seconds <= 0:
+            raise ValueError("network_seconds must be positive")
+        if self.local_copy_seconds is not None and self.local_copy_seconds <= 0:
+            raise ValueError("local_copy_seconds must be positive")
+
+
+@dataclass(frozen=True)
+class RankedOffer:
+    offer: AcquisitionOffer
+    predicted_seconds: float | None
+    adjusted_seconds: float | None
+    sample_count: int
+    observed_range: tuple[float, float] | None
+    confidence: str
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecoveryAction:
+    operation_id: str
+    action: str
+    available: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class RetirementPlan:
+    plan_id: str
+    owner_tool: str
+    source_artifact_id: str
+    source_path: str
+    source_native_id: str
+    source_sha256: str
+    references_digest: str
+    migration_plan_digest: str
+    logical_bytes: int
+    avoided_bytes: int
+    estimated_reclaimable_bytes: int
+    allocation_id: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class RetirementToken:
+    token: str
+    plan_digest: str
+    state_digest: str
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class RetirementResult:
+    plan_id: str
+    deleted_native_id: str
+    logical_bytes: int
+    avoided_bytes: int
+    estimated_reclaimable_bytes: int
+    measured_freed_bytes: int
 
 
 @dataclass

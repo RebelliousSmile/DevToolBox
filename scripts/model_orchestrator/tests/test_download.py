@@ -112,11 +112,13 @@ class DirectProviderTests(unittest.TestCase):
         offer = provider.resolve(request, request.primary_locator)
         with tempfile.TemporaryDirectory() as directory:
             lines, write = lines_writer()
+            observations = []
             result = execute_plan(
                 create_plan("direct-1", offer),
                 library=NeutralLibrary(Path(directory) / "library"),
                 write_event=write,
                 providers=(provider,),
+                observe=observations.append,
             )
             self.assertIsNotNone(result.record)
             self.assertEqual(Path(result.record.path).read_bytes(), body)
@@ -126,6 +128,8 @@ class DirectProviderTests(unittest.TestCase):
             progress = [row["transferred_bytes"] for row in events if row["kind"] == "progress"]
             self.assertEqual(progress, sorted(progress))
             self.assertEqual(sum(row["kind"] == "completed" for row in events), 1)
+            self.assertTrue(observations[0].success)
+            self.assertEqual(observations[0].provider, "direct")
 
     def test_resume_appends_only_with_stable_validator_and_length(self) -> None:
         body = gguf()

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from .adapters.comfyui import (
 from .adapters.jan import JanAdapter, JanGuidedIntegration
 from .adapters.lm_studio import LMSCliMigrationBackend, LMStudioMigrationDriver
 from .adapters.ollama import OllamaApiMigrationBackend, OllamaMigrationDriver
-from .catalog import build_snapshot, inventory_snapshot
+from .catalog import build_snapshot, canonical_artifacts, inventory_snapshot
 from .download import create_plan, execute_plan, public_offer, resolve_request
 from .library import NeutralLibrary
 from .migration import (
@@ -30,18 +31,35 @@ from .migration import (
 )
 from .models import (
     AcquisitionRequest,
+    AcquisitionOffer,
     AdapterCapabilities,
     Artifact,
     ArtifactIdentity,
     LibraryRecord,
     MigrationPlan,
+    MigrationResult,
+    MigrationStep,
+    MigrationValidation,
+    Protection,
+    RetirementPlan,
     RootEvidence,
     SCHEMA_VERSION,
     ToolInstallation,
+    ToolReference,
+    SourceError,
+    CatalogSnapshot,
     ValidationEvidence,
 )
+from .history import HistoryStore
+from .operations import recover_operation, reconcile_operations
 from .providers import builtin_providers
 from .providers.direct import ProviderError
+from .ranking import rank_offers
+from .retirement import (
+    OllamaApiDeleteBackend,
+    RetirementTokenStore,
+    create_retirement_plan,
+)
 from .settings import ModelSettings, load_settings, save_settings
 
 
@@ -97,6 +115,36 @@ def build_parser() -> argparse.ArgumentParser:
     guided_validate = subparsers.add_parser("guided-validate", help="inspecter la condition de reprise")
     guided_validate.add_argument("--journal-root", required=True)
     guided_validate.add_argument("--migration-id", required=True)
+    recommend = subparsers.add_parser("recommend", help="classer des offres avec l'historique local")
+    recommend.add_argument("--offers", required=True)
+    recommend.add_argument("--history", required=True)
+    recommend.add_argument("--manual-provider")
+    recover_list = subparsers.add_parser("recover-list", help="lister les actions de recovery")
+    recover_list.add_argument("--root", required=True)
+    recover_list.add_argument("--capabilities", required=True)
+    recover_list.add_argument("--migration-journal-root")
+    recover = subparsers.add_parser("recover", help="exécuter une action de recovery exacte")
+    recover.add_argument("--root", required=True)
+    recover.add_argument("--operation-id", required=True)
+    recover.add_argument("--action", choices=("resume", "discard-partial"), required=True)
+    recover.add_argument("--capability", action="append", default=[])
+    retirement_plan = subparsers.add_parser("retirement-plan", help="figer un retrait Ollama")
+    retirement_plan.add_argument("--snapshot", required=True)
+    retirement_plan.add_argument("--migration-result", required=True)
+    retirement_plan.add_argument("--plan-id", required=True)
+    retirement_plan.add_argument("--source-artifact-id", required=True)
+    retirement_plan.add_argument("--source-native-id", required=True)
+    retirement_plan.add_argument("--migration-plan-digest", required=True)
+    retirement_plan.add_argument("--out", required=True)
+    retirement_token = subparsers.add_parser("retirement-token", help="émettre un jeton court")
+    retirement_token.add_argument("--plan", required=True)
+    retirement_token.add_argument("--snapshot", required=True)
+    retirement_token.add_argument("--token-root", required=True)
+    retirement_token.add_argument("--ttl", type=int, default=300)
+    retirement_confirm = subparsers.add_parser("retirement-confirm", help="confirmer le retrait Ollama")
+    retirement_confirm.add_argument("--plan", required=True)
+    retirement_confirm.add_argument("--token", required=True)
+    retirement_confirm.add_argument("--token-root", required=True)
     return parser
 
 
@@ -106,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"schema_version": SCHEMA_VERSION}, sort_keys=True))
         return 0
     if args.command == "inventory":
-        print(json.dumps(inventory_snapshot().to_dict(), ensure_ascii=False, sort_keys=True))
+        print(json.dumps(_fresh_model_snapshot().to_dict(), ensure_ascii=False, sort_keys=True))
         return 0
     platform_name = "windows" if sys.platform == "win32" else "linux"
     if args.command == "settings":
@@ -252,6 +300,79 @@ def main(argv: list[str] | None = None) -> int:
         payload["resume_condition_met"] = visible
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0
+    if args.command == "recommend":
+        offers_payload = json.loads(Path(args.offers).read_text(encoding="utf-8"))
+        offers = [AcquisitionOffer(**row) for row in offers_payload]
+        ranked = rank_offers(
+            offers,
+            HistoryStore(args.history).load(),
+            manual_provider=args.manual_provider,
+        )
+        payload = []
+        for row in ranked:
+            rendered = asdict(row)
+            rendered["offer"] = asdict(public_offer(row.offer))
+            payload.append(rendered)
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "recover-list":
+        capabilities = {
+            key: set(values)
+            for key, values in json.loads(
+                Path(args.capabilities).read_text(encoding="utf-8")
+            ).items()
+        }
+        rows = reconcile_operations(
+            NeutralLibrary(args.root),
+            capabilities=capabilities,
+            migration_journal_root=args.migration_journal_root,
+        )
+        print(json.dumps([asdict(row) for row in rows], ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "recover":
+        recover_operation(
+            NeutralLibrary(args.root),
+            operation_id=args.operation_id,
+            action=args.action,
+            capabilities={args.operation_id: set(args.capability)},
+        )
+        print(json.dumps({"operation_id": args.operation_id, "action": args.action}, sort_keys=True))
+        return 0
+    if args.command == "retirement-plan":
+        plan = create_retirement_plan(
+            plan_id=args.plan_id,
+            source_artifact_id=args.source_artifact_id,
+            source_native_id=args.source_native_id,
+            snapshot=_snapshot(Path(args.snapshot)),
+            migration_result=_migration_result(Path(args.migration_result)),
+            migration_plan_digest=args.migration_plan_digest,
+            now_iso=datetime.now(timezone.utc).isoformat(),
+        )
+        Path(args.out).write_text(
+            json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return 0
+    if args.command == "retirement-token":
+        plan = RetirementPlan(**json.loads(Path(args.plan).read_text(encoding="utf-8")))
+        token = RetirementTokenStore(args.token_root).issue(
+            plan, _snapshot(Path(args.snapshot)), ttl_seconds=args.ttl
+        )
+        print(json.dumps(asdict(token), ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "retirement-confirm":
+        plan = RetirementPlan(**json.loads(Path(args.plan).read_text(encoding="utf-8")))
+        fresh = _fresh_model_snapshot()
+        store = RetirementTokenStore(args.token_root)
+        result = store.confirm(
+            args.token,
+            plan,
+            fresh_snapshot=fresh,
+            backend=OllamaApiDeleteBackend(),
+            reinventory=_fresh_model_snapshot,
+        )
+        print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+        return 0
     if args.command != "fixture":
         raise AssertionError(f"commande non traitée : {args.command}")
     artifact = Artifact(
@@ -299,6 +420,54 @@ class _NoComfyHook:
 
     def unregister(self, config_path, hook):
         raise RuntimeError("Aucun hook automatique configuré")
+
+
+def _snapshot(path: Path) -> CatalogSnapshot:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    artifacts = []
+    for row in payload.get("artifacts", []):
+        row["identity"] = ArtifactIdentity(**row.get("identity", {}))
+        row["references"] = [ToolReference(**item) for item in row.get("references", [])]
+        row["protection"] = Protection(**row.get("protection", {}))
+        artifacts.append(Artifact(**row))
+    installations = []
+    for row in payload.get("installations", []):
+        row["capabilities"] = AdapterCapabilities(**row.get("capabilities", {}))
+        row["roots"] = tuple(row.get("roots", ()))
+        row["root_evidence"] = tuple(
+            RootEvidence(**item) for item in row.get("root_evidence", ())
+        )
+        installations.append(ToolInstallation(**row))
+    return CatalogSnapshot(
+        generated_at=payload["generated_at"],
+        platform=payload["platform"],
+        installations=installations,
+        artifacts=artifacts,
+        source_errors=[SourceError(**row) for row in payload.get("source_errors", [])],
+        warnings=payload.get("warnings", []),
+        schema_version=payload.get("schema_version", SCHEMA_VERSION),
+    )
+
+
+def _migration_result(path: Path) -> MigrationResult:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["steps"] = tuple(MigrationStep(**row) for row in payload.get("steps", ()))
+    payload["validation"] = MigrationValidation(**payload.get("validation", {}))
+    return MigrationResult(**payload)
+
+
+def _fresh_model_snapshot() -> CatalogSnapshot:
+    snapshot = inventory_snapshot()
+    platform_name = "windows" if sys.platform == "win32" else "linux"
+    root = load_settings(platform_name=platform_name, env=os.environ).library_root
+    records = NeutralLibrary(root).list_records()
+    return build_snapshot(
+        platform=snapshot.platform,
+        artifacts=[*snapshot.artifacts, *canonical_artifacts(records)],
+        installations=snapshot.installations,
+        source_errors=snapshot.source_errors,
+        warnings=snapshot.warnings,
+    )
 
 
 if __name__ == "__main__":

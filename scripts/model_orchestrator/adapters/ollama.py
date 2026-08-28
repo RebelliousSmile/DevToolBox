@@ -48,6 +48,7 @@ class OllamaAdapter:
                 native_import=True,
                 load_validation=True,
                 inference_validation=True,
+                native_delete=True,
             ),
         )
         observation = AdapterObservation(installation)

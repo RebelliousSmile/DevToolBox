@@ -27,12 +27,21 @@ def redact_message(message: str) -> str:
 
 
 class EventStream:
-    def __init__(self, operation_id: str, write: Callable[[str], object]):
+    def __init__(
+        self,
+        operation_id: str,
+        write: Callable[[str], object],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.operation_id = operation_id
         self._write = write
         self._sequence = 0
         self._last_bytes = 0
         self._terminal = False
+        self._clock = clock
+        self._started_at = clock()
+        self._first_progress_at: float | None = None
         self._emit("schema", message="model-orchestrator-acquisition")
 
     def progress(self, transferred_bytes: int, total_bytes: int | None = None) -> None:
@@ -41,6 +50,8 @@ class EventStream:
         if total_bytes is not None and transferred_bytes > total_bytes:
             raise ValueError("La progression dépasse la taille totale")
         self._last_bytes = transferred_bytes
+        if self._first_progress_at is None:
+            self._first_progress_at = self._clock()
         self._emit(
             "progress", transferred_bytes=transferred_bytes, total_bytes=total_bytes
         )
@@ -74,6 +85,11 @@ class EventStream:
     @property
     def terminal(self) -> bool:
         return self._terminal
+
+    @property
+    def startup_seconds(self) -> float:
+        endpoint = self._first_progress_at if self._first_progress_at is not None else self._clock()
+        return max(endpoint - self._started_at, 0.0)
 
 
 def schema_header() -> dict[str, object]:
