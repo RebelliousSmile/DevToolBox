@@ -37,6 +37,11 @@ flowchart TD
 
 Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx), `winclean/` (dry-run-first disk cleaner; imports `system_inventory` as its **read-only** discovery layer and must never modify it — see `memory/internal/decisions/winclean-separate-package.md`).
 
+`model_orchestrator/` owns the schema-versioned local-AI artifact catalog,
+progressive content identity, and path-safety primitives. It remains separate
+from `winclean`: inventory and migration never imply that an artifact is safe
+to delete.
+
 `app_recommendations/` is the read-only multi-OS application report: stable models
 and score in `models.py`/`scoring.py`, aggregation in `report.py`, APT/Snap/Flatpak
 and Registry/AppX/Scoop/Chocolatey adapters in `collectors/`, and the schema-v1 CLI
