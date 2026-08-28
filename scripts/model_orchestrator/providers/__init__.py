@@ -31,5 +31,12 @@ class AcquisitionProvider(Protocol):
 def builtin_providers():
     from .direct import DirectProvider
     from .huggingface import HuggingFaceProvider
+    from .lm_studio import LMStudioProvider
+    from .ollama import OllamaProvider
 
-    return (HuggingFaceProvider(), DirectProvider())
+    return (
+        HuggingFaceProvider(),
+        DirectProvider(),
+        OllamaProvider(),
+        LMStudioProvider(),
+    )

@@ -166,28 +166,54 @@ class NeutralLibrary:
         candidate = Path(source)
         selected_name = filename or candidate.name
         journal = self.begin(operation_id, selected_name)
-        stage = Path(journal.staging_path)
         try:
-            if candidate.is_symlink():
-                raise LibraryError("Un lien symbolique externe ne peut pas devenir canonique")
-            if not candidate.is_file():
-                raise LibraryError("Le fichier source est absent")
-            if same_filesystem(candidate, self.staging_root):
-                os.link(candidate, stage)
-            else:
-                shutil.copy2(candidate, stage)
-            journal.bytes_written = stage.stat().st_size
-            return self._commit_staged(
+            return self.stage_file(
                 journal,
-                identity=ArtifactIdentity("provisional", source="local-import"),
+                candidate,
                 family=family,
+                identity=ArtifactIdentity("provisional", source="local-import"),
                 origin=origin,
                 revision=revision,
-                format_name=None,
             )
         except BaseException as exc:
             self._fail(journal, exc)
             raise
+
+    def stage_file(
+        self,
+        journal: LibraryJournal,
+        source: str | Path,
+        *,
+        family: str,
+        identity: ArtifactIdentity,
+        origin: str,
+        revision: str | None = None,
+        format_name: str | None = None,
+    ) -> LibraryRecord:
+        """Link or copy one exact native artifact into an already-journaled operation."""
+
+        family = _family(family)
+        candidate = Path(source)
+        stage = Path(journal.staging_path)
+        if candidate.is_symlink():
+            raise LibraryError("Un lien symbolique externe ne peut pas devenir canonique")
+        if not candidate.is_file():
+            raise LibraryError("Le fichier source est absent")
+        if stage.exists():
+            raise LibraryError("Le staging contient déjà un fichier")
+        if same_filesystem(candidate, self.staging_root):
+            os.link(candidate, stage)
+        else:
+            shutil.copy2(candidate, stage)
+        journal.bytes_written = stage.stat().st_size
+        return self.commit_staged(
+            journal,
+            family=family,
+            identity=identity,
+            origin=origin,
+            revision=revision,
+            format_name=format_name,
+        )
 
     def commit_staged(
         self,

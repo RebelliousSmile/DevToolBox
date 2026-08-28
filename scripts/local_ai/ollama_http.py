@@ -113,3 +113,37 @@ def request_json(
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise OllamaHttpError("ollama-payload-invalid", "invalid-json") from exc
+
+
+def open_stream(
+    endpoint: str,
+    method: str,
+    path: str,
+    *,
+    payload: Mapping[str, object] | None = None,
+    opener: Opener | None = None,
+    timeout: float = REQUEST_TIMEOUT_SECONDS,
+):
+    """Open a bounded streaming response using the same guarded transport policy."""
+
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint + path,
+        data=body,
+        method=method,
+        headers={"Content-Type": "application/json"} if body is not None else {},
+    )
+    try:
+        transport = _LOCAL_OPENER.open if opener is None else opener
+        response = transport(request, timeout=timeout)
+        status = getattr(response, "status", None) or response.getcode()
+        if status != 200:
+            response.close()
+            raise OllamaHttpError("ollama-http-error", f"HTTP {status}", status=status)
+        return response
+    except OllamaHttpError:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise OllamaHttpError("ollama-http-error", str(exc), status=exc.code) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise OllamaHttpError("ollama-transport-error", str(exc)) from exc

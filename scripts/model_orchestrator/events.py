@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
 import re
+import signal
+import subprocess
+import sys
+import threading
+import time
 from dataclasses import asdict
+from dataclasses import dataclass
+from typing import Mapping, Sequence
 from typing import Callable
 
 from .library import redact_origin
@@ -69,3 +78,119 @@ class EventStream:
 
 def schema_header() -> dict[str, object]:
     return {"schema_version": SCHEMA_VERSION, "protocol": "acquisition-ndjson"}
+
+
+@dataclass(frozen=True)
+class ChildResult:
+    returncode: int
+    stdout: tuple[str, ...]
+    stderr: tuple[str, ...]
+    cancelled: bool = False
+    timed_out: bool = False
+
+
+class NativeChildRunner:
+    """Own a native provider process group and terminate its descendants on exit."""
+
+    def __init__(self, popen=subprocess.Popen):
+        self._popen = popen
+
+    def run(
+        self,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        on_stdout=lambda _line: None,
+        cancelled=lambda: False,
+        timeout_seconds: float = 3600.0,
+    ) -> ChildResult:
+        options = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "env": dict(env),
+        }
+        if sys.platform == "win32":
+            options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            options["start_new_session"] = True
+        process = self._popen(list(command), **options)
+        messages: queue.Queue[tuple[str, str | None]] = queue.Queue()
+
+        def read_stream(name: str, stream) -> None:
+            try:
+                for line in iter(stream.readline, ""):
+                    messages.put((name, line.rstrip("\r\n")))
+            finally:
+                messages.put((name, None))
+
+        threads = [
+            threading.Thread(target=read_stream, args=("stdout", process.stdout), daemon=True),
+            threading.Thread(target=read_stream, args=("stderr", process.stderr), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        stdout: list[str] = []
+        stderr: list[str] = []
+        completed_streams = 0
+        started = time.monotonic()
+        was_cancelled = False
+        timed_out = False
+        while process.poll() is None or completed_streams < 2:
+            if process.poll() is None and cancelled():
+                was_cancelled = True
+                self.terminate_tree(process)
+            if process.poll() is None and time.monotonic() - started >= timeout_seconds:
+                timed_out = True
+                self.terminate_tree(process)
+            try:
+                name, line = messages.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if line is None:
+                completed_streams += 1
+            elif name == "stdout":
+                stdout.append(line)
+                try:
+                    on_stdout(line)
+                except BaseException:
+                    self.terminate_tree(process)
+                    raise
+            else:
+                stderr.append(line)
+        returncode = process.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+        process.stdout.close()
+        process.stderr.close()
+        return ChildResult(
+            returncode,
+            tuple(stdout),
+            tuple(stderr),
+            cancelled=was_cancelled,
+            timed_out=timed_out,
+        )
+
+    @staticmethod
+    def terminate_tree(process) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if sys.platform == "win32":
+                process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        timeout=5,
+                        check=False,
+                    )
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except (OSError, subprocess.SubprocessError):
+                process.kill()

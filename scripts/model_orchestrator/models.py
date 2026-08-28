@@ -270,6 +270,10 @@ class AcquisitionOffer:
     temporary_bytes: int | None = None
     resume_supported: bool = False
     identity_evidence: str = "unknown"
+    owner_tool: str | None = None
+    export_method: str | None = None
+    duplicate_allocation_avoided: bool = False
+    retirement_supported: bool = False
 
     def __post_init__(self) -> None:
         if self.family not in FAMILIES:
