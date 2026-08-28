@@ -83,12 +83,26 @@ class AdapterCapabilities:
 
 
 @dataclass(frozen=True)
+class RootEvidence:
+    path: str
+    source: str
+    confidence: str
+
+    def __post_init__(self) -> None:
+        if not self.path or not self.source:
+            raise ValueError("root evidence requires path and source")
+        if self.confidence not in CONFIDENCE_LEVELS:
+            raise ValueError(f"invalid confidence: {self.confidence}")
+
+
+@dataclass(frozen=True)
 class ToolInstallation:
     tool: str
     detected: bool
     version: str | None = None
     executable: str | None = None
     roots: tuple[str, ...] = ()
+    root_evidence: tuple[RootEvidence, ...] = ()
     discovery_source: str = "unknown"
     confidence: str = "unknown"
     capabilities: AdapterCapabilities = field(default_factory=AdapterCapabilities)

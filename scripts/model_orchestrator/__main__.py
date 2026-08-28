@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from .catalog import build_snapshot
+from .catalog import build_snapshot, inventory_snapshot
 from .models import Artifact, ArtifactIdentity, SCHEMA_VERSION
 
 
@@ -14,6 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("schema", help="afficher la version du schéma JSON")
     subparsers.add_parser("fixture", help="émettre un catalogue déterministe de contrat")
+    subparsers.add_parser("inventory", help="inventorier les modèles locaux sans mutation")
     return parser
 
 
@@ -21,6 +22,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "schema":
         print(json.dumps({"schema_version": SCHEMA_VERSION}, sort_keys=True))
+        return 0
+    if args.command == "inventory":
+        print(json.dumps(inventory_snapshot().to_dict(), ensure_ascii=False, sort_keys=True))
         return 0
     artifact = Artifact(
         artifact_id="fixture-gguf",

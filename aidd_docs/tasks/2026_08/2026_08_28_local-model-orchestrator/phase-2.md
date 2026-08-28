@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Instruction: Inventory Ollama, Jan, LM Studio, and ComfyUI

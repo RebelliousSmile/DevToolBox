@@ -56,3 +56,34 @@ def build_snapshot(
         source_errors=sorted(list(source_errors), key=lambda item: (item.source, item.code)),
         warnings=sorted(set(warnings)),
     )
+
+
+def inventory_snapshot(*, context=None, adapters=None, generated_at: str | None = None) -> CatalogSnapshot:
+    """Run adapters independently and retain every successful partial observation."""
+
+    from .adapters import AdapterContext, builtin_adapters
+
+    selected_context = AdapterContext() if context is None else context
+    selected_adapters = builtin_adapters() if adapters is None else tuple(adapters)
+    artifacts: list[Artifact] = []
+    installations: list[ToolInstallation] = []
+    errors: list[SourceError] = []
+    warnings: list[str] = []
+    for adapter in selected_adapters:
+        try:
+            observation = adapter.inventory(selected_context)
+        except Exception as exc:  # One third-party/native source must not erase the catalog.
+            errors.append(SourceError(adapter.name, "adapter-failed", str(exc)))
+            continue
+        installations.append(observation.installation)
+        artifacts.extend(observation.artifacts)
+        errors.extend(observation.errors)
+        warnings.extend(observation.warnings)
+    return build_snapshot(
+        platform=selected_context.platform_name,
+        artifacts=artifacts,
+        installations=installations,
+        source_errors=errors,
+        warnings=warnings,
+        generated_at=generated_at,
+    )
