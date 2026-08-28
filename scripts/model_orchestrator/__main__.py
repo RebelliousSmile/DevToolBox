@@ -68,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("schema", help="afficher la version du schéma JSON")
     subparsers.add_parser("fixture", help="émettre un catalogue déterministe de contrat")
+    event_fixture = subparsers.add_parser(
+        "event-fixture", help="émettre un flux NDJSON déterministe de contrat"
+    )
+    event_fixture.add_argument("--operation-id", default="fixture-operation")
+    cancel_fixture = subparsers.add_parser(
+        "cancel-fixture", help="attendre une annulation en possédant un descendant"
+    )
+    cancel_fixture.add_argument("--operation-id", default="fixture-cancel")
     subparsers.add_parser("inventory", help="inventorier les modèles locaux sans mutation")
     settings = subparsers.add_parser("settings", help="afficher ou modifier la bibliothèque locale")
     settings.add_argument("--set-library-root")
@@ -156,6 +164,36 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "inventory":
         print(json.dumps(_fresh_model_snapshot().to_dict(), ensure_ascii=False, sort_keys=True))
         return 0
+    if args.command == "event-fixture":
+        from .events import EventStream
+
+        stream = EventStream(args.operation_id, sys.stdout.write, clock=lambda: 0.0)
+        stream.progress(512, 1024)
+        stream.progress(1024, 1024)
+        stream.completed("fixture-gguf")
+        return 0
+    if args.command == "cancel-fixture":
+        from .events import EventStream, NativeChildRunner
+
+        cancel_file = Path(os.environ["DEVTOOLBOX_MODEL_CANCEL_FILE"])
+        stream = EventStream(args.operation_id, sys.stdout.write)
+        result = NativeChildRunner().run(
+            (
+                sys.executable,
+                "-c",
+                "import subprocess,sys,time; "
+                "subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                "time.sleep(60)",
+            ),
+            env=os.environ,
+            cancelled=cancel_file.is_file,
+            timeout_seconds=20,
+        )
+        if result.cancelled:
+            stream.cancelled()
+            return 1
+        stream.failed("Le fixture d'annulation n'a pas été annulé.")
+        return 1
     platform_name = "windows" if sys.platform == "win32" else "linux"
     if args.command == "settings":
         settings = load_settings(platform_name=platform_name, env=os.environ)

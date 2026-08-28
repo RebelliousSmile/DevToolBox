@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from scripts.model_orchestrator.catalog import build_snapshot
 from scripts.model_orchestrator.models import Artifact, ArtifactIdentity, SourceError, ToolReference
+from scripts.model_orchestrator.providers import builtin_providers
 
 
 class CatalogContractTests(unittest.TestCase):
@@ -75,6 +79,32 @@ class CatalogContractTests(unittest.TestCase):
         second = subprocess.check_output(command, text=True)
         self.assertEqual(first, second)
         self.assertEqual(json.loads(first)["schema_version"], 1)
+
+    def test_cli_event_fixture_is_deterministic_ndjson(self) -> None:
+        output = subprocess.check_output(
+            [
+                sys.executable,
+                "-m",
+                "scripts.model_orchestrator",
+                "event-fixture",
+                "--operation-id",
+                "fixture-op",
+            ],
+            text=True,
+        )
+        events = [json.loads(line) for line in output.splitlines()]
+        self.assertEqual([row["sequence"] for row in events], [1, 2, 3, 4])
+        self.assertEqual(events[-1]["kind"], "completed")
+        self.assertTrue(all(row["operation_id"] == "fixture-op" for row in events))
+
+    def test_builtin_providers_observe_the_bridge_cancel_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "cancel.flag"
+            with mock.patch.dict("os.environ", {"DEVTOOLBOX_MODEL_CANCEL_FILE": str(marker)}):
+                providers = builtin_providers()
+                self.assertFalse(all(provider._cancelled() for provider in providers))
+                marker.write_text("cancel\n", encoding="utf-8")
+                self.assertTrue(all(provider._cancelled() for provider in providers))
 
 
 if __name__ == "__main__":

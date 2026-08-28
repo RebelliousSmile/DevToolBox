@@ -21,6 +21,7 @@ flowchart TD
         ASSETS["src/assets/ - custom icons"]
         APPMOD["src/applications/ - process matching and usage history"]
         PYRUN["src/python_runtime.rs - bundled Python resolution"]
+        MODELS["src/models/ - typed async local-model protocol bridge"]
         RUNNER["src/command_runner.rs - spawn/capture/timeout, shared by docker + net"]
         NETMOD["src/net.rs - host listening ports (netstat / ss)"]
     end
@@ -31,6 +32,7 @@ flowchart TD
     MAIN --> STOREMOD
     UIMOD --> APPMOD
     UIMOD --> PYRUN
+    PYRUN --> MODELS
 ```
 
 ## Standalone scripts (`scripts/`)
@@ -70,6 +72,11 @@ caller-neutral loopback transport shared by that inventory and `winclean`;
 each caller translates technical failures into its own domain. The orchestrator
 otherwise remains separate from `winclean`: inventory and migration never imply
 that an artifact is safe to delete.
+The Rust `models/` bridge mirrors schema v1 tolerantly while rejecting protocol
+drift, mismatched operations, non-monotone progress, and duplicate terminals.
+Its background workers keep inventory responsive, serialize model mutations,
+bound stderr, and route cancellation through Python so provider descendants
+stop before the authoritative terminal event reaches the application.
 
 `app_recommendations/` is the read-only multi-OS application report: stable models
 and score in `models.py`/`scoring.py`, aggregation in `report.py`, APT/Snap/Flatpak

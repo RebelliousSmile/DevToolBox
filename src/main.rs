@@ -12,6 +12,7 @@ mod command_runner;
 mod docker;
 mod icons;
 mod linux;
+mod models;
 mod net;
 mod platform;
 mod process_flags;

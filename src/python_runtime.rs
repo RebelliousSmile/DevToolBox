@@ -79,6 +79,48 @@ pub fn recommendation_command(history_path: &Path) -> Result<Command, String> {
     recommendation_command_from_root(root, history_path)
 }
 
+/// Construct a UTF-8, piped invocation of the local-model orchestrator.
+pub fn model_orchestrator_command<I, S>(arguments: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    model_orchestrator_command_from_root(action_root(), arguments)
+}
+
+fn model_orchestrator_command_from_root<I, S>(
+    root: PathBuf,
+    arguments: I,
+) -> Result<Command, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let module_entry = root
+        .join("scripts")
+        .join("model_orchestrator")
+        .join("__main__.py");
+    if !module_entry.is_file() {
+        return Err(format!(
+            "module Python model_orchestrator introuvable sous {}",
+            root.display()
+        ));
+    }
+    let interpreter = python_for_script(&module_entry);
+    let mut command = Command::new(interpreter);
+    command
+        .args(["-m", "scripts.model_orchestrator"])
+        .args(arguments)
+        .current_dir(root)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console_window(&mut command);
+    Ok(command)
+}
+
 fn recommendation_command_from_root(root: PathBuf, history_path: &Path) -> Result<Command, String> {
     let module_entry = root
         .join("scripts")
@@ -148,6 +190,19 @@ mod tests {
             .unwrap()
             .join("scripts/system_inventory/__init__.py")
             .is_file());
+    }
+
+    #[test]
+    fn model_orchestrator_command_is_utf8_piped_and_rooted() {
+        let command = model_orchestrator_command(["fixture"]).unwrap();
+        assert!(command
+            .get_args()
+            .any(|argument| argument == "scripts.model_orchestrator"));
+        assert!(command.get_args().any(|argument| argument == "fixture"));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "PYTHONIOENCODING"
+                && value == Some(std::ffi::OsStr::new("utf-8"))));
     }
 
     #[test]

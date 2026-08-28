@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Protocol
 
 from ..events import EventStream
@@ -34,9 +36,11 @@ def builtin_providers():
     from .lm_studio import LMStudioProvider
     from .ollama import OllamaProvider
 
+    cancel_path = os.environ.get("DEVTOOLBOX_MODEL_CANCEL_FILE")
+    cancelled = (lambda: Path(cancel_path).is_file()) if cancel_path else (lambda: False)
     return (
-        HuggingFaceProvider(),
-        DirectProvider(),
-        OllamaProvider(),
-        LMStudioProvider(),
+        HuggingFaceProvider(cancelled=cancelled),
+        DirectProvider(cancelled=cancelled),
+        OllamaProvider(cancelled=cancelled),
+        LMStudioProvider(cancelled=cancelled),
     )
