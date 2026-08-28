@@ -16,6 +16,8 @@ VALIDATION_LEVELS = frozenset({"strong", "structural", "opaque", "failed"})
 JOURNAL_STATES = frozenset(
     {"staging", "committing", "completed", "resumable", "discardable", "manual-attention"}
 )
+PROVIDER_STATES = frozenset({"available", "unavailable", "unauthenticated", "error"})
+EVENT_KINDS = frozenset({"schema", "progress", "completed", "failed", "cancelled"})
 
 
 def _non_negative(value: int | None, field_name: str) -> None:
@@ -223,6 +225,106 @@ class LibraryRecord:
             raise ValueError(f"invalid artifact family: {self.family}")
         _non_negative(self.logical_size, "logical_size")
         _non_negative(self.allocated_size, "allocated_size")
+
+
+@dataclass(frozen=True)
+class AcquisitionRequest:
+    primary_locator: str
+    family: str
+    alternatives: tuple[str, ...] = ()
+    user_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.primary_locator:
+            raise ValueError("primary locator is required")
+        if self.family not in FAMILIES:
+            raise ValueError(f"invalid artifact family: {self.family}")
+
+
+@dataclass(frozen=True)
+class ProviderStatus:
+    provider: str
+    state: str
+    version: str | None = None
+    authenticated: bool | None = None
+    guidance: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.state not in PROVIDER_STATES:
+            raise ValueError(f"invalid provider state: {self.state}")
+
+
+@dataclass(frozen=True)
+class AcquisitionOffer:
+    provider: str
+    locator: str
+    family: str
+    immutable_revision: str | None
+    filename: str
+    format: str
+    trusted_digest: str | None = None
+    executable: bool = True
+    conversion_required: bool = False
+    network_bytes: int | None = None
+    local_copy_bytes: int | None = 0
+    temporary_bytes: int | None = None
+    resume_supported: bool = False
+    identity_evidence: str = "unknown"
+
+    def __post_init__(self) -> None:
+        if self.family not in FAMILIES:
+            raise ValueError(f"invalid artifact family: {self.family}")
+        _non_negative(self.network_bytes, "network_bytes")
+        _non_negative(self.local_copy_bytes, "local_copy_bytes")
+        _non_negative(self.temporary_bytes, "temporary_bytes")
+        if self.conversion_required and self.executable:
+            raise ValueError("conversion-required offers are not executable in v1")
+
+    @property
+    def exact_group_key(self) -> tuple[str, str, str, str] | None:
+        if not self.immutable_revision or not self.trusted_digest:
+            return None
+        return (
+            self.immutable_revision,
+            self.filename,
+            self.format,
+            self.trusted_digest,
+        )
+
+
+@dataclass(frozen=True)
+class AcquisitionPlan:
+    operation_id: str
+    offer: AcquisitionOffer
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    sequence: int
+    kind: str
+    operation_id: str
+    transferred_bytes: int | None = None
+    total_bytes: int | None = None
+    message: str | None = None
+    artifact_id: str | None = None
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.kind not in EVENT_KINDS:
+            raise ValueError(f"invalid event kind: {self.kind}")
+        _non_negative(self.sequence, "sequence")
+        _non_negative(self.transferred_bytes, "transferred_bytes")
+        _non_negative(self.total_bytes, "total_bytes")
+
+
+@dataclass(frozen=True)
+class AcquisitionResult:
+    operation_id: str
+    provider: str
+    record: LibraryRecord | None
+    error_code: str | None = None
+    message: str | None = None
 
 
 @dataclass

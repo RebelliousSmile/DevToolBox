@@ -42,6 +42,9 @@ progressive content identity, path-safety primitives, a journaled neutral
 library with bounded non-executing format validation, and read-only adapters
 for Ollama, Jan, LM Studio, and ComfyUI. Machine-local library settings live
 below the platform data root and never relocate existing artifacts implicitly.
+Exact acquisitions are resolved in `download.py`; `providers/` currently owns
+Hugging Face/Xet and guarded direct HTTPS transports, while `events.py` emits
+their schema-versioned NDJSON progress without persisting signed URL queries.
 `local_ai/ollama_http.py` is the narrow
 caller-neutral loopback transport shared by that inventory and `winclean`;
 each caller translates technical failures into its own domain. The orchestrator

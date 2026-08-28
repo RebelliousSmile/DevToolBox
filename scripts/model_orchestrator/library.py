@@ -189,6 +189,57 @@ class NeutralLibrary:
             self._fail(journal, exc)
             raise
 
+    def commit_staged(
+        self,
+        journal: LibraryJournal,
+        *,
+        family: str,
+        identity: ArtifactIdentity,
+        origin: str,
+        revision: str | None = None,
+        format_name: str | None = None,
+    ) -> LibraryRecord:
+        """Commit bytes written directly by a provider without another allocation."""
+
+        family = _family(family)
+        try:
+            journal.bytes_written = Path(journal.staging_path).stat().st_size
+            return self._commit_staged(
+                journal,
+                identity=identity,
+                family=family,
+                origin=origin,
+                revision=revision,
+                format_name=format_name,
+            )
+        except BaseException as exc:
+            self._fail(journal, exc)
+            raise
+
+    def fail(self, journal: LibraryJournal, error: BaseException) -> None:
+        self._fail(journal, error)
+
+    def update_journal(
+        self, journal: LibraryJournal, *, state: str, error: str | None = None
+    ) -> LibraryJournal:
+        journal.state = state
+        journal.error = error
+        journal.updated_at = _now()
+        if Path(journal.staging_path).is_file():
+            journal.bytes_written = Path(journal.staging_path).stat().st_size
+        self._write_journal(journal)
+        return journal
+
+    def load_journal(self, operation_id: str) -> LibraryJournal | None:
+        operation_id = _exact(operation_id, "operation_id")
+        path = self.staging_root / operation_id / "journal.json"
+        try:
+            return LibraryJournal(**json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            return None
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LibraryError(f"Journal illisible : {exc}") from exc
+
     def _commit_staged(
         self,
         journal: LibraryJournal,

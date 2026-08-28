@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Instruction: Download through Hugging Face/Xet and direct HTTPS
