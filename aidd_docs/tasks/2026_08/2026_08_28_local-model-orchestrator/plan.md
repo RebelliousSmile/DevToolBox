@@ -1,6 +1,6 @@
 ---
 objective: "DevToolBox inventories, downloads, shares, and validates local AI model artifacts across Ollama, Jan, LM Studio, and ComfyUI on Windows and Linux without required conversion or durable duplication, and retires only sources with a proven native-safe path."
-status: in-progress
+status: implemented
 ---
 
 # Plan: Cross-platform local model orchestrator
