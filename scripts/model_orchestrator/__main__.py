@@ -7,11 +7,26 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
+from .adapters.lm_studio import LMSCliMigrationBackend, LMStudioMigrationDriver
+from .adapters.ollama import OllamaApiMigrationBackend, OllamaMigrationDriver
 from .catalog import build_snapshot, inventory_snapshot
 from .download import create_plan, execute_plan, public_offer, resolve_request
 from .library import NeutralLibrary
-from .models import AcquisitionRequest, Artifact, ArtifactIdentity, SCHEMA_VERSION
+from .migration import MigrationExecutor, create_migration_plan, revalidate_plan
+from .models import (
+    AcquisitionRequest,
+    AdapterCapabilities,
+    Artifact,
+    ArtifactIdentity,
+    LibraryRecord,
+    MigrationPlan,
+    RootEvidence,
+    SCHEMA_VERSION,
+    ToolInstallation,
+    ValidationEvidence,
+)
 from .providers import builtin_providers
 from .providers.direct import ProviderError
 from .settings import ModelSettings, load_settings, save_settings
@@ -41,6 +56,21 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--operation-id", required=True)
     download.add_argument("--root")
     download.add_argument("--sha256")
+    migration_plan = subparsers.add_parser("migration-plan", help="figer un plan de migration")
+    migration_plan.add_argument("--source-record", required=True)
+    migration_plan.add_argument("--destination-installation", required=True)
+    migration_plan.add_argument("--plan-id", required=True)
+    migration_plan.add_argument("--destination-root", required=True)
+    migration_plan.add_argument("--native-id", required=True)
+    migration_plan.add_argument("--target-path")
+    migration_plan.add_argument("--out")
+    migration_validate = subparsers.add_parser("migration-validate", help="revalider un plan")
+    migration_validate.add_argument("--plan", required=True)
+    migration_validate.add_argument("--destination-installation", required=True)
+    migration_apply = subparsers.add_parser("migration-apply", help="appliquer un plan figé")
+    migration_apply.add_argument("--plan", required=True)
+    migration_apply.add_argument("--destination-installation", required=True)
+    migration_apply.add_argument("--journal-root", required=True)
     return parser
 
 
@@ -108,6 +138,43 @@ def main(argv: list[str] | None = None) -> int:
             write_event=sys.stdout.write,
         )
         return 0 if result.record is not None else 1
+    if args.command == "migration-plan":
+        source = _library_record(Path(args.source_record))
+        destination = _installation(Path(args.destination_installation))
+        plan = create_migration_plan(
+            plan_id=args.plan_id,
+            source=source,
+            destination=destination,
+            destination_root=args.destination_root,
+            destination_native_id=args.native_id,
+            target_path=args.target_path,
+        )
+        rendered = json.dumps(asdict(plan), ensure_ascii=False, sort_keys=True) + "\n"
+        if args.out:
+            Path(args.out).write_text(rendered, encoding="utf-8")
+        else:
+            sys.stdout.write(rendered)
+        return 0
+    if args.command in {"migration-validate", "migration-apply"}:
+        plan_payload = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+        plan_payload["capabilities"] = tuple(plan_payload.get("capabilities", ()))
+        plan = MigrationPlan(**plan_payload)
+        destination = _installation(Path(args.destination_installation))
+        if args.command == "migration-validate":
+            revalidate_plan(plan, destination)
+            print(json.dumps({"valid": True, "plan_id": plan.plan_id}, sort_keys=True))
+            return 0
+        if plan.destination_tool == "ollama":
+            driver = OllamaMigrationDriver(OllamaApiMigrationBackend())
+        elif plan.destination_tool == "lm-studio":
+            driver = LMStudioMigrationDriver(LMSCliMigrationBackend())
+        else:
+            raise ValueError("Destination de migration non prise en charge")
+        result = MigrationExecutor(args.journal_root).apply(
+            plan, destination=destination, driver=driver
+        )
+        print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+        return 0 if result.success else 1
     if args.command != "fixture":
         raise AssertionError(f"commande non traitée : {args.command}")
     artifact = Artifact(
@@ -127,6 +194,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True))
     return 0
+
+
+def _library_record(path: Path) -> LibraryRecord:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    identity = ArtifactIdentity(**payload.pop("identity"))
+    validation = ValidationEvidence(**payload.pop("validation"))
+    return LibraryRecord(identity=identity, validation=validation, **payload)
+
+
+def _installation(path: Path) -> ToolInstallation:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["capabilities"] = AdapterCapabilities(**payload.get("capabilities", {}))
+    payload["roots"] = tuple(payload.get("roots", ()))
+    payload["root_evidence"] = tuple(
+        RootEvidence(**row) for row in payload.get("root_evidence", ())
+    )
+    return ToolInstallation(**payload)
 
 
 if __name__ == "__main__":

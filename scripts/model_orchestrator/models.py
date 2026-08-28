@@ -331,6 +331,69 @@ class AcquisitionResult:
     message: str | None = None
 
 
+@dataclass(frozen=True)
+class MigrationValidation:
+    identity: str = "not-run"
+    catalog: str = "not-run"
+    load: str = "not-run"
+    inference: str = "not-run"
+    destination_digest: str | None = None
+    message: str | None = None
+
+    def __post_init__(self) -> None:
+        allowed = {"not-run", "passed", "failed", "unavailable"}
+        for name in ("identity", "catalog", "load", "inference"):
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"invalid validation state for {name}")
+
+
+@dataclass
+class MigrationStep:
+    step_id: str
+    kind: str
+    target: str
+    rollback_kind: str | None
+    state: str = "planned"
+    created_by_operation: bool = False
+    created_allocation_id: str | None = None
+    created_size: int | None = None
+    created_mtime_ns: int | None = None
+
+
+@dataclass(frozen=True)
+class MigrationPlan:
+    plan_id: str
+    source_artifact_id: str
+    source_path: str
+    source_sha256: str
+    source_size: int
+    source_mtime_ns: int
+    destination_tool: str
+    destination_version: str | None
+    destination_root: str
+    destination_native_id: str
+    target_path: str | None
+    method: str
+    free_bytes: int
+    temporary_bytes: int
+    allocated_bytes: int
+    validation_level: str
+    capabilities: tuple[str, ...]
+    created_at: str
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    plan_id: str
+    success: bool
+    steps: tuple[MigrationStep, ...]
+    validation: MigrationValidation
+    retirement_eligible: bool = False
+    confirmation_token: str | None = None
+    error_code: str | None = None
+    message: str | None = None
+
+
 @dataclass
 class CatalogSnapshot:
     generated_at: str

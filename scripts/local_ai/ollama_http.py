@@ -81,7 +81,7 @@ def request_json(
     method: str,
     path: str,
     *,
-    payload: Mapping[str, str] | None = None,
+    payload: Mapping[str, object] | None = None,
     opener: Opener | None = None,
     timeout: float = REQUEST_TIMEOUT_SECONDS,
 ) -> Any:

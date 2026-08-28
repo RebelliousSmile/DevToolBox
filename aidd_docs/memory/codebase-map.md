@@ -48,6 +48,11 @@ LM Studio download/export transports. Native exports require exact owned paths
 and verified identities; otherwise the downloaded artifact stays tool-owned.
 `events.py` emits their schema-versioned NDJSON progress without persisting
 signed URL queries and owns cancellable child process groups.
+`migration.py` freezes and revalidates source identity, destination ownership,
+disk cost, and supported methods before delegating to the documented Ollama or
+LM Studio migration drivers. Migration journals and allocation evidence bound
+rollback to operation-created resources; success never creates deletion
+authority.
 `local_ai/ollama_http.py` is the narrow
 caller-neutral loopback transport shared by that inventory and `winclean`;
 each caller translates technical failures into its own domain. The orchestrator
