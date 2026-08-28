@@ -21,6 +21,7 @@ flowchart TD
         ASSETS["src/assets/ - custom icons"]
         APPMOD["src/applications/ - process matching and usage history"]
         PYRUN["src/python_runtime.rs - bundled Python resolution"]
+        MODELS["src/models/ - typed async local-model protocol bridge"]
         RUNNER["src/command_runner.rs - spawn/capture/timeout, shared by docker + net"]
         NETMOD["src/net.rs - host listening ports (netstat / ss)"]
     end
@@ -31,11 +32,56 @@ flowchart TD
     MAIN --> STOREMOD
     UIMOD --> APPMOD
     UIMOD --> PYRUN
+    PYRUN --> MODELS
+    UIMOD --> MODELS
 ```
 
 ## Standalone scripts (`scripts/`)
 
 Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx), `winclean/` (dry-run-first disk cleaner; imports `system_inventory` as its **read-only** discovery layer and must never modify it — see `memory/internal/decisions/winclean-separate-package.md`).
+
+`model_orchestrator/` owns the schema-versioned local-AI artifact catalog,
+progressive content identity, path-safety primitives, a journaled neutral
+library with bounded non-executing format validation, and read-only adapters
+for Ollama, Jan, LM Studio, and ComfyUI. Machine-local library settings live
+below the platform data root and never relocate existing artifacts implicitly.
+Exact acquisitions are resolved in `download.py`; `providers/` currently owns
+Hugging Face/Xet, guarded direct HTTPS, native Ollama pull/export, and native
+LM Studio download/export transports. Native exports require exact owned paths
+and verified identities; otherwise the downloaded artifact stays tool-owned.
+`events.py` emits their schema-versioned NDJSON progress without persisting
+signed URL queries and owns cancellable child process groups.
+`migration.py` freezes and revalidates source identity, destination ownership,
+disk cost, and supported methods before delegating to the documented Ollama or
+LM Studio migration drivers. Migration journals and allocation evidence bound
+rollback to operation-created resources; success never creates deletion
+authority.
+Jan and ComfyUI integrations use persisted guided checkpoints when public
+non-interactive surfaces are insufficient. Jan metadata and arbitrary ComfyUI
+YAML are never rewritten; ComfyUI may instead consume one separately owned YAML
+through a documented DevToolBox launch hook. Visibility-only completion remains
+weak and never retirement-eligible.
+Machine-local terminal observations are bounded in `history.py` and feed the
+deterministic recommendation policy in `ranking.py`; automatic fallback is
+limited to the same trusted content identity. `operations.py` exposes only
+capability-proven recovery actions on revalidated owned paths. `retirement.py`
+keeps deletion narrower still: v1 can retire only an unprotected, strongly
+validated Ollama owner reference through a short-lived state-bound token, then
+reports the remeasured freed space.
+`local_ai/ollama_http.py` is the narrow
+caller-neutral loopback transport shared by that inventory and `winclean`;
+each caller translates technical failures into its own domain. The orchestrator
+otherwise remains separate from `winclean`: inventory and migration never imply
+that an artifact is safe to delete.
+The Rust `models/` bridge mirrors schema v1 tolerantly while rejecting protocol
+drift, mismatched operations, non-monotone progress, and duplicate terminals.
+Its background workers keep inventory responsive, serialize model mutations,
+bound stderr, and route cancellation through Python so provider descendants
+stop before the authoritative terminal event reaches the application.
+`ui/models_view.rs` renders the permanent Catalog, Download, Operations and
+Settings workspace as pure state and intents. `ui/egui_app.rs` owns its channels,
+reviewed-offer digest, cancellation handle and stranded-library confirmation;
+every terminal operation refreshes the authoritative Python catalog.
 
 `app_recommendations/` is the read-only multi-OS application report: stable models
 and score in `models.py`/`scoring.py`, aggregation in `report.py`, APT/Snap/Flatpak

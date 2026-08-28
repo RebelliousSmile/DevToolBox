@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 import unittest
-from unittest import mock
 
+from scripts.local_ai.ollama_http import OllamaHttpError
 from scripts.winclean import mod_ollama
 from scripts.winclean.common import (
     SKIP_GONE,
@@ -36,12 +34,6 @@ class Response:
         return self.status
 
 
-class RawResponse(Response):
-    def __init__(self, body: bytes, status: int = 200) -> None:
-        self.status = status
-        self._body = body
-
-
 class QueueOpener:
     def __init__(self, *responses: object) -> None:
         self.responses = list(responses)
@@ -63,19 +55,18 @@ def running(*names: str) -> dict:
     return {"models": [{"name": name, "size": 1} for name in names]}
 
 
-class EndpointTest(unittest.TestCase):
-    def test_default_and_supported_loopback_forms_are_canonical(self) -> None:
-        self.assertEqual(
-            mod_ollama.normalise_endpoint({}), "http://127.0.0.1:11434"
+class EndpointTranslationTest(unittest.TestCase):
+    def test_shared_technical_errors_keep_winclean_codes_and_french_messages(self) -> None:
+        cases = (
+            (OllamaHttpError("ollama-endpoint-remote", "remote"), "localhost"),
+            (OllamaHttpError("ollama-http-error", "failed", status=503), "503"),
+            (OllamaHttpError("ollama-transport-error", "down"), "Impossible de joindre"),
+            (OllamaHttpError("ollama-payload-invalid", "invalid-json"), "JSON invalide"),
         )
-        self.assertEqual(
-            mod_ollama.normalise_endpoint({"OLLAMA_HOST": "localhost"}),
-            "http://localhost:11434",
-        )
-        self.assertEqual(
-            mod_ollama.normalise_endpoint({"OLLAMA_HOST": "http://[::1]:9999/"}),
-            "http://[::1]:9999",
-        )
+        for technical, expected in cases:
+            translated = mod_ollama._translate_http_error(technical)
+            self.assertEqual(translated.code, technical.code)
+            self.assertIn(expected, str(translated))
 
     def test_unsafe_endpoint_is_rejected_before_the_opener_is_called(self) -> None:
         unsafe = (
@@ -98,34 +89,6 @@ class EndpointTest(unittest.TestCase):
                         opener=opener,
                     )
                 self.assertEqual(opener.requests, [])
-
-    def test_production_opener_ignores_environment_proxies(self) -> None:
-        with mock.patch.object(
-            urllib.request,
-            "getproxies",
-            return_value={"http": "http://remote.invalid:9999"},
-        ) as getproxies:
-            opener = mod_ollama._build_local_opener()
-        getproxies.assert_not_called()
-        proxy_handlers = [
-            handler
-            for handler in opener.handlers
-            if isinstance(handler, urllib.request.ProxyHandler)
-        ]
-        self.assertEqual(proxy_handlers, [])
-
-    def test_production_opener_rejects_redirects(self) -> None:
-        handler = mod_ollama._RejectRedirects()
-        request = urllib.request.Request("http://127.0.0.1:11434/api/tags")
-        with self.assertRaises(urllib.error.HTTPError):
-            handler.redirect_request(
-                request,
-                None,
-                302,
-                "Found",
-                {},
-                "http://remote.invalid/api/tags",
-            )
 
 
 class DiscoveryTest(unittest.TestCase):
@@ -154,11 +117,9 @@ class DiscoveryTest(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, code)
 
-    def test_transport_and_invalid_payload_are_typed(self) -> None:
+    def test_shared_transport_and_domain_payload_errors_are_translated(self) -> None:
         cases = (
-            (urllib.error.URLError("down"), "ollama-transport-error"),
             (Response({}), "ollama-payload-invalid"),
-            (RawResponse(b"not-json"), "ollama-payload-invalid"),
             (Response({"models": [{"name": "a"}]}), "ollama-payload-invalid"),
             (Response({"models": [{"name": "a", "size": -1}]}), "ollama-payload-invalid"),
             (Response(tags(("a", 1), ("a", 2))), "ollama-payload-duplicate"),

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import json
-import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
-from urllib.parse import urlsplit
+
+from scripts.local_ai.ollama_http import (
+    REQUEST_TIMEOUT_SECONDS,
+    OllamaHttpError,
+    normalize_endpoint,
+    request_json,
+)
 
 from scripts.winclean.common import (
     SKIP_GONE,
@@ -24,35 +26,8 @@ from scripts.winclean.common import (
     sum_known,
 )
 
-DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
 MODULE_NAME = "ollama-models"
-DEFAULT_PORT = 11434
-REQUEST_TIMEOUT_SECONDS = 5.0
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _Opener = Callable[..., Any]
-
-
-class _RejectRedirects(urllib.request.HTTPRedirectHandler):
-    """Interdit qu'une origine loopback redirige la requête hors de la machine."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(
-            req.full_url, code, "Redirection Ollama interdite.", headers, fp
-        )
-
-
-def _build_local_opener():
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _RejectRedirects(),
-    )
-
-
-_LOCAL_OPENER = _build_local_opener()
-
-
-def _local_urlopen(request, *, timeout):
-    return _LOCAL_OPENER.open(request, timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -63,44 +38,10 @@ class ModelInfo:
 
 def normalise_endpoint(env: Mapping[str, str] | None = None) -> str:
     """Rend une origine HTTP loopback canonique ou refuse avant tout réseau."""
-    environment = os.environ if env is None else env
-    raw = environment.get("OLLAMA_HOST", DEFAULT_ENDPOINT).strip()
-    if not raw:
-        raise ModuleDiscoveryError("ollama-endpoint-invalid", "OLLAMA_HOST est vide.")
-    candidate = raw if "://" in raw else f"http://{raw}"
     try:
-        parsed = urlsplit(candidate)
-        port = parsed.port
-    except ValueError as exc:
-        raise ModuleDiscoveryError(
-            "ollama-endpoint-invalid", f"Adresse Ollama invalide : {exc}."
-        ) from exc
-    if parsed.scheme.lower() != "http":
-        raise ModuleDiscoveryError(
-            "ollama-endpoint-unsafe", "Seul HTTP vers une adresse locale est autorisé."
-        )
-    if not parsed.netloc or parsed.username is not None or parsed.password is not None:
-        raise ModuleDiscoveryError(
-            "ollama-endpoint-invalid", "L'adresse Ollama ne doit contenir aucun identifiant."
-        )
-    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise ModuleDiscoveryError(
-            "ollama-endpoint-invalid",
-            "L'adresse Ollama doit être une origine sans chemin, requête ni fragment.",
-        )
-    if parsed.netloc.endswith(":"):
-        raise ModuleDiscoveryError("ollama-endpoint-invalid", "Le port Ollama est manquant.")
-    host = (parsed.hostname or "").lower()
-    if host not in _LOOPBACK_HOSTS:
-        raise ModuleDiscoveryError(
-            "ollama-endpoint-remote",
-            "L'adresse Ollama doit désigner localhost, 127.0.0.1 ou ::1.",
-        )
-    selected_port = DEFAULT_PORT if port is None else port
-    if not 1 <= selected_port <= 65535:
-        raise ModuleDiscoveryError("ollama-endpoint-invalid", "Le port Ollama est invalide.")
-    rendered_host = f"[{host}]" if host == "::1" else host
-    return f"http://{rendered_host}:{selected_port}"
+        return normalize_endpoint(env)
+    except OllamaHttpError as exc:
+        raise _translate_http_error(exc) from exc
 
 
 def _request_json(
@@ -111,40 +52,33 @@ def _request_json(
     payload: Mapping[str, str] | None = None,
     opener: _Opener | None = None,
 ) -> Any:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint + path,
-        data=body,
-        method=method,
-        headers={"Content-Type": "application/json"} if body is not None else {},
-    )
     try:
-        transport = _local_urlopen if opener is None else opener
-        with transport(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            status = getattr(response, "status", None)
-            if status is None:
-                status = response.getcode()
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        raise ModuleDiscoveryError(
-            "ollama-http-error", f"Ollama a répondu avec le statut HTTP {exc.code}."
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ModuleDiscoveryError(
-            "ollama-transport-error", f"Impossible de joindre Ollama localement : {exc}."
-        ) from exc
-    if status != 200:
-        raise ModuleDiscoveryError(
-            "ollama-http-error", f"Ollama a répondu avec le statut HTTP {status}."
-        )
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ModuleDiscoveryError(
-            "ollama-payload-invalid", "Ollama a renvoyé une réponse JSON invalide."
-        ) from exc
+        return request_json(endpoint, method, path, payload=payload, opener=opener)
+    except OllamaHttpError as exc:
+        raise _translate_http_error(exc) from exc
+
+
+def _translate_http_error(error: OllamaHttpError) -> ModuleDiscoveryError:
+    if error.code == "ollama-endpoint-unsafe":
+        message = "Seul HTTP vers une adresse locale est autorisé."
+    elif error.code == "ollama-endpoint-remote":
+        message = "L'adresse Ollama doit désigner localhost, 127.0.0.1 ou ::1."
+    elif error.code == "ollama-http-error":
+        message = f"Ollama a répondu avec le statut HTTP {error.status}."
+    elif error.code == "ollama-transport-error":
+        message = f"Impossible de joindre Ollama localement : {error.detail}."
+    elif error.code == "ollama-payload-invalid":
+        message = "Ollama a renvoyé une réponse JSON invalide."
+    else:
+        endpoint_messages = {
+            "empty-host": "OLLAMA_HOST est vide.",
+            "credentials-or-origin-invalid": "L'adresse Ollama ne doit contenir aucun identifiant.",
+            "origin-has-components": "L'adresse Ollama doit être une origine sans chemin, requête ni fragment.",
+            "missing-port": "Le port Ollama est manquant.",
+            "invalid-port": "Le port Ollama est invalide.",
+        }
+        message = endpoint_messages.get(error.detail, f"Adresse Ollama invalide : {error.detail}.")
+    return ModuleDiscoveryError(error.code, message)
 
 
 def _model_rows(payload: Any, *, require_size: bool) -> dict[str, ModelInfo]:

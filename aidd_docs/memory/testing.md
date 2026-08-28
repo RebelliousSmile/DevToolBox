@@ -25,7 +25,23 @@ This document outlines the testing strategy for DevToolBox.
 - Run system-inventory script tests: `python -m unittest discover -s scripts/system_inventory/tests -v`
 - Run application-recommendation tests: `python3 -m unittest discover -s scripts/app_recommendations/tests -p 'test_*.py'`
 - Run winclean script tests: `python -m unittest discover -s scripts/winclean/tests -t .` — the `-t .` is required: the package bootstraps its imports from the repo root, so discovery from elsewhere fails to import `scripts.winclean`
+- Run local-model orchestrator tests: `python3 -m unittest discover -s scripts/model_orchestrator/tests`
 - Release build sanity: `cargo build --release`
+
+## Local-model delivery matrix
+
+- Linux/local CI: the Python suite, Python-generated schema/event fixtures parsed
+  by Rust, `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`,
+  `cargo test`, and `cargo build --release`.
+- Pure egui tests cover the empty/partial catalog, filters, verified cache
+  recommendation, manual priority, busy/interrupted/guided/protected/stale
+  explanations, and the permanent Models navigation entry without touching a
+  provider or model.
+- Windows manual gate: `%LOCALAPPDATA%` defaults, custom volumes, junction/reparse
+  refusal, Ollama/HF/LM native CLIs, Jan/LM settings discovery, hidden-console
+  UTF-8 pipes, and cooperative cancellation that leaves no provider descendant.
+- Distribution gate: ship `scripts/model_orchestrator` and `scripts/local_ai`
+  beside the binary resources, or set `DEVTOOLBOX_HOME` to their parent root.
 
 ## Application report matrix
 
