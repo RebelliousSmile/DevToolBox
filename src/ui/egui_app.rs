@@ -91,6 +91,10 @@ use crate::icons::egui_backend::EguiIconBackend;
 #[cfg(not(target_os = "linux"))]
 use crate::icons::resolve_icon;
 use crate::icons::{decode_resize_file, icons_dirs, IconResolution};
+use crate::models::{
+    self, AcquisitionOffer, CancelHandle, CatalogSnapshot, ModelSettings, ModelWorkerEvent,
+    ProgressEvent,
+};
 use crate::storage::{self, CommandResolution, Config, MachineCommands, StorageError};
 use crate::ui::applications_view::{self, ApplicationFilters};
 use crate::ui::automations_view::{self, AutomationRow};
@@ -105,6 +109,7 @@ use crate::ui::docker_view::{
     SelectionKey,
 };
 use crate::ui::icon_picker;
+use crate::ui::models_view::{self, ModelsAction, ModelsUiState, ModelsViewState};
 use crate::ui::port_plan;
 use crate::ui::terminal_view::{self, TerminalEvent};
 
@@ -785,6 +790,7 @@ enum ActiveView {
     Terminal,
     Automations,
     Cleanup,
+    Models,
     Docker,
     Preferences,
 }
@@ -797,6 +803,18 @@ enum ActiveView {
 enum CleanupJob {
     Analyze,
     Clean(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelsJob {
+    Inventory,
+    Resolve,
+    Download,
+    SettingsRead,
+    SettingsWrite,
+    RecoveryRead,
+    RecoveryWrite,
+    GuidedWrite,
 }
 
 /// An action deferred behind a confirm dialog — applied by
@@ -813,6 +831,22 @@ enum PendingAction {
     RemoveCommand(String),
     RemoveCommandGroup(String),
     CleanModule(String),
+    SaveModelSettings {
+        root: String,
+        provider_order: String,
+        enabled_providers: String,
+        xet_enabled: bool,
+        keep_patterns: String,
+    },
+    RecoverModelOperation {
+        operation_id: String,
+        action: String,
+    },
+    GuideModel {
+        artifact_id: String,
+        destination: String,
+        category: Option<String>,
+    },
     StopContainer {
         id: String,
         name: String,
@@ -970,6 +1004,19 @@ pub struct EguiApp {
     /// Same test-gating pattern as `report_spawning_enabled`: kittest
     /// harness tests never spawn a real python process.
     cleanup_spawning_enabled: bool,
+    models_ui: ModelsUiState,
+    models_snapshot: Option<CatalogSnapshot>,
+    models_offers: Vec<AcquisitionOffer>,
+    models_progress: Vec<ProgressEvent>,
+    models_recovery: Vec<models::LibraryJournal>,
+    models_guided: Option<models::GuidedMigration>,
+    models_terminal: Option<ProgressEvent>,
+    models_error: Option<String>,
+    models_job: Option<ModelsJob>,
+    models_cancel: Option<CancelHandle>,
+    models_tx: Sender<ModelWorkerEvent>,
+    models_rx: Receiver<ModelWorkerEvent>,
+    models_spawning_enabled: bool,
     /// Per-machine command overrides, loaded once at startup (Part 3) via
     /// `storage::load_machine_commands_from(platform::machine_commands_path())`.
     /// A missing file or load error both fall back to an empty map — this
@@ -1217,6 +1264,7 @@ impl EguiApp {
     ) -> Self {
         let (application_tx, application_rx) = std::sync::mpsc::channel();
         let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel();
+        let (models_tx, models_rx) = std::sync::mpsc::channel();
         Self {
             config,
             config_path,
@@ -1256,6 +1304,19 @@ impl EguiApp {
             cleanup_rx,
             cleanup_last_runs: HashMap::new(),
             cleanup_spawning_enabled: report_spawning_enabled,
+            models_ui: ModelsUiState::default(),
+            models_snapshot: None,
+            models_offers: Vec::new(),
+            models_progress: Vec::new(),
+            models_recovery: Vec::new(),
+            models_guided: None,
+            models_terminal: None,
+            models_error: None,
+            models_job: None,
+            models_cancel: None,
+            models_tx,
+            models_rx,
+            models_spawning_enabled: report_spawning_enabled,
             machine_commands,
             machine_id,
             docker_available,
@@ -1287,7 +1348,10 @@ impl EguiApp {
     /// at a time, whatever launched it — Actions card, Terminal, or a
     /// `clean.py` run).
     fn command_busy(&self) -> bool {
-        self.action_running.is_some() || self.terminal_running || self.cleanup_job.is_some()
+        self.action_running.is_some()
+            || self.terminal_running
+            || self.cleanup_job.is_some()
+            || self.models_job.is_some()
     }
 
     fn start_cleanup_analysis(&mut self) {
@@ -1375,6 +1439,294 @@ impl EguiApp {
                         }
                     }
                 },
+            }
+        }
+    }
+
+    fn refresh_models(&mut self) {
+        self.models_job = Some(ModelsJob::Inventory);
+        self.models_error = None;
+        if self.models_spawning_enabled {
+            models::spawn_inventory(self.models_tx.clone());
+        }
+    }
+
+    fn refresh_model_recovery(&mut self) {
+        if self.models_ui.library_root.trim().is_empty() {
+            return;
+        }
+        self.models_job = Some(ModelsJob::RecoveryRead);
+        if self.models_spawning_enabled {
+            models::spawn_query(
+                vec![
+                    "recovery".to_string(),
+                    "--root".to_string(),
+                    self.models_ui.library_root.clone(),
+                ],
+                self.models_tx.clone(),
+            );
+        }
+    }
+
+    fn drain_model_events(&mut self) {
+        let mut events = Vec::new();
+        while let Ok(event) = self.models_rx.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            match event {
+                ModelWorkerEvent::Inventory(result) => {
+                    self.models_job = None;
+                    match result {
+                        Ok(snapshot) => {
+                            self.models_snapshot = Some(snapshot);
+                            self.models_error = None;
+                            if self.models_ui.library_root.is_empty()
+                                && self.models_spawning_enabled
+                            {
+                                self.models_job = Some(ModelsJob::SettingsRead);
+                                models::spawn_query(
+                                    vec!["settings".to_string()],
+                                    self.models_tx.clone(),
+                                );
+                            } else {
+                                self.refresh_model_recovery();
+                            }
+                        }
+                        Err(error) => self.models_error = Some(error),
+                    }
+                }
+                ModelWorkerEvent::Json(result) => {
+                    let job = self.models_job.take();
+                    match (job, result) {
+                        (Some(ModelsJob::Resolve), Ok(value)) => {
+                            match serde_json::from_value::<Vec<AcquisitionOffer>>(value) {
+                                Ok(mut offers) => {
+                                    let manual = self.models_ui.manual_provider.trim();
+                                    if !manual.is_empty() {
+                                        offers.sort_by_key(|offer| offer.provider != manual);
+                                    }
+                                    self.models_offers = offers;
+                                    self.models_ui.selected_offer = None;
+                                    self.models_error = None;
+                                }
+                                Err(error) => {
+                                    self.models_error =
+                                        Some(format!("offres modèles invalides: {error}"));
+                                }
+                            }
+                        }
+                        (
+                            Some(job @ (ModelsJob::SettingsRead | ModelsJob::SettingsWrite)),
+                            Ok(value),
+                        ) => match serde_json::from_value::<ModelSettings>(value) {
+                            Ok(settings) => {
+                                self.models_ui.library_root = settings.library_root;
+                                self.models_ui.provider_order = settings.provider_order.join(",");
+                                self.models_ui.enabled_providers =
+                                    settings.enabled_providers.join(",");
+                                self.models_ui.xet_enabled = settings.xet_enabled;
+                                self.models_ui.keep_pattern = settings.keep_patterns.join(",");
+                                self.models_error = None;
+                                if job == ModelsJob::SettingsWrite {
+                                    self.refresh_models();
+                                } else {
+                                    self.refresh_model_recovery();
+                                }
+                            }
+                            Err(error) => {
+                                self.models_error =
+                                    Some(format!("réglages modèles invalides: {error}"));
+                            }
+                        },
+                        (Some(ModelsJob::RecoveryRead), Ok(value)) => {
+                            match serde_json::from_value::<Vec<models::LibraryJournal>>(value) {
+                                Ok(recovery) => {
+                                    self.models_recovery = recovery;
+                                    self.models_error = None;
+                                }
+                                Err(error) => {
+                                    self.models_error =
+                                        Some(format!("journaux modèles invalides: {error}"));
+                                }
+                            }
+                        }
+                        (Some(ModelsJob::RecoveryWrite), Ok(_)) => self.refresh_models(),
+                        (Some(ModelsJob::GuidedWrite), Ok(value)) => {
+                            match serde_json::from_value::<models::GuidedMigration>(value) {
+                                Ok(guided) => {
+                                    self.models_guided = Some(guided);
+                                    self.models_ui.section = models_view::ModelsSection::Operations;
+                                    self.models_error = None;
+                                }
+                                Err(error) => {
+                                    self.models_error =
+                                        Some(format!("intégration guidée invalide: {error}"));
+                                }
+                            }
+                        }
+                        (_, Err(error)) => self.models_error = Some(error),
+                        (_, Ok(_)) => {
+                            self.models_error =
+                                Some("réponse modèles reçue pour un job inattendu".to_string());
+                        }
+                    }
+                }
+                ModelWorkerEvent::Progress(event) => self.models_progress.push(event),
+                ModelWorkerEvent::Terminal(result) => {
+                    self.models_job = None;
+                    self.models_cancel = None;
+                    match result {
+                        Ok(event) => {
+                            if event.kind != "completed" {
+                                self.models_error = event.message.clone();
+                            }
+                            self.models_terminal = Some(event);
+                        }
+                        Err(error) => self.models_error = Some(error),
+                    }
+                    if self.models_spawning_enabled {
+                        self.refresh_models();
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_models_action(&mut self, action: ModelsAction) {
+        match action {
+            ModelsAction::Refresh => self.refresh_models(),
+            ModelsAction::Resolve => {
+                self.models_job = Some(ModelsJob::Resolve);
+                self.models_error = None;
+                let mut arguments = vec![
+                    "resolve".to_string(),
+                    self.models_ui.locator.trim().to_string(),
+                    "--family".to_string(),
+                    self.models_ui.family.clone(),
+                ];
+                for alternative in self
+                    .models_ui
+                    .alternatives
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    arguments.push("--alternative".to_string());
+                    arguments.push(alternative.to_string());
+                }
+                if self.models_spawning_enabled {
+                    models::spawn_query(arguments, self.models_tx.clone());
+                }
+            }
+            ModelsAction::Review(index) => self.models_ui.selected_offer = Some(index),
+            ModelsAction::RunReviewed => {
+                let Some(offer) = self
+                    .models_ui
+                    .selected_offer
+                    .and_then(|index| self.models_offers.get(index))
+                    .cloned()
+                else {
+                    self.models_error = Some("Aucun plan exact revu.".to_string());
+                    return;
+                };
+                let Some(digest) = offer.review_digest.clone() else {
+                    self.models_error =
+                        Some("Le plan revu n'a pas de digest immuable.".to_string());
+                    return;
+                };
+                let millis = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let operation_id = format!("ui-download-{millis}");
+                let mut arguments = vec![
+                    "download".to_string(),
+                    offer.locator,
+                    "--family".to_string(),
+                    offer.family,
+                    "--operation-id".to_string(),
+                    operation_id.clone(),
+                    "--review-digest".to_string(),
+                    digest,
+                ];
+                if !self.models_ui.library_root.trim().is_empty() {
+                    arguments.push("--root".to_string());
+                    arguments.push(self.models_ui.library_root.clone());
+                }
+                self.models_progress.clear();
+                self.models_terminal = None;
+                self.models_error = None;
+                self.models_job = Some(ModelsJob::Download);
+                self.models_ui.section = models_view::ModelsSection::Operations;
+                if self.models_spawning_enabled {
+                    self.models_cancel = Some(models::spawn_operation(
+                        operation_id,
+                        arguments,
+                        self.models_tx.clone(),
+                    ));
+                }
+            }
+            ModelsAction::Cancel => {
+                if let Some(cancel) = &self.models_cancel {
+                    if let Err(error) = cancel.cancel() {
+                        self.models_error = Some(error);
+                    }
+                }
+            }
+            ModelsAction::Recover {
+                operation_id,
+                action,
+            } => {
+                self.active_dialog = Some(ActiveDialog {
+                    kind: dialogs::confirm(
+                        "Récupérer l'opération ?",
+                        format!(
+                            "Appliquer « {action} » uniquement au staging possédé de l'opération exacte « {operation_id} » ?"
+                        ),
+                    ),
+                    on_confirm: Some(PendingAction::RecoverModelOperation {
+                        operation_id,
+                        action,
+                    }),
+                });
+            }
+            ModelsAction::Guide {
+                artifact_id,
+                destination,
+                category,
+            } => {
+                self.active_dialog = Some(ActiveDialog {
+                    kind: dialogs::confirm(
+                        "Préparer l'intégration guidée ?",
+                        format!(
+                            "Préparer l'artefact exact « {artifact_id} » pour {destination} ?\nAucun fichier tiers ne sera réécrit automatiquement."
+                        ),
+                    ),
+                    on_confirm: Some(PendingAction::GuideModel {
+                        artifact_id,
+                        destination,
+                        category,
+                    }),
+                });
+            }
+            ModelsAction::SaveSettings => {
+                let root = self.models_ui.library_root.clone();
+                self.active_dialog = Some(ActiveDialog {
+                    kind: dialogs::confirm(
+                        "Changer de bibliothèque ?",
+                        format!(
+                            "Utiliser « {root} » pour les prochains artefacts ?\nLes fichiers existants ne seront ni déplacés ni supprimés.",
+                        ),
+                    ),
+                    on_confirm: Some(PendingAction::SaveModelSettings {
+                        root,
+                        provider_order: self.models_ui.provider_order.clone(),
+                        enabled_providers: self.models_ui.enabled_providers.clone(),
+                        xet_enabled: self.models_ui.xet_enabled,
+                        keep_patterns: self.models_ui.keep_pattern.clone(),
+                    }),
+                });
             }
         }
     }
@@ -1822,6 +2174,101 @@ impl EguiApp {
                 self.cleanup_job = Some(CleanupJob::Clean(module.clone()));
                 if self.cleanup_spawning_enabled {
                     cleanup::spawn_clean(&module, self.cleanup_generation, self.cleanup_tx.clone());
+                }
+            }
+            PendingAction::SaveModelSettings {
+                root,
+                provider_order,
+                enabled_providers,
+                xet_enabled,
+                keep_patterns,
+            } => {
+                if self.command_busy() {
+                    self.models_error =
+                        Some("Une autre commande est active; réglage non modifié.".to_string());
+                    return;
+                }
+                self.models_job = Some(ModelsJob::SettingsWrite);
+                if self.models_spawning_enabled {
+                    models::spawn_json_mutation(
+                        vec![
+                            "settings".to_string(),
+                            "--set-library-root".to_string(),
+                            root,
+                            "--set-provider-order".to_string(),
+                            provider_order,
+                            "--set-enabled-providers".to_string(),
+                            enabled_providers,
+                            if xet_enabled {
+                                "--xet-enabled".to_string()
+                            } else {
+                                "--no-xet-enabled".to_string()
+                            },
+                            "--set-keep-patterns".to_string(),
+                            keep_patterns,
+                        ],
+                        self.models_tx.clone(),
+                    );
+                }
+            }
+            PendingAction::RecoverModelOperation {
+                operation_id,
+                action,
+            } => {
+                if self.command_busy() {
+                    self.models_error =
+                        Some("Une autre commande est active; reprise non appliquée.".to_string());
+                    return;
+                }
+                self.models_job = Some(ModelsJob::RecoveryWrite);
+                if self.models_spawning_enabled {
+                    models::spawn_json_mutation(
+                        vec![
+                            "recover".to_string(),
+                            "--root".to_string(),
+                            self.models_ui.library_root.clone(),
+                            "--operation-id".to_string(),
+                            operation_id,
+                            "--action".to_string(),
+                            action.clone(),
+                            "--capability".to_string(),
+                            action,
+                        ],
+                        self.models_tx.clone(),
+                    );
+                }
+            }
+            PendingAction::GuideModel {
+                artifact_id,
+                destination,
+                category,
+            } => {
+                if self.command_busy() {
+                    self.models_error = Some(
+                        "Une autre commande est active; intégration non préparée.".to_string(),
+                    );
+                    return;
+                }
+                let millis = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let mut arguments = vec![
+                    "guided-start".to_string(),
+                    "--artifact-id".to_string(),
+                    artifact_id,
+                    "--destination".to_string(),
+                    destination,
+                    "--migration-id".to_string(),
+                    format!("ui-guided-{millis}"),
+                ];
+                if let Some(category) = category {
+                    arguments.push("--category".to_string());
+                    arguments.push(category);
+                }
+                self.models_job = Some(ModelsJob::GuidedWrite);
+                if self.models_spawning_enabled {
+                    models::spawn_json_mutation(arguments, self.models_tx.clone());
                 }
             }
             // Docker actions never run here — a plain `docker stop` can
@@ -2936,6 +3383,7 @@ impl EguiApp {
         self.drain_action_events();
         self.drain_application_events();
         self.drain_cleanup_events();
+        self.drain_model_events();
         self.drain_compose_events();
         self.drain_scan_events();
         if self.compose_running || self.compose_scanning {
@@ -2947,6 +3395,10 @@ impl EguiApp {
         if self.cleanup_job.is_some() {
             // Same polling rationale as `terminal_running` below: the
             // cleanup thread's events only land on a repaint.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self.models_job.is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -2974,6 +3426,7 @@ impl EguiApp {
                 "Automatisations",
             );
             ui.selectable_value(&mut self.active_view, ActiveView::Cleanup, "Nettoyage");
+            ui.selectable_value(&mut self.active_view, ActiveView::Models, "Modèles");
             // Hidden entirely (not just disabled) when the `docker` binary
             // isn't on PATH — risk register: "tab button rendered only when
             // `docker_available`".
@@ -3002,8 +3455,27 @@ impl EguiApp {
             ActiveView::Terminal => self.render_terminal_view(ui),
             ActiveView::Automations => self.render_automations_view(ui),
             ActiveView::Cleanup => self.render_cleanup_view(ui),
+            ActiveView::Models => self.render_models_view(ui),
             ActiveView::Docker => self.render_docker_view(ui),
             ActiveView::Preferences => self.render_preferences_view(ui),
+        }
+    }
+
+    fn render_models_view(&mut self, ui: &mut egui::Ui) {
+        let state = ModelsViewState {
+            snapshot: self.models_snapshot.as_ref(),
+            offers: &self.models_offers,
+            progress: &self.models_progress,
+            recovery: &self.models_recovery,
+            guided: self.models_guided.as_ref(),
+            terminal: self.models_terminal.as_ref(),
+            error: self.models_error.as_deref(),
+            loading: self.models_job == Some(ModelsJob::Inventory),
+            busy: self.models_job.is_some(),
+        };
+        let actions = models_view::render(ui, &state, &mut self.models_ui);
+        for action in actions {
+            self.handle_models_action(action);
         }
     }
 
@@ -7076,6 +7548,70 @@ mod tests {
         harness.step();
         assert_eq!(harness.state().docker_action_invocations, 1);
         assert!(harness.state().active_dialog.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn models_tab_is_permanent_and_empty_state_never_spawns_in_tests() {
+        let (app, dir) = cleanup_test_app("models-tab-empty");
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1100.0, 760.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+        harness.run();
+        harness.get_by_label("Modèles").click();
+        harness.run();
+        assert!(harness.query_by_label("DevToolBox — Modèles").is_some());
+        assert!(harness
+            .query_by_label_contains("Aucun inventaire chargé")
+            .is_some());
+        assert!(harness.state().models_job.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn model_download_requires_and_preserves_the_review_digest() {
+        let (mut app, dir) = cleanup_test_app("models-reviewed-download");
+        app.models_offers.push(AcquisitionOffer {
+            provider: "direct".into(),
+            locator: "https://example.test/model.gguf".into(),
+            family: "llm".into(),
+            filename: "model.gguf".into(),
+            format: "gguf".into(),
+            executable: true,
+            review_digest: Some("a".repeat(64)),
+            ..Default::default()
+        });
+        app.models_ui.selected_offer = Some(0);
+        app.handle_models_action(ModelsAction::RunReviewed);
+        assert_eq!(app.models_job, Some(ModelsJob::Download));
+        assert_eq!(
+            app.models_ui.section,
+            models_view::ModelsSection::Operations
+        );
+
+        app.models_job = None;
+        app.models_offers[0].review_digest = None;
+        app.handle_models_action(ModelsAction::RunReviewed);
+        assert!(app
+            .models_error
+            .as_deref()
+            .is_some_and(|error| error.contains("digest")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn changing_model_library_is_blocked_by_an_explicit_dialog() {
+        let (mut app, dir) = cleanup_test_app("models-library-dialog");
+        app.models_ui.library_root = "/data/models".into();
+        app.handle_models_action(ModelsAction::SaveSettings);
+        assert!(matches!(
+            app.active_dialog,
+            Some(ActiveDialog {
+                on_confirm: Some(PendingAction::SaveModelSettings { .. }),
+                ..
+            })
+        ));
+        assert!(app.models_job.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

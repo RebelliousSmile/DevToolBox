@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import sys
 from datetime import datetime, timezone
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .adapters import AdapterContext
@@ -20,7 +21,7 @@ from .adapters.jan import JanAdapter, JanGuidedIntegration
 from .adapters.lm_studio import LMSCliMigrationBackend, LMStudioMigrationDriver
 from .adapters.ollama import OllamaApiMigrationBackend, OllamaMigrationDriver
 from .catalog import build_snapshot, canonical_artifacts, inventory_snapshot
-from .download import create_plan, execute_plan, public_offer, resolve_request
+from .download import create_plan, execute_plan, public_offer, resolve_request, review_digest
 from .library import NeutralLibrary
 from .migration import (
     GuidedMigrationStore,
@@ -60,7 +61,7 @@ from .retirement import (
     RetirementTokenStore,
     create_retirement_plan,
 )
-from .settings import ModelSettings, load_settings, save_settings
+from .settings import ModelSettings, load_settings, save_settings, state_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("inventory", help="inventorier les modèles locaux sans mutation")
     settings = subparsers.add_parser("settings", help="afficher ou modifier la bibliothèque locale")
     settings.add_argument("--set-library-root")
+    settings.add_argument("--set-provider-order")
+    settings.add_argument("--set-enabled-providers")
+    settings.add_argument("--xet-enabled", action=argparse.BooleanOptionalAction, default=None)
+    settings.add_argument("--set-keep-patterns")
     library = subparsers.add_parser("library", help="inspecter les artefacts canoniques")
     library.add_argument("--root")
     recovery = subparsers.add_parser("recovery", help="inspecter les opérations interrompues")
@@ -95,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--operation-id", required=True)
     download.add_argument("--root")
     download.add_argument("--sha256")
+    download.add_argument("--review-digest")
     migration_plan = subparsers.add_parser("migration-plan", help="figer un plan de migration")
     migration_plan.add_argument("--source-record", required=True)
     migration_plan.add_argument("--destination-installation", required=True)
@@ -123,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
     guided_validate = subparsers.add_parser("guided-validate", help="inspecter la condition de reprise")
     guided_validate.add_argument("--journal-root", required=True)
     guided_validate.add_argument("--migration-id", required=True)
+    guided_start = subparsers.add_parser(
+        "guided-start", help="préparer une intégration guidée depuis la bibliothèque"
+    )
+    guided_start.add_argument("--artifact-id", required=True)
+    guided_start.add_argument("--destination", choices=("jan", "comfyui"), required=True)
+    guided_start.add_argument("--migration-id", required=True)
+    guided_start.add_argument("--category")
     recommend = subparsers.add_parser("recommend", help="classer des offres avec l'historique local")
     recommend.add_argument("--offers", required=True)
     recommend.add_argument("--history", required=True)
@@ -197,8 +210,44 @@ def main(argv: list[str] | None = None) -> int:
     platform_name = "windows" if sys.platform == "win32" else "linux"
     if args.command == "settings":
         settings = load_settings(platform_name=platform_name, env=os.environ)
-        if args.set_library_root:
-            settings = ModelSettings(args.set_library_root)
+        if any(
+            value is not None
+            for value in (
+                args.set_library_root,
+                args.set_provider_order,
+                args.set_enabled_providers,
+                args.xet_enabled,
+                args.set_keep_patterns,
+            )
+        ):
+            settings = replace(
+                settings,
+                library_root=args.set_library_root or settings.library_root,
+                provider_order=(
+                    tuple(value.strip() for value in args.set_provider_order.split(","))
+                    if args.set_provider_order is not None
+                    else settings.provider_order
+                ),
+                enabled_providers=(
+                    tuple(
+                        value.strip()
+                        for value in args.set_enabled_providers.split(",")
+                        if value.strip()
+                    )
+                    if args.set_enabled_providers is not None
+                    else settings.enabled_providers
+                ),
+                xet_enabled=(args.xet_enabled if args.xet_enabled is not None else settings.xet_enabled),
+                keep_patterns=(
+                    tuple(
+                        value.strip()
+                        for value in args.set_keep_patterns.split(",")
+                        if value.strip()
+                    )
+                    if args.set_keep_patterns is not None
+                    else settings.keep_patterns
+                ),
+            )
             save_settings(settings, platform_name=platform_name, env=os.environ)
             settings = load_settings(platform_name=platform_name, env=os.environ)
         print(json.dumps(asdict(settings), ensure_ascii=False, sort_keys=True))
@@ -212,15 +261,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([asdict(row) for row in rows], ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "providers":
+        model_settings = load_settings(platform_name=platform_name, env=os.environ)
         print(
             json.dumps(
-                [asdict(provider.status()) for provider in builtin_providers()],
+                [
+                    asdict(provider.status())
+                    for provider in builtin_providers(
+                        enabled=model_settings.enabled_providers,
+                        order=model_settings.provider_order,
+                        xet_enabled=model_settings.xet_enabled,
+                    )
+                ],
                 ensure_ascii=False,
                 sort_keys=True,
             )
         )
         return 0
     if args.command in {"resolve", "download"}:
+        model_settings = load_settings(platform_name=platform_name, env=os.environ)
+        selected_providers = builtin_providers(
+            enabled=model_settings.enabled_providers,
+            order=model_settings.provider_order,
+            xet_enabled=model_settings.xet_enabled,
+        )
         request = AcquisitionRequest(
             args.locator,
             args.family,
@@ -228,14 +291,19 @@ def main(argv: list[str] | None = None) -> int:
             user_sha256=args.sha256,
         )
         try:
-            offers = resolve_request(request)
+            offers = resolve_request(request, selected_providers)
         except ProviderError as exc:
             print(json.dumps({"error_code": exc.code, "message": exc.message}, ensure_ascii=False))
             return 2
         if args.command == "resolve":
+            rows = []
+            for offer in offers:
+                row = asdict(public_offer(offer))
+                row["review_digest"] = review_digest(offer)
+                rows.append(row)
             print(
                 json.dumps(
-                    [asdict(public_offer(offer)) for offer in offers],
+                    rows,
                     ensure_ascii=False,
                     sort_keys=True,
                 )
@@ -244,10 +312,23 @@ def main(argv: list[str] | None = None) -> int:
         selected_root = args.root or load_settings(
             platform_name=platform_name, env=os.environ
         ).library_root
+        selected = offers[0]
+        if args.review_digest:
+            selected = next(
+                (offer for offer in offers if review_digest(offer) == args.review_digest),
+                None,
+            )
+            if selected is None:
+                from .events import EventStream
+
+                stream = EventStream(args.operation_id, sys.stdout.write)
+                stream.failed("L'offre exacte a changé depuis sa revue.")
+                return 2
         result = execute_plan(
-            create_plan(args.operation_id, offers[0]),
+            create_plan(args.operation_id, selected),
             library=NeutralLibrary(selected_root),
             write_event=sys.stdout.write,
+            providers=selected_providers,
         )
         return 0 if result.record is not None else 1
     if args.command == "migration-plan":
@@ -313,6 +394,47 @@ def main(argv: list[str] | None = None) -> int:
             ).prepare(migration, observation)
         print(json.dumps(asdict(migration), ensure_ascii=False, sort_keys=True))
         return 0
+    if args.command == "guided-start":
+        settings = load_settings(platform_name=platform_name, env=os.environ)
+        library = NeutralLibrary(settings.library_root)
+        source = next(
+            (
+                record
+                for record in library.list_records()
+                if record.artifact_id == args.artifact_id
+                or f"library:{record.artifact_id}" == args.artifact_id
+            ),
+            None,
+        )
+        if source is None:
+            raise ValueError("Artefact canonique exact introuvable")
+        operations_root = state_root(platform_name=platform_name, env=os.environ) / "model-operations"
+        store = GuidedMigrationStore(operations_root)
+        migration = store.create(
+            migration_id=args.migration_id,
+            source=source,
+            destination_tool=args.destination,
+            category=args.category,
+        )
+        if args.destination == "jan":
+            JanGuidedIntegration(store).prepare(migration)
+        else:
+            if not args.category:
+                raise ValueError("Une catégorie ComfyUI exacte est requise")
+            config_root = operations_root / "comfy-model-paths"
+            observation = ComfyUIAdapter().inventory(AdapterContext())
+            launch_backend = DevToolBoxComfyLaunchBackend(
+                operations_root / "comfy-launch-hooks.json",
+                flag_supported=os.environ.get(
+                    "DEVTOOLBOX_COMFY_EXTRA_CONFIG_SUPPORTED", ""
+                ).lower()
+                in {"1", "true", "yes"},
+            )
+            ComfyUIGuidedIntegration(store, config_root, launch_backend).prepare(
+                migration, observation
+            )
+        print(json.dumps(asdict(migration), ensure_ascii=False, sort_keys=True))
+        return 0
     if args.command in {"guided-continue", "guided-validate"}:
         store = GuidedMigrationStore(args.journal_root)
         migration = store.load(args.migration_id)
@@ -344,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
         ranked = rank_offers(
             offers,
             HistoryStore(args.history).load(),
+            cold_order=load_settings(platform_name=platform_name, env=os.environ).provider_order,
             manual_provider=args.manual_provider,
         )
         payload = []
@@ -497,11 +620,19 @@ def _migration_result(path: Path) -> MigrationResult:
 def _fresh_model_snapshot() -> CatalogSnapshot:
     snapshot = inventory_snapshot()
     platform_name = "windows" if sys.platform == "win32" else "linux"
-    root = load_settings(platform_name=platform_name, env=os.environ).library_root
+    settings = load_settings(platform_name=platform_name, env=os.environ)
+    root = settings.library_root
     records = NeutralLibrary(root).list_records()
+    artifacts = [*snapshot.artifacts, *canonical_artifacts(records)]
+    for artifact in artifacts:
+        for pattern in settings.keep_patterns:
+            if fnmatch.fnmatch(artifact.artifact_id, pattern) or fnmatch.fnmatch(
+                artifact.path, pattern
+            ):
+                artifact.protection.reasons.append(f"keep:{pattern}")
     return build_snapshot(
         platform=snapshot.platform,
-        artifacts=[*snapshot.artifacts, *canonical_artifacts(records)],
+        artifacts=artifacts,
         installations=snapshot.installations,
         source_errors=snapshot.source_errors,
         warnings=snapshot.warnings,

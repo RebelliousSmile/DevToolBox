@@ -196,6 +196,8 @@ pub struct AcquisitionOffer {
     pub cached_bytes: u64,
     #[serde(default)]
     pub cache_verified: bool,
+    #[serde(default)]
+    pub review_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -294,6 +296,74 @@ pub struct RetirementPlan {
 pub struct ModelSettings {
     #[serde(default)]
     pub library_root: String,
+    #[serde(default)]
+    pub provider_order: Vec<String>,
+    #[serde(default)]
+    pub enabled_providers: Vec<String>,
+    #[serde(default)]
+    pub xet_enabled: bool,
+    #[serde(default)]
+    pub keep_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LibraryJournal {
+    #[serde(default)]
+    pub operation_id: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub staging_path: String,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub artifact_id: Option<String>,
+    #[serde(default)]
+    pub bytes_written: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ManualStep {
+    #[serde(default)]
+    pub step_id: String,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub destination_tool: String,
+    #[serde(default)]
+    pub documented_action: String,
+    #[serde(default)]
+    pub expected_reference: String,
+    #[serde(default)]
+    pub resume_condition: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GuidedMigration {
+    #[serde(default)]
+    pub migration_id: String,
+    #[serde(default)]
+    pub source_artifact_id: String,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub destination_tool: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub manual_step: Option<ManualStep>,
+    #[serde(default)]
+    pub validation: MigrationValidation,
+    #[serde(default)]
+    pub retirement_eligible: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

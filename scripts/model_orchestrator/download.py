@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
+import json
 import time
 from typing import Iterable
 
@@ -135,3 +137,15 @@ def public_offer(offer: AcquisitionOffer) -> AcquisitionOffer:
 
     locator = redact_origin(offer.locator) if offer.locator.startswith(("http://", "https://")) else offer.locator
     return replace(offer, locator=locator)
+
+
+def review_digest(offer: AcquisitionOffer) -> str:
+    """Bind execution to the exact public offer that was reviewed."""
+
+    payload = json.dumps(
+        public_offer(offer).__dict__,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()

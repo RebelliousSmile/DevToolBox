@@ -17,6 +17,7 @@ from scripts.model_orchestrator.download import (
     create_plan,
     execute_plan,
     public_offer,
+    review_digest,
 )
 from scripts.model_orchestrator.events import EventStream
 from scripts.model_orchestrator.library import NeutralLibrary
@@ -401,6 +402,23 @@ class HuggingFaceProviderTests(unittest.TestCase):
             "https://example.test/model.gguf?token=secret",
         )
         self.assertEqual(public_offer(offer).locator, "https://example.test/model.gguf")
+
+    def test_review_digest_is_stable_but_binds_exact_offer(self) -> None:
+        offer = AcquisitionOffer(
+            "direct",
+            "https://example.test/model.gguf?token=secret",
+            "llm",
+            "revision",
+            "model.gguf",
+            "gguf",
+            trusted_digest="a" * 64,
+        )
+        self.assertEqual(review_digest(offer), review_digest(offer))
+        self.assertNotEqual(review_digest(offer), review_digest(replace(offer, filename="other.gguf")))
+        self.assertEqual(
+            review_digest(offer),
+            review_digest(replace(offer, locator="https://example.test/model.gguf?token=other")),
+        )
 
 
 if __name__ == "__main__":

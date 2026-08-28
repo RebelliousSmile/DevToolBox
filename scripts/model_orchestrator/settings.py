@@ -14,12 +14,28 @@ from typing import Mapping
 from .paths import PathSafetyError, normalize_absolute_path
 
 SETTINGS_SCHEMA_VERSION = 1
+DEFAULT_PROVIDER_ORDER = ("ollama", "huggingface", "lm-studio", "direct")
+KNOWN_PROVIDERS = frozenset(DEFAULT_PROVIDER_ORDER)
 
 
 @dataclass(frozen=True)
 class ModelSettings:
     library_root: str
+    provider_order: tuple[str, ...] = DEFAULT_PROVIDER_ORDER
+    enabled_providers: tuple[str, ...] = DEFAULT_PROVIDER_ORDER
+    xet_enabled: bool = True
+    keep_patterns: tuple[str, ...] = ()
     schema_version: int = SETTINGS_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if set(self.provider_order) != KNOWN_PROVIDERS or len(self.provider_order) != len(
+            KNOWN_PROVIDERS
+        ):
+            raise ValueError("provider_order doit contenir chaque fournisseur exactement une fois")
+        if not set(self.enabled_providers).issubset(KNOWN_PROVIDERS):
+            raise ValueError("enabled_providers contient un fournisseur inconnu")
+        if not isinstance(self.xet_enabled, bool):
+            raise ValueError("xet_enabled doit être booléen")
 
 
 def state_root(*, platform_name: str, env: Mapping[str, str]) -> Path:
@@ -68,7 +84,20 @@ def load_settings(*, platform_name: str, env: Mapping[str, str] | None = None) -
     if not isinstance(root, str):
         raise ValueError("library_root est requis")
     normalized = normalize_absolute_path(root, platform_name=platform_name, env=environment)
-    return ModelSettings(normalized)
+    provider_order = tuple(payload.get("provider_order", DEFAULT_PROVIDER_ORDER))
+    enabled = tuple(payload.get("enabled_providers", DEFAULT_PROVIDER_ORDER))
+    keep_patterns = tuple(
+        value
+        for value in payload.get("keep_patterns", ())
+        if isinstance(value, str) and value.strip()
+    )
+    return ModelSettings(
+        normalized,
+        provider_order=provider_order,
+        enabled_providers=enabled,
+        xet_enabled=payload.get("xet_enabled", True),
+        keep_patterns=keep_patterns,
+    )
 
 
 def validate_library_root(
@@ -110,7 +139,15 @@ def save_settings(
     )
     path = settings_path(platform_name=platform_name, env=environment)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = asdict(ModelSettings(normalized))
+    payload = asdict(
+        ModelSettings(
+            normalized,
+            provider_order=settings.provider_order,
+            enabled_providers=settings.enabled_providers,
+            xet_enabled=settings.xet_enabled,
+            keep_patterns=settings.keep_patterns,
+        )
+    )
     descriptor, temporary = tempfile.mkstemp(prefix="model-settings-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:

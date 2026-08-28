@@ -40,6 +40,12 @@
   the first report supplies unambiguous executable targets. It stores per-app
   `tracked_since`/`last_seen` plus daily successful-sample counts at the OS-local
   state path. It does not store a process timeline.
+- **Local model orchestration**: `scripts/model_orchestrator` owns inventory,
+  exact acquisition, neutral-library commits, migrations, recovery, ranking and
+  Ollama-only retirement. `src/models/` is the schema-v1 asynchronous bridge;
+  `src/ui/models_view.rs` is a pure data-in/intents-out Models view. Python owns
+  provider/filesystem decisions, while egui owns review, blocking confirmation
+  and presentation state.
 
 ```mermaid
 flowchart LR
@@ -52,6 +58,8 @@ flowchart LR
     UI -->|async JSON schema v1| PYREC[Python recommendation package]
     PYREC --> LOCAL[Local package metadata only]
     UI --> USAGE[Privacy-limited usage history]
+    UI -->|async JSON and NDJSON schema v1| PYMODELS[Local model orchestrator]
+    PYMODELS --> LOCALMODELS[Ollama, Jan, LM Studio, ComfyUI, neutral library]
     WINAPI --> REG[Registry Run Keys - startup]
     STDPROC --> XDG[XDG autostart .desktop - startup]
 ```
@@ -129,6 +137,22 @@ Four consequences bind any script exposed either way:
   (`src/python_runtime.rs`), always qualifies. An accented character (app
   name, size label, …) then comes out as raw Latin-1 bytes instead of UTF-8,
   which `serde_json::from_slice`/`from_str` reject outright.
+
+## Local-model mutation boundary
+
+The Models tab is permanent even when no provider is installed. Inventory and
+queries run on background threads; one process-local mutation slot serializes
+downloads and settings changes. A reviewed offer carries a Python-computed digest
+of its public canonical fields. Download re-resolves it and refuses changed
+content before writing. NDJSON parsing rejects schema drift, operation-id
+mismatch, regressing bytes, malformed lines and events after a terminal.
+
+Cancellation is cooperative first: Rust creates a private marker watched by all
+providers, Python terminates native provider process groups, and Rust publishes
+the terminal only after the worker exits. A bounded grace period terminates the
+whole worker group if cooperation fails. Retirement is a distinct, narrower
+boundary: only verified, unprotected Ollama owner references with strong
+destination validation can receive a short-lived state-bound token.
 
 ## PowerShell JSON bridges (Automations view)
 

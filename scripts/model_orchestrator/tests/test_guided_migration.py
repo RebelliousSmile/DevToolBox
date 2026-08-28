@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import io
+import contextlib
+import os
 import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.model_orchestrator.adapters import AdapterContext, AdapterObservation
 from scripts.model_orchestrator.adapters.comfyui import (
@@ -21,6 +25,8 @@ from scripts.model_orchestrator.models import (
     ToolInstallation,
     ToolReference,
 )
+from scripts.model_orchestrator.__main__ import main
+from scripts.model_orchestrator.settings import ModelSettings, save_settings
 
 
 def gguf() -> bytes:
@@ -55,6 +61,33 @@ class FakeHook:
 
 
 class JanGuidedTests(unittest.TestCase):
+    def test_high_level_cli_starts_from_an_exact_library_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "library"
+            source = NeutralLibrary(library).commit_stream(
+                "cli-source", "model.gguf", (gguf(),), family="llm"
+            )
+            env = {"HOME": str(root), "XDG_DATA_HOME": str(root / "state")}
+            save_settings(ModelSettings(str(library)), platform_name="linux", env=env)
+            output = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stdout(output):
+                code = main(
+                    [
+                        "guided-start",
+                        "--artifact-id",
+                        f"library:{source.artifact_id}",
+                        "--destination",
+                        "jan",
+                        "--migration-id",
+                        "cli-guided",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["state"], "pending-manual")
+            self.assertEqual(payload["source_artifact_id"], source.artifact_id)
+
     def test_manual_link_checkpoint_resumes_only_after_exact_observation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

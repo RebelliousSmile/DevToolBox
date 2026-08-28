@@ -33,6 +33,7 @@ flowchart TD
     UIMOD --> APPMOD
     UIMOD --> PYRUN
     PYRUN --> MODELS
+    UIMOD --> MODELS
 ```
 
 ## Standalone scripts (`scripts/`)
@@ -77,6 +78,10 @@ drift, mismatched operations, non-monotone progress, and duplicate terminals.
 Its background workers keep inventory responsive, serialize model mutations,
 bound stderr, and route cancellation through Python so provider descendants
 stop before the authoritative terminal event reaches the application.
+`ui/models_view.rs` renders the permanent Catalog, Download, Operations and
+Settings workspace as pure state and intents. `ui/egui_app.rs` owns its channels,
+reviewed-offer digest, cancellation handle and stranded-library confirmation;
+every terminal operation refreshes the authoritative Python catalog.
 
 `app_recommendations/` is the read-only multi-OS application report: stable models
 and score in `models.py`/`scoring.py`, aggregation in `report.py`, APT/Snap/Flatpak

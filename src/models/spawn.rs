@@ -23,6 +23,7 @@ static CANCEL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug)]
 pub enum ModelWorkerEvent {
     Inventory(Result<CatalogSnapshot, String>),
+    Json(Result<serde_json::Value, String>),
     Progress(ProgressEvent),
     /// Emitted only after the Python worker and its provider descendants stopped.
     Terminal(Result<ProgressEvent, String>),
@@ -51,6 +52,26 @@ pub fn spawn_inventory(sender: Sender<ModelWorkerEvent>) {
     });
 }
 
+/// Run a read-only JSON command without taking the mutation slot.
+pub fn spawn_query(arguments: Vec<String>, sender: Sender<ModelWorkerEvent>) {
+    std::thread::spawn(move || {
+        let result = python_runtime::model_orchestrator_command(arguments).and_then(run_json);
+        let _ = sender.send(ModelWorkerEvent::Json(result));
+    });
+}
+
+/// Run a short JSON mutation under the same global slot as streamed operations.
+pub fn spawn_json_mutation(arguments: Vec<String>, sender: Sender<ModelWorkerEvent>) {
+    std::thread::spawn(move || {
+        let lock = MUTATION.get_or_init(|| Mutex::new(()));
+        let result = match lock.try_lock() {
+            Ok(_guard) => python_runtime::model_orchestrator_command(arguments).and_then(run_json),
+            Err(_) => Err("une autre mutation de modèle est déjà active".to_string()),
+        };
+        let _ = sender.send(ModelWorkerEvent::Json(result));
+    });
+}
+
 pub fn spawn_operation(
     operation_id: impl Into<String>,
     arguments: Vec<String>,
@@ -69,9 +90,8 @@ pub fn spawn_operation(
         };
         let result = operation_command(arguments, path.as_ref())
             .and_then(|command| run_operation(command, &operation_id, path.as_ref(), &sender));
-        if let Err(error) = result {
-            let _ = sender.send(ModelWorkerEvent::Terminal(Err(error)));
-        }
+        drop(_guard);
+        let _ = sender.send(ModelWorkerEvent::Terminal(result));
         let _ = std::fs::remove_file(path.as_ref());
     });
     handle
@@ -103,12 +123,36 @@ fn run_inventory(mut command: Command) -> Result<CatalogSnapshot, String> {
     parse_snapshot(stdout.trim())
 }
 
+fn run_json(mut command: Command) -> Result<serde_json::Value, String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("impossible de lancer la commande modèles: {error}"))?;
+    if !output.status.success() {
+        let stdout_message = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .map(str::to_string)
+            });
+        let detail = stdout_message.unwrap_or_else(|| stderr_tail(&output.stderr));
+        return Err(format!(
+            "commande modèles échouée (code {:?}): {}",
+            output.status.code(),
+            detail
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("réponse JSON modèles invalide: {error}"))
+}
+
 fn run_operation(
     mut command: Command,
     operation_id: &str,
     cancel_path: &PathBuf,
     sender: &Sender<ModelWorkerEvent>,
-) -> Result<(), String> {
+) -> Result<ProgressEvent, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("impossible de lancer l'opération modèles: {error}"))?;
@@ -191,8 +235,7 @@ fn run_operation(
             status.code()
         ));
     }
-    let _ = sender.send(ModelWorkerEvent::Terminal(Ok(terminal)));
-    Ok(())
+    Ok(terminal)
 }
 
 fn cancel_path() -> PathBuf {
@@ -274,7 +317,9 @@ mod tests {
         loop {
             match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
                 ModelWorkerEvent::Terminal(result) => return result,
-                ModelWorkerEvent::Progress(_) | ModelWorkerEvent::Inventory(_) => {}
+                ModelWorkerEvent::Progress(_)
+                | ModelWorkerEvent::Inventory(_)
+                | ModelWorkerEvent::Json(_) => {}
             }
         }
     }
@@ -315,6 +360,16 @@ mod tests {
         match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
             ModelWorkerEvent::Inventory(Ok(snapshot)) => assert_eq!(snapshot.schema_version, 1),
             other => panic!("unexpected inventory outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_only_json_query_returns_typed_value() {
+        let (sender, receiver) = mpsc::channel();
+        spawn_query(vec!["schema".into()], sender);
+        match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
+            ModelWorkerEvent::Json(Ok(value)) => assert_eq!(value["schema_version"], 1),
+            other => panic!("unexpected query outcome: {other:?}"),
         }
     }
 

@@ -9,4 +9,7 @@ pub use model::*;
 #[allow(unused_imports)]
 pub use parse::{parse_snapshot, ProgressValidator};
 #[allow(unused_imports)]
-pub use spawn::{spawn_inventory, spawn_operation, CancelHandle, ModelWorkerEvent};
+pub use spawn::{
+    spawn_inventory, spawn_json_mutation, spawn_operation, spawn_query, CancelHandle,
+    ModelWorkerEvent,
+};

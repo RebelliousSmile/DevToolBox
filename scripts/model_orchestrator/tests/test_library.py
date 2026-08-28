@@ -82,6 +82,22 @@ class SettingsTests(unittest.TestCase):
                     required_free_bytes=2**100,
                 )
 
+    def test_provider_xet_and_keep_preferences_round_trip_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            library = home / "models"
+            library.mkdir()
+            env = {"HOME": str(home), "XDG_DATA_HOME": str(home / "state")}
+            settings = ModelSettings(
+                str(library),
+                provider_order=("direct", "lm-studio", "huggingface", "ollama"),
+                enabled_providers=("direct", "huggingface"),
+                xet_enabled=False,
+                keep_patterns=("*important*",),
+            )
+            save_settings(settings, platform_name="linux", env=env)
+            self.assertEqual(load_settings(platform_name="linux", env=env), settings)
+
 
 class FormatTests(unittest.TestCase):
     def test_structured_formats_validate_bounds_without_loading_tensors(self) -> None:
