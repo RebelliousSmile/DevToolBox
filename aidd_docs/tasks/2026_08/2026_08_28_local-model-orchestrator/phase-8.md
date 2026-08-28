@@ -81,7 +81,6 @@ journey
 2. Compute shared allocation/reachability and distinguish logical, avoided, estimated reclaimable, and measured freed bytes.
 3. Issue a short-lived token bound to owner, source id/path, identity, references, and plan digest; reject stale state.
 4. Call only Ollama's documented loopback delete API in v1, then re-inventory and measure; Jan, LM Studio, ComfyUI, and unknown stores remain report-only.
-5. If Ollama transport is shared with `winclean`, extract one caller-neutral primitive and migrate both callers in the same change.
 
 ## Test acceptance criteria
 

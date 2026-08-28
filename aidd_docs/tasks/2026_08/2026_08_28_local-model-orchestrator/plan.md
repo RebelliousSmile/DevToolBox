@@ -55,3 +55,4 @@ status: in-progress
 | Separate migration, validation, and source retirement into distinct persisted operations. | Technical success never grants permission to delete multi-gigabyte user data, and interrupted work must remain recoverable. |
 | Auto-fallback only when the expected content identity is unchanged. | A different revision, format, or quantization is a product choice, not a transport retry. |
 | Accept exact provider locators in v1 instead of promising federated catalog search. | Hugging Face, Ollama, LM Studio, and arbitrary URLs do not expose one stable non-interactive search contract; local catalog search remains available after acquisition. |
+| Extract the caller-neutral Ollama HTTP boundary when the inventory adapter is introduced in phase 2. | Phase 2 creates the second Ollama API caller; endpoint validation, proxy/redirect policy, JSON transport, and technical errors must have one implementation while each caller retains its domain translation. |
