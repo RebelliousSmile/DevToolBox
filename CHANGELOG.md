@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-08-28
+
+### Added
+- Models workspace: cross-platform inventory of Ollama, Jan, LM Studio and
+  ComfyUI installations, model stores, references and active usage
+- Neutral transactional model library with format validation, recovery,
+  progressive identity evidence and allocation-aware duplicate detection
+- Exact no-conversion downloads through Hugging Face/Xet, direct HTTPS,
+  Ollama and LM Studio, with resumable progress and locally informed provider
+  ranking
+- Verified migrations to Ollama and LM Studio, plus guided Jan and ComfyUI
+  integrations that preserve sources and avoid private metadata mutation
+- Explicit, state-bound retirement of eligible Ollama sources after migration
+  validation, user confirmation and disk-space remeasurement
+- Asynchronous schema-v1 JSON/NDJSON bridge and native Models view for
+  inventory, acquisition, migration, recovery and retirement operations
+
 ## [0.8.0] - 2026-08-21
 
 ### Added
