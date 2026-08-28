@@ -12,6 +12,10 @@ RELATIONSHIPS = frozenset(
     {"copy", "hard_link", "symbolic_link", "owner_blob", "canonical", "unknown"}
 )
 CONFIDENCE_LEVELS = frozenset({"unknown", "low", "medium", "high"})
+VALIDATION_LEVELS = frozenset({"strong", "structural", "opaque", "failed"})
+JOURNAL_STATES = frozenset(
+    {"staging", "committing", "completed", "resumable", "discardable", "manual-attention"}
+)
 
 
 def _non_negative(value: int | None, field_name: str) -> None:
@@ -159,6 +163,66 @@ class SourceError:
             raise ValueError("source errors require source, code, and message")
         if self.confidence not in CONFIDENCE_LEVELS:
             raise ValueError(f"invalid confidence: {self.confidence}")
+
+
+@dataclass(frozen=True)
+class ValidationEvidence:
+    valid: bool
+    level: str
+    format: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if self.level not in VALIDATION_LEVELS:
+            raise ValueError(f"invalid validation level: {self.level}")
+        if self.valid == (self.level == "failed"):
+            raise ValueError("failed evidence must be invalid and other evidence valid")
+
+
+@dataclass
+class LibraryJournal:
+    operation_id: str
+    state: str
+    filename: str
+    staging_path: str
+    target_path: str | None = None
+    artifact_id: str | None = None
+    expected_digest: str | None = None
+    bytes_written: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.state not in JOURNAL_STATES:
+            raise ValueError(f"invalid journal state: {self.state}")
+        _non_negative(self.bytes_written, "bytes_written")
+
+
+@dataclass(frozen=True)
+class LibraryRecord:
+    artifact_id: str
+    path: str
+    filename: str
+    family: str
+    format: str
+    identity: ArtifactIdentity
+    validation: ValidationEvidence
+    logical_size: int
+    allocated_size: int | None
+    relationship: str
+    allocation_id: str | None
+    origin: str
+    revision: str | None
+    created_at: str
+    hash_pending: bool = False
+    destination_usability: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.family not in FAMILIES:
+            raise ValueError(f"invalid artifact family: {self.family}")
+        _non_negative(self.logical_size, "logical_size")
+        _non_negative(self.allocated_size, "allocated_size")
 
 
 @dataclass

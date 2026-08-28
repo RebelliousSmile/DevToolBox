@@ -5,7 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
-from .models import Artifact, CatalogSnapshot, Protection, SourceError, ToolInstallation
+from .models import (
+    Artifact,
+    CatalogSnapshot,
+    LibraryRecord,
+    Protection,
+    SourceError,
+    ToolInstallation,
+)
 
 
 def protection_reasons(artifact: Artifact) -> list[str]:
@@ -87,3 +94,24 @@ def inventory_snapshot(*, context=None, adapters=None, generated_at: str | None 
         warnings=warnings,
         generated_at=generated_at,
     )
+
+
+def canonical_artifacts(records: Iterable[LibraryRecord]) -> list[Artifact]:
+    """Translate persisted library records into canonical catalog observations."""
+
+    return [
+        Artifact(
+            artifact_id=f"library:{record.artifact_id}",
+            path=record.path,
+            family=record.family,
+            format=record.format,
+            identity=record.identity,
+            logical_size=record.logical_size,
+            allocated_size=record.allocated_size,
+            revision=record.revision,
+            relationship="canonical",
+            allocation_id=record.allocation_id,
+            metadata={"origin": record.origin, "validation": record.validation.level},
+        )
+        for record in records
+    ]

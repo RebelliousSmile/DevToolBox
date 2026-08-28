@@ -38,8 +38,11 @@ flowchart TD
 Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx), `winclean/` (dry-run-first disk cleaner; imports `system_inventory` as its **read-only** discovery layer and must never modify it — see `memory/internal/decisions/winclean-separate-package.md`).
 
 `model_orchestrator/` owns the schema-versioned local-AI artifact catalog,
-progressive content identity, path-safety primitives, and read-only adapters for
-Ollama, Jan, LM Studio, and ComfyUI. `local_ai/ollama_http.py` is the narrow
+progressive content identity, path-safety primitives, a journaled neutral
+library with bounded non-executing format validation, and read-only adapters
+for Ollama, Jan, LM Studio, and ComfyUI. Machine-local library settings live
+below the platform data root and never relocate existing artifacts implicitly.
+`local_ai/ollama_http.py` is the narrow
 caller-neutral loopback transport shared by that inventory and `winclean`;
 each caller translates technical failures into its own domain. The orchestrator
 otherwise remains separate from `winclean`: inventory and migration never imply
