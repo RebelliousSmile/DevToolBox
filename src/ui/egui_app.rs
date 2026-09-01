@@ -1035,6 +1035,15 @@ pub struct EguiApp {
     /// `None` before the first fetch (successful or not) since the tab was
     /// last activated.
     docker: Option<Result<DockerSnapshot, String>>,
+    /// Result channel for the Docker snapshot currently being collected.
+    /// Docker Desktop can take several seconds to inspect a large image
+    /// collection, so this work must never run on egui's rendering thread.
+    docker_fetch_rx: Option<Receiver<Result<DockerSnapshot, String>>>,
+    /// Keeps the loading state independent from the cached snapshot: a
+    /// manual refresh leaves the previous rows visible while the new
+    /// snapshot is collected, whereas the first load shows the empty
+    /// « Chargement… » state.
+    docker_fetching: bool,
     /// A confirmed Docker action awaiting execution at the start of the next
     /// frame — see [`DeferredDockerAction`]'s doc comment. Also drives
     /// `DockerViewState::busy` while it is `Some`.
@@ -1321,6 +1330,8 @@ impl EguiApp {
             machine_id,
             docker_available,
             docker: None,
+            docker_fetch_rx: None,
+            docker_fetching: false,
             deferred_docker_action: None,
             docker_actions_enabled: report_spawning_enabled,
             docker_action_invocations: 0,
@@ -2466,19 +2477,57 @@ impl EguiApp {
         }
     }
 
-    /// Re-read the Docker state and re-validate the selection against it.
+    /// Start a Docker-state refresh without blocking egui's rendering
+    /// thread. A second request while one is already running is ignored;
+    /// every Docker/Compose action is disabled during the refresh, so the
+    /// in-flight snapshot cannot be made stale by this app.
     ///
-    /// The single entry point for both, because the invariant only holds if
-    /// it holds at *every* refetch: a key whose resource has just been
-    /// deleted — by this app, by another terminal, by anything — must stop
-    /// being a batch target, or the next batch would run `docker rm` on a
-    /// container that no longer exists and report a failure the user cannot
-    /// act on.
+    /// The spawning gate keeps headless tests independent from the machine's
+    /// Docker installation. Such tests can still exercise the loading and
+    /// receiving states by installing a receiver directly.
     fn refetch_docker(&mut self) {
-        self.docker = Some(docker_view::fetch());
+        if self.docker_fetching {
+            return;
+        }
+        self.docker_fetching = true;
+        if !self.docker_actions_enabled {
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.docker_fetch_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(docker_view::fetch());
+        });
+    }
+
+    /// Merge a completed background fetch into the cached snapshot and only
+    /// then re-validate the selection against it.
+    fn drain_docker_fetch(&mut self) {
+        let Some(rx) = self.docker_fetch_rx.as_ref() else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("Le chargement des données Docker a été interrompu.".to_string())
+            }
+        };
+        self.docker_fetch_rx = None;
+        self.docker_fetching = false;
+        self.docker = Some(result);
         self.prune_docker_selection();
     }
 
+    /// Re-validate the selection after a Docker refresh.
+    ///
+    /// The invariant must hold after *every* completed refetch: a key whose
+    /// resource has just been deleted — by this app, by another terminal,
+    /// by anything — must stop being a batch target, or the next batch would
+    /// run `docker rm` on a
+    /// container that no longer exists and report a failure the user cannot
+    /// act on.
     /// Drop every selected key the current snapshot no longer allows. A
     /// failed fetch clears the selection outright: there is nothing left to
     /// validate against, and keeping keys would mean acting on a state that
@@ -3348,6 +3397,7 @@ impl EguiApp {
         // `execute_deferred_docker_action`'s doc comment. A no-op on every
         // other frame (the common case).
         self.execute_deferred_docker_action();
+        self.drain_docker_fetch();
 
         if let Some(dialog) = self.active_dialog.take() {
             match dialogs::show(ui.ctx(), &dialog.kind) {
@@ -3386,7 +3436,7 @@ impl EguiApp {
         self.drain_model_events();
         self.drain_compose_events();
         self.drain_scan_events();
-        if self.compose_running || self.compose_scanning {
+        if self.compose_running || self.compose_scanning || self.docker_fetching {
             // Same polling rationale as `cleanup_job`: the worker's events
             // only land on a repaint.
             ui.ctx()
@@ -3977,7 +4027,7 @@ impl EguiApp {
             ui.colored_label(color, &status.text);
         }
 
-        if self.docker.is_none() {
+        if self.docker.is_none() && !self.docker_fetching {
             self.refetch_docker();
         }
 
@@ -4003,7 +4053,7 @@ impl EguiApp {
         let (snapshot, error) = match &self.docker {
             Some(Ok(snapshot)) => (Some(snapshot), None),
             Some(Err(err)) => (None, Some(err.as_str())),
-            None => unreachable!("populated just above if it was None"),
+            None => (None, None),
         };
         // The runs come from the snapshot's containers; when the snapshot
         // itself failed there is nothing to link against, and every row must
@@ -4034,7 +4084,9 @@ impl EguiApp {
             conflicts: &conflicts,
             plugin_available: self.compose_plugin.unwrap_or(false),
             scanning: self.compose_scanning,
-            busy: self.compose_running || self.deferred_docker_action.is_some(),
+            busy: self.compose_running
+                || self.deferred_docker_action.is_some()
+                || self.docker_fetching,
             log: &self.compose_log,
             log_target: self.compose_log_target.as_deref(),
             scan_warning: self.compose_scan_warning.as_deref(),
@@ -4050,7 +4102,9 @@ impl EguiApp {
         let state = DockerViewState {
             snapshot,
             error,
-            busy: self.deferred_docker_action.is_some() || self.compose_running,
+            busy: self.deferred_docker_action.is_some()
+                || self.compose_running
+                || self.docker_fetching,
             dormant_after_days: self.config.default_settings.dormant_after_days,
             now_epoch_secs: now_epoch_secs(),
             extra_port_owners: &declared,
@@ -4211,6 +4265,15 @@ impl EguiApp {
                     }
                 }
             }
+        }
+
+        // The worker cannot wake egui by itself because it deliberately owns
+        // no UI context. Keep polling while it runs so the completed snapshot
+        // is integrated even when the user does not move the mouse or press a
+        // key after opening the tab.
+        if self.docker_fetching {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
@@ -7063,6 +7126,73 @@ mod tests {
             .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
         harness.run();
         assert!(harness.query_by_label("Docker").is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn first_docker_render_starts_loading_without_a_snapshot() {
+        let (mut app, dir) = cleanup_test_app("docker-async-first-load");
+        app.docker_available = true;
+        app.active_view = ActiveView::Docker;
+        // Keep the test hermetic: neither lazy Compose probing nor Docker
+        // collection may invoke the host's real client.
+        app.compose_plugin = Some(false);
+        app.compose_loaded = true;
+
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 850.0))
+            .build_ui_state(|ui, app: &mut EguiApp| app.ui_content(ui), app);
+        harness.run_steps(1);
+
+        assert!(harness.state().docker_fetching);
+        assert!(harness.state().docker.is_none());
+        assert_eq!(
+            harness
+                .query_all_by_label("Chargement des données Docker…")
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn completed_docker_fetch_replaces_the_cache_and_prunes_selection() {
+        let (mut app, dir) = cleanup_test_app("docker-async-result");
+        app.docker = Some(Ok(sample_docker_snapshot()));
+        app.docker_selection = HashSet::from([
+            SelectionKey::container("c1"),
+            SelectionKey::container("disparu"),
+        ]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.docker_fetching = true;
+        app.docker_fetch_rx = Some(rx);
+        tx.send(Ok(DockerSnapshot::default())).unwrap();
+
+        app.drain_docker_fetch();
+
+        assert!(!app.docker_fetching);
+        assert!(app.docker_fetch_rx.is_none());
+        assert!(matches!(
+            app.docker,
+            Some(Ok(DockerSnapshot {
+                ref containers,
+                ref images,
+                ref volumes,
+            })) if containers.is_empty() && images.is_empty() && volumes.is_empty()
+        ));
+        assert!(app.docker_selection.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refresh_keeps_the_cached_snapshot_visible_while_loading() {
+        let (mut app, dir) = cleanup_test_app("docker-async-refresh-cache");
+        app.docker = Some(Ok(sample_docker_snapshot()));
+
+        app.refetch_docker();
+
+        assert!(app.docker_fetching);
+        assert!(matches!(app.docker, Some(Ok(_))));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -59,7 +59,7 @@
     {
       "id": "email-to-markdown-auto",
       "name": "Email to Markdown (tray auto)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../../email-to-markdown/_code/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode auto --run-arg tray",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../email-to-markdown/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode auto --run-arg tray",
       "category": "apps-perso",
       "icon": "📬",
       "is_favorite": true,
@@ -70,7 +70,7 @@
     {
       "id": "email-to-markdown-release",
       "name": "Email to Markdown (tray release)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../../email-to-markdown/_code/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode release --run-arg tray",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../email-to-markdown/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode release --run-arg tray",
       "category": "apps-perso",
       "icon": "🚀",
       "is_favorite": false,
@@ -81,7 +81,7 @@
     {
       "id": "email-to-markdown-debug",
       "name": "Email to Markdown (tray debug)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../../email-to-markdown/_code/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode debug --run-arg tray",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../email-to-markdown/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode debug --run-arg tray",
       "category": "apps-perso",
       "icon": "🛠️",
       "is_favorite": false,
@@ -92,7 +92,7 @@
     {
       "id": "email-to-markdown-build-release",
       "name": "Email to Markdown (build + launch tray release)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../../email-to-markdown/_code/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode release --build-cwd \"../../../../email-to-markdown/_code/app\" --build-program cargo --build-arg build --build-arg=--release --build-arg=--features --build-arg=tray --run-arg tray",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../email-to-markdown/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode release --build-cwd \"../../../email-to-markdown/app\" --build-program cargo --build-arg build --build-arg=--release --build-arg=--features --build-arg=tray --run-arg tray",
       "category": "apps-perso",
       "icon": "🏗️",
       "is_favorite": false,
@@ -103,7 +103,7 @@
     {
       "id": "email-to-markdown-build-debug",
       "name": "Email to Markdown (build + launch tray debug)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../../email-to-markdown/_code/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode debug --build-cwd \"../../../../email-to-markdown/_code/app\" --build-program cargo --build-arg build --build-arg=--features --build-arg=tray --run-arg tray",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label \"Email to Markdown\" --project-dir \"../../../email-to-markdown/app\" --release-relpath target/release/email-to-markdown.exe --debug-relpath target/debug/email-to-markdown.exe --mode debug --build-cwd \"../../../email-to-markdown/app\" --build-program cargo --build-arg build --build-arg=--features --build-arg=tray --run-arg tray",
       "category": "apps-perso",
       "icon": "🏗️",
       "is_favorite": false,
@@ -114,7 +114,7 @@
     {
       "id": "lyremember-auto",
       "name": "Lyremember (auto)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../../lyremember/_code/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode auto",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../lyremember/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode auto",
       "category": "apps-perso",
       "icon": "🎵",
       "is_favorite": true,
@@ -125,7 +125,7 @@
     {
       "id": "lyremember-release",
       "name": "Lyremember (release)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../../lyremember/_code/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode release",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../lyremember/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode release",
       "category": "apps-perso",
       "icon": "🚀",
       "is_favorite": false,
@@ -136,7 +136,7 @@
     {
       "id": "lyremember-debug",
       "name": "Lyremember (debug)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../../lyremember/_code/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode debug",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../lyremember/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode debug",
       "category": "apps-perso",
       "icon": "🛠️",
       "is_favorite": false,
@@ -147,7 +147,7 @@
     {
       "id": "lyremember-build-release",
       "name": "Lyremember (build + launch release)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../../lyremember/_code/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode release --build-cwd \"../../../../lyremember/_code/app/lyremember-app\" --build-program pnpm --build-arg tauri --build-arg build",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../lyremember/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode release --build-cwd \"../../../lyremember/app/lyremember-app\" --build-program pnpm --build-arg tauri --build-arg build",
       "category": "apps-perso",
       "icon": "🏗️",
       "is_favorite": false,
@@ -158,7 +158,7 @@
     {
       "id": "lyremember-build-debug",
       "name": "Lyremember (build + launch debug)",
-      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../../lyremember/_code/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode debug --build-cwd \"../../../../lyremember/_code/app/lyremember-app\" --build-program pnpm --build-arg tauri --build-arg build --build-arg=--debug",
+      "command": "@python scripts/launch_rust_app/launch_rust_app.py --label Lyremember --project-dir \"../../../lyremember/app/lyremember-app/src-tauri\" --release-relpath target/release/lyremember-app.exe --debug-relpath target/debug/lyremember-app.exe --mode debug --build-cwd \"../../../lyremember/app/lyremember-app\" --build-program pnpm --build-arg tauri --build-arg build --build-arg=--debug",
       "category": "apps-perso",
       "icon": "🏗️",
       "is_favorite": false,
