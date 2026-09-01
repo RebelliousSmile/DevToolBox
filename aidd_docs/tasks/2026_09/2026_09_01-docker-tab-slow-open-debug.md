@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: implemented
 ---
 
 # Diagnostic et correction — ouverture lente de l’onglet Docker
