@@ -1,5 +1,5 @@
 ---
-status: pending
+status: in-progress
 ---
 
 # Instruction: Configurer les paquets, ressources et parcours de désinstallation
@@ -122,4 +122,3 @@ journey
 | 2 | Une fixture lancée hors dépôt retrouve toutes les ressources et n'écrit que dans les racines de données. |
 | 3 | L'inventaire énumère chaque chemin programme, intégration, temporaire et donnée ; symlinks, chemins externes, installation concurrente et absence de dépendance restent sûrs. |
 | 4 | Le validateur statique et le paquet natif disponible passent ; les quatre autres jobs sont décrits comme qualification CI à exécuter. |
-

@@ -272,6 +272,7 @@ mod tests {
                 show_descriptions: true,
                 dormant_after_days: 60,
                 user_scripts_directory: String::new(),
+                native_effects: true,
             },
             categories: vec![Category {
                 id: "system".to_string(),

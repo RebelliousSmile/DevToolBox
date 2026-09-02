@@ -113,7 +113,7 @@ use crate::ui::icon_picker;
 use crate::ui::models_view::{self, ModelsAction, ModelsUiState, ModelsViewState};
 use crate::ui::port_plan;
 use crate::ui::terminal_view::{self, TerminalEvent};
-use crate::ui::{components, theme};
+use crate::ui::{components, native_window, theme};
 
 /// A resolved, cached representation of a command/category `icon` field,
 /// ready to draw without re-decoding every frame.
@@ -648,6 +648,7 @@ fn fallback_config() -> Config {
             show_descriptions: true,
             dormant_after_days: 60,
             user_scripts_directory: String::new(),
+            native_effects: true,
         },
         categories: Vec::new(),
         commands: vec![
@@ -1031,6 +1032,8 @@ pub struct EguiApp {
     rename_buffers: HashMap<String, String>,
     status: Option<StatusMessage>,
     active_view: ActiveView,
+    native_profile: native_window::NativeProfile,
+    native_effect_warning_logged: bool,
     preferences_section: PreferencesSection,
     user_script_proposals: Vec<UserScriptProposal>,
     user_script_scan_error: Option<String>,
@@ -1313,6 +1316,21 @@ impl EguiApp {
             true,
             docker_view::available(),
         );
+        let dark = cc.egui_ctx.theme() == egui::Theme::Dark;
+        let desired = native_window::decide(native_window::current_inputs(
+            app.config.default_settings.native_effects,
+        ));
+        match native_window::apply(cc, native_window::NativeProfile::Opaque, desired, dark) {
+            Ok(profile) => app.native_profile = profile,
+            Err(error) => {
+                log::warn!("native window material unavailable; using opaque fallback: {error}");
+                app.native_effect_warning_logged = true;
+            }
+        }
+        theme::set_native_material(
+            &cc.egui_ctx,
+            app.native_profile != native_window::NativeProfile::Opaque,
+        );
         app.refresh_applications();
         app
     }
@@ -1375,6 +1393,8 @@ impl EguiApp {
             rename_buffers: HashMap::new(),
             status: None,
             active_view: ActiveView::default(),
+            native_profile: native_window::NativeProfile::Opaque,
+            native_effect_warning_logged: false,
             preferences_section: PreferencesSection::default(),
             user_script_proposals: Vec::new(),
             user_script_scan_error: None,
@@ -3435,6 +3455,19 @@ impl EguiApp {
                 PreferencesSection::General => {
                     ui.strong("Général");
                     ui.label("Les préférences sont regroupées par espace de travail.");
+                    let mut native_effects = self.config.default_settings.native_effects;
+                    if ui
+                        .checkbox(
+                            &mut native_effects,
+                            "Utiliser les effets de fenêtre natifs lorsqu'ils sont disponibles",
+                        )
+                        .changed()
+                    {
+                        self.config.default_settings.native_effects = native_effects;
+                        if let Err(error) = self.persist() {
+                            self.set_status(format!("Échec de sauvegarde: {error}"), true);
+                        }
+                    }
                     return;
                 }
                 PreferencesSection::Actions => {
@@ -3922,7 +3955,9 @@ impl EguiApp {
                 self.render_about_button(ui);
             });
         } else {
-            components::page_header(ui, "DevToolBox", "Vos outils, au même endroit");
+            components::card(ui, |ui| {
+                components::page_header(ui, "DevToolBox", "Vos outils, au même endroit");
+            });
             render_items(ui, self);
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 self.render_about_button(ui);
@@ -3980,12 +4015,12 @@ impl EguiApp {
         ui.heading("DevToolBox — Actions");
 
         if let Some(status) = &self.status {
-            let color = if status.is_error {
-                egui::Color32::from_rgb(0xC4, 0x2B, 0x1C)
+            let kind = if status.is_error {
+                components::MessageKind::Error
             } else {
-                egui::Color32::from_rgb(0x1B, 0x5E, 0x20)
+                components::MessageKind::Success
             };
-            ui.colored_label(color, &status.text);
+            components::status_message(ui, kind, &status.text);
         }
 
         let mut show_categories = self.config.default_settings.show_categories;
@@ -4772,7 +4807,33 @@ fn automations_placeholder_message() -> &'static str {
 }
 
 impl eframe::App for EguiApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let dark = ui.visuals().dark_mode;
+        let desired = native_window::decide(native_window::current_inputs(
+            self.config.default_settings.native_effects,
+        ));
+        if desired != self.native_profile {
+            match native_window::apply(frame, self.native_profile, desired, dark) {
+                Ok(profile) => {
+                    self.native_profile = profile;
+                    self.native_effect_warning_logged = false;
+                    theme::set_native_material(
+                        ui.ctx(),
+                        profile != native_window::NativeProfile::Opaque,
+                    );
+                }
+                Err(error) => {
+                    self.native_profile = native_window::NativeProfile::Opaque;
+                    theme::set_native_material(ui.ctx(), false);
+                    if !self.native_effect_warning_logged {
+                        log::warn!(
+                            "native window material unavailable; using opaque fallback: {error}"
+                        );
+                        self.native_effect_warning_logged = true;
+                    }
+                }
+            }
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             self.ui_content(ui);
         });
@@ -4804,6 +4865,7 @@ mod tests {
                 show_descriptions: true,
                 dormant_after_days: 60,
                 user_scripts_directory: String::new(),
+                native_effects: true,
             },
             categories: vec![Category {
                 id: "system".into(),

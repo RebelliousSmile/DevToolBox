@@ -31,11 +31,18 @@ pub struct Settings {
     /// Python tools keep their own distribution-root resolution.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user_scripts_directory: String,
+    /// Enables system window materials when platform and accessibility allow.
+    #[serde(default = "default_native_effects")]
+    pub native_effects: bool,
 }
 
 /// Two months, the threshold the user asked for.
 fn default_dormant_after_days() -> u32 {
     60
+}
+
+fn default_native_effects() -> bool {
+    true
 }
 
 /// A named group that commands can belong to.
@@ -184,6 +191,10 @@ mod tests {
         assert!(s.launch_at_startup);
         assert!(s.show_descriptions);
         assert!(s.user_scripts_directory.is_empty());
+        assert!(
+            s.native_effects,
+            "historical JSON enables native effects by default"
+        );
 
         // Categories
         assert_eq!(config.categories.len(), 3);

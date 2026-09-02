@@ -25,6 +25,7 @@ pub fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+#[allow(dead_code)]
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let colors = theme::palette(ui.visuals().dark_mode);
     ui.add(

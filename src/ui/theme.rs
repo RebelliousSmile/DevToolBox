@@ -7,6 +7,7 @@ pub const NAV_WIDTH: f32 = 184.0;
 pub const COMPACT_BREAKPOINT: f32 = 1_024.0;
 pub const RADIUS_CARD: u8 = 12;
 pub const RADIUS_CONTROL: u8 = 8;
+#[allow(dead_code)]
 pub const TRANSITION_MS: u64 = 160;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +100,18 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     });
 }
 
+pub fn set_native_material(ctx: &egui::Context, active: bool) {
+    ctx.all_styles_mut(|style| {
+        let base = palette(style.visuals.dark_mode).canvas;
+        style.visuals.panel_fill = if active {
+            egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 238)
+        } else {
+            base
+        };
+    });
+}
+
+#[allow(dead_code)]
 pub fn relative_luminance(color: egui::Color32) -> f32 {
     fn channel(value: u8) -> f32 {
         let value = value as f32 / 255.0;
@@ -111,6 +124,7 @@ pub fn relative_luminance(color: egui::Color32) -> f32 {
     0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
 }
 
+#[allow(dead_code)]
 pub fn contrast_ratio(a: egui::Color32, b: egui::Color32) -> f32 {
     let (bright, dark) = {
         let a = relative_luminance(a);

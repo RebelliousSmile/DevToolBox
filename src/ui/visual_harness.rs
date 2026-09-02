@@ -5,6 +5,7 @@ use serde::Serialize;
 use super::theme;
 
 #[derive(Debug, Serialize, PartialEq)]
+#[allow(dead_code)]
 pub struct VisualMetrics {
     pub viewport: [u32; 2],
     pub theme: &'static str,
@@ -12,6 +13,7 @@ pub struct VisualMetrics {
     pub idle_repaint_requested: bool,
 }
 
+#[allow(dead_code)]
 pub fn reference_metrics(width: u32, height: u32, dark: bool) -> VisualMetrics {
     VisualMetrics {
         viewport: [width, height],

@@ -54,6 +54,7 @@ pub fn font_definitions() -> egui::FontDefinitions {
     fonts
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn valid_sfnt(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x00, 0x01, 0x00, 0x00])
         || bytes.starts_with(b"OTTO")

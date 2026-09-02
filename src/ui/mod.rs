@@ -31,6 +31,7 @@ pub mod fonts;
 pub mod format;
 pub mod icon_picker;
 pub mod models_view;
+pub mod native_window;
 pub mod port_plan;
 pub mod ports;
 pub mod terminal_view;
