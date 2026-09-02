@@ -6,6 +6,12 @@ La source exécutable des tokens est `src/ui/theme.rs`. Toute nouvelle vue utili
 
 Les palettes claire et sombre définissent une toile, une surface, une surface élevée, du texte principal et secondaire, une couleur d'accent et les états succès, attention et erreur. Le texte normal vise WCAG AA (4,5:1), les composants et grands textes 3:1. Les tests calculent les ratios sRGB.
 
+La préférence sélectionne toujours explicitement le thème egui actif : `light` choisit
+`Theme::Light`, `dark` choisit `Theme::Dark` et `system` restaure
+`ThemePreference::System`. Les deux styles sont ensuite reconstruits séparément à
+partir de leur palette propre. `Context::theme`, `Visuals::dark_mode`, le fond, le
+texte et les rayures ne doivent jamais décrire des modes différents.
+
 La pile egui reste le repli garanti. Sur macOS, une police système locale peut être ajoutée seulement si le fichier est lisible et possède un en-tête SFNT valide ; aucune police Apple n'est redistribuée. Noto Emoji reste embarquée pour les pictogrammes configurables.
 
 ## Structure et états

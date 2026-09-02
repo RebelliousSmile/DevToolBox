@@ -75,29 +75,38 @@ pub fn palette(dark: bool) -> Palette {
 }
 
 pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
-    match mode {
-        ThemeMode::Light => ctx.set_visuals(egui::Visuals::light()),
-        ThemeMode::Dark => ctx.set_visuals(egui::Visuals::dark()),
-        ThemeMode::System => {}
-    }
-    let dark = ctx.theme() == egui::Theme::Dark;
-    let colors = palette(dark);
-    ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(GRID * 2.0, GRID * 2.0);
-        style.spacing.button_padding = egui::vec2(GRID * 3.0, GRID * 2.0);
-        style.spacing.scroll = egui::style::ScrollStyle::thin();
-        style.visuals.panel_fill = colors.canvas;
-        style.visuals.window_fill = colors.surface;
-        style.visuals.extreme_bg_color = colors.surface;
-        style.visuals.faint_bg_color = colors.surface_raised;
-        style.visuals.override_text_color = Some(colors.text);
-        style.visuals.selection.bg_fill = colors.accent;
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, colors.accent_text);
-        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, colors.border);
-        style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(RADIUS_CONTROL);
-        style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_CONTROL);
-        style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_CONTROL);
+    let preference = match mode {
+        ThemeMode::Light => egui::ThemePreference::Light,
+        ThemeMode::Dark => egui::ThemePreference::Dark,
+        ThemeMode::System => egui::ThemePreference::System,
+    };
+    ctx.set_theme(preference);
+
+    ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+    ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+    ctx.style_mut_of(egui::Theme::Light, |style| {
+        apply_palette(style, palette(false));
     });
+    ctx.style_mut_of(egui::Theme::Dark, |style| {
+        apply_palette(style, palette(true));
+    });
+}
+
+fn apply_palette(style: &mut egui::Style, colors: Palette) {
+    style.spacing.item_spacing = egui::vec2(GRID * 2.0, GRID * 2.0);
+    style.spacing.button_padding = egui::vec2(GRID * 3.0, GRID * 2.0);
+    style.spacing.scroll = egui::style::ScrollStyle::thin();
+    style.visuals.panel_fill = colors.canvas;
+    style.visuals.window_fill = colors.surface;
+    style.visuals.extreme_bg_color = colors.surface;
+    style.visuals.faint_bg_color = colors.surface_raised;
+    style.visuals.override_text_color = Some(colors.text);
+    style.visuals.selection.bg_fill = colors.accent;
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, colors.accent_text);
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, colors.border);
+    style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(RADIUS_CONTROL);
+    style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(RADIUS_CONTROL);
+    style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(RADIUS_CONTROL);
 }
 
 pub fn set_native_material(ctx: &egui::Context, active: bool) {
@@ -147,6 +156,39 @@ mod tests {
         assert_eq!(ThemeMode::from_preference("light"), ThemeMode::Light);
         assert_eq!(ThemeMode::from_preference("dark"), ThemeMode::Dark);
         assert_eq!(ThemeMode::from_preference("system"), ThemeMode::System);
+    }
+
+    fn assert_style_matches_palette(ctx: &egui::Context, theme: egui::Theme, dark: bool) {
+        let style = ctx.style_of(theme);
+        let colors = palette(dark);
+        assert_eq!(style.visuals.dark_mode, dark);
+        assert_eq!(style.visuals.panel_fill, colors.canvas);
+        assert_eq!(style.visuals.faint_bg_color, colors.surface_raised);
+        assert_eq!(style.visuals.override_text_color, Some(colors.text));
+    }
+
+    #[test]
+    fn explicit_theme_replaces_an_opposite_active_theme() {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::Theme::Dark);
+
+        apply(&ctx, ThemeMode::Light);
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert_style_matches_palette(&ctx, egui::Theme::Light, false);
+
+        apply(&ctx, ThemeMode::Dark);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert_style_matches_palette(&ctx, egui::Theme::Dark, true);
+    }
+
+    #[test]
+    fn every_theme_keeps_its_own_palette() {
+        let ctx = egui::Context::default();
+
+        apply(&ctx, ThemeMode::System);
+
+        assert_style_matches_palette(&ctx, egui::Theme::Light, false);
+        assert_style_matches_palette(&ctx, egui::Theme::Dark, true);
     }
 
     #[test]
