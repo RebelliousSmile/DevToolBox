@@ -15,7 +15,11 @@ on the end-user machine, for either OS.
 - **Artifact**: single `devtoolbox.exe` (Windows) or `devtoolbox` ELF binary (Linux)
   under `target/release/`
 - **Startup at login**:
-  - Windows: HKCU Registry Run key (`platform::windows::RegistryStartupProvider`)
+  - Windows: HKCU Registry Run key (`platform::windows::RegistryStartupProvider`). The
+    value is the quoted `current_exe()` of the process performing boot sync, so refresh
+    it by launching the intended release artifact with `launch_at_startup` enabled;
+    running a debug artifact would persist the debug path instead. Both Windows build
+    profiles use the GUI subsystem and must remain console-free.
   - Linux: XDG autostart `.desktop` file under `$XDG_CONFIG_HOME/autostart/`
     (`platform::linux::LinuxStartupProvider`, wraps `crate::linux::autostart`)
 
