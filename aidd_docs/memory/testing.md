@@ -27,6 +27,12 @@ This document outlines the testing strategy for DevToolBox.
 - Run winclean script tests: `python -m unittest discover -s scripts/winclean/tests -t .` — the `-t .` is required: the package bootstraps its imports from the repo root, so discovery from elsewhere fails to import `scripts.winclean`
 - Run local-model orchestrator tests: `python3 -m unittest discover -s scripts/model_orchestrator/tests`
 - Release build sanity: `cargo build --release`
+- Windows GUI-subsystem gate: after `cargo build` and `cargo build --release`, inspect
+  both PE files directly. Read `e_lfanew` at offset `0x3c`, then the 16-bit `Subsystem`
+  field at `e_lfanew + 0x5c`; `target/debug/devtoolbox.exe` and
+  `target/release/devtoolbox.exe` must both equal `2` (`IMAGE_SUBSYSTEM_WINDOWS_GUI`),
+  not `3` (`IMAGE_SUBSYSTEM_WINDOWS_CUI`). This PowerShell-compatible check avoids a
+  dependency on `dumpbin`, `llvm-readobj`, or `objdump`.
 
 ## Local-model delivery matrix
 
