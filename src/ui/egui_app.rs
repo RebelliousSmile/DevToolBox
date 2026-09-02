@@ -113,6 +113,7 @@ use crate::ui::icon_picker;
 use crate::ui::models_view::{self, ModelsAction, ModelsUiState, ModelsViewState};
 use crate::ui::port_plan;
 use crate::ui::terminal_view::{self, TerminalEvent};
+use crate::ui::{components, theme};
 
 /// A resolved, cached representation of a command/category `icon` field,
 /// ready to draw without re-decoding every frame.
@@ -1282,6 +1283,10 @@ impl EguiApp {
             log::warn!("storage::load failed ({err}); falling back to built-in defaults");
             fallback_config()
         });
+        theme::apply(
+            &cc.egui_ctx,
+            theme::ThemeMode::from_preference(&config.default_settings.theme),
+        );
         // A missing file or a load error both fall back to an empty mapping
         // — this must never crash the app on startup (Part 3 acceptance
         // criteria).
@@ -3868,39 +3873,80 @@ impl EguiApp {
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.active_view, ActiveView::Actions, "Actions");
-            ui.selectable_value(&mut self.active_view, ActiveView::Terminal, "Terminal");
-            ui.selectable_value(
-                &mut self.active_view,
-                ActiveView::Automations,
-                "Automatisations",
-            );
-            ui.selectable_value(&mut self.active_view, ActiveView::Cleanup, "Nettoyage");
-            ui.selectable_value(&mut self.active_view, ActiveView::Models, "Modèles");
-            // Hidden entirely (not just disabled) when the `docker` binary
-            // isn't on PATH — risk register: "tab button rendered only when
-            // `docker_available`".
-            if self.docker_available {
-                ui.selectable_value(&mut self.active_view, ActiveView::Docker, "Docker");
+        if ui.available_width() < theme::COMPACT_BREAKPOINT {
+            egui::ScrollArea::horizontal()
+                .id_salt("compact-navigation")
+                .show(ui, |ui| self.render_navigation(ui, true));
+            ui.separator();
+            self.render_active_view(ui);
+        } else {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(theme::NAV_WIDTH, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| self.render_navigation(ui, false),
+                );
+                ui.separator();
+                ui.vertical(|ui| {
+                    ui.set_min_width((ui.available_width() - theme::GRID).max(320.0));
+                    self.render_active_view(ui);
+                });
+            });
+        }
+    }
+
+    fn render_navigation(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let render_items = |ui: &mut egui::Ui, this: &mut Self| {
+            for (view, label) in [
+                (ActiveView::Actions, "Actions"),
+                (ActiveView::Terminal, "Terminal"),
+                (ActiveView::Automations, "Automatisations"),
+                (ActiveView::Cleanup, "Nettoyage"),
+                (ActiveView::Models, "Modèles"),
+            ] {
+                ui.selectable_value(&mut this.active_view, view, label);
+            }
+            if this.docker_available {
+                ui.selectable_value(&mut this.active_view, ActiveView::Docker, "Docker");
             }
             ui.selectable_value(
-                &mut self.active_view,
+                &mut this.active_view,
                 ActiveView::Preferences,
                 "Préférences",
             );
-            if ui.button("À propos").clicked() {
-                self.active_dialog = Some(ActiveDialog {
-                    kind: dialogs::info(
-                        "À propos de DevToolBox",
-                        "DevToolBox\nLanceur de scripts et d'outils.",
-                    ),
-                    on_confirm: None,
-                });
-            }
-        });
-        ui.separator();
+        };
 
+        if compact {
+            ui.horizontal(|ui| {
+                render_items(ui, self);
+                self.render_about_button(ui);
+            });
+        } else {
+            components::page_header(ui, "DevToolBox", "Vos outils, au même endroit");
+            render_items(ui, self);
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                self.render_about_button(ui);
+                components::badge(ui, concat!("Version ", env!("CARGO_PKG_VERSION")));
+            });
+        }
+    }
+
+    fn render_about_button(&mut self, ui: &mut egui::Ui) {
+        if ui.button("À propos").clicked() {
+            self.active_dialog = Some(ActiveDialog {
+                kind: dialogs::info(
+                    "À propos de DevToolBox",
+                    format!(
+                        "DevToolBox {}\nLanceur de scripts et d'outils.",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                ),
+                on_confirm: None,
+            });
+        }
+    }
+
+    fn render_active_view(&mut self, ui: &mut egui::Ui) {
         match self.active_view {
             ActiveView::Actions => self.render_actions_view(ui),
             ActiveView::Terminal => self.render_terminal_view(ui),

@@ -19,6 +19,8 @@
 
 /// Name under which the embedded font is registered in `FontDefinitions`.
 const FONT_NAME: &str = "noto-emoji-full";
+#[cfg(target_os = "macos")]
+const SYSTEM_FONT_NAME: &str = "devtoolbox-system";
 
 static NOTO_EMOJI: &[u8] = include_bytes!("../../assets/fonts/NotoEmoji-Regular.ttf");
 
@@ -26,6 +28,18 @@ static NOTO_EMOJI: &[u8] = include_bytes!("../../assets/fonts/NotoEmoji-Regular.
 /// as the last fallback of both the `Proportional` and `Monospace` families.
 pub fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
+    #[cfg(target_os = "macos")]
+    if let Some(bytes) = macos_system_font() {
+        fonts.font_data.insert(
+            SYSTEM_FONT_NAME.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, SYSTEM_FONT_NAME.to_owned());
+    }
     fonts.font_data.insert(
         FONT_NAME.to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(NOTO_EMOJI)),
@@ -38,6 +52,22 @@ pub fn font_definitions() -> egui::FontDefinitions {
             .push(FONT_NAME.to_owned());
     }
     fonts
+}
+
+fn valid_sfnt(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x00, 0x01, 0x00, 0x00])
+        || bytes.starts_with(b"OTTO")
+        || bytes.starts_with(b"true")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_font() -> Option<Vec<u8>> {
+    [
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/SFNSRounded.ttf",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read(path).ok().filter(|bytes| valid_sfnt(bytes)))
 }
 
 /// Install the extended font chain on the given context. Called once from
@@ -89,5 +119,13 @@ mod tests {
                 glyph as u32
             );
         }
+    }
+
+    #[test]
+    fn invalid_or_unreadable_system_font_keeps_the_fallback_contract() {
+        assert!(!valid_sfnt(b"not a font"));
+        assert!(valid_sfnt(&[0, 1, 0, 0, 0]));
+        let fonts = font_definitions();
+        assert!(fonts.font_data.contains_key(FONT_NAME));
     }
 }

@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 # Instruction: Construire le contrat visuel vérifiable et la nouvelle coque egui

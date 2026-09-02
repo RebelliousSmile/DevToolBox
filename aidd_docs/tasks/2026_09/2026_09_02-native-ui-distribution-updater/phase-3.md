@@ -1,5 +1,5 @@
 ---
-status: pending
+status: in-progress
 ---
 
 # Instruction: Ajouter les matériaux natifs avec un repli opaque testable
@@ -114,4 +114,3 @@ journey
 | 2 | La cible macOS compile avec titre intégré et appel vibrancy borné derrière cfg. |
 | 3 | Les cibles Windows/Linux compilent avec Mica conditionnel ou fond opaque complet. |
 | 4 | Les erreurs et changements dynamiques reviennent à Opaque sans crash, spam de logs ni perte de contraste. |
-
