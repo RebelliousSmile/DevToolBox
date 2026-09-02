@@ -84,19 +84,26 @@ pub fn resolve_icon(icon: &str, dirs: &[PathBuf]) -> IconResolution {
 /// — candidate 1 above is therefore always present now, unlike the previous
 /// `APPDATA`-unset-skips-the-candidate behavior.
 pub fn icons_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::with_capacity(3);
+    let mut dirs = Vec::with_capacity(5);
 
     // 1. platform::data_dir()/icons
     dirs.push(crate::platform::data_dir().join("icons"));
 
-    // 2. <exe_dir>\assets\
+    // 2. cargo-packager's immutable resource root.
+    if let Ok(format) = cargo_packager_resource_resolver::current_format() {
+        if let Ok(resources) = cargo_packager_resource_resolver::resources_dir(format) {
+            dirs.push(resources.join("assets"));
+        }
+    }
+
+    // 3. <exe_dir>\assets\
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             dirs.push(exe_dir.join("assets"));
         }
     }
 
-    // 3. .\assets\
+    // 4. .\assets\
     dirs.push(PathBuf::from("assets"));
 
     dirs

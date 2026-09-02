@@ -1,0 +1,10 @@
+[package]
+name = "devtoolbox-icon-generator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+resvg = { version = "=0.48.1", default-features = false }
+png = "=0.18.0"
+ico = "=0.5.0"

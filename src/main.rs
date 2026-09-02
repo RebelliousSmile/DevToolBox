@@ -22,6 +22,7 @@ mod process_flags;
 mod python_runtime;
 mod storage;
 mod ui;
+mod uninstall;
 #[cfg(windows)]
 mod windows;
 
@@ -101,6 +102,9 @@ fn init_logging() -> Option<std::path::PathBuf> {
 }
 
 fn main() {
+    if run_maintenance_command() {
+        return;
+    }
     let log_path = init_logging();
     std::panic::set_hook(Box::new(|info| {
         log::error!(
@@ -148,6 +152,37 @@ fn main() {
         Ok(()) => log::info!("eframe event loop exited cleanly"),
         Err(e) => log::error!("eframe::run_native returned an error: {e}"),
     }
+}
+
+fn run_maintenance_command() -> bool {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--prepare-uninstall")
+    {
+        match uninstall::prepare() {
+            Ok(inventory) => println!(
+                "Intégrations retirées; {} racine(s) de données conservée(s).",
+                inventory.user_data.len()
+            ),
+            Err(error) => eprintln!("Préparation de la désinstallation impossible: {error}"),
+        }
+        return true;
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--delete-user-data")
+    {
+        let confirmed = arguments
+            .iter()
+            .any(|argument| argument == "--confirm-delete-data");
+        match uninstall::delete_user_data(confirmed) {
+            Ok(paths) => println!("{} racine(s) de données supprimée(s).", paths.len()),
+            Err(error) => eprintln!("Données conservées: {error}"),
+        }
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]

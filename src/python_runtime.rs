@@ -16,10 +16,20 @@ pub fn action_root() -> PathBuf {
             candidates.push(parent.to_path_buf());
         }
     }
-    discover_action_root(std::env::var_os("DEVTOOLBOX_HOME"), candidates)
+    let packaged = cargo_packager_resource_resolver::current_format()
+        .ok()
+        .and_then(|format| cargo_packager_resource_resolver::resources_dir(format).ok());
+    discover_action_root(packaged, std::env::var_os("DEVTOOLBOX_HOME"), candidates)
 }
 
-fn discover_action_root(configured: Option<OsString>, candidates: Vec<PathBuf>) -> PathBuf {
+fn discover_action_root(
+    packaged: Option<PathBuf>,
+    configured: Option<OsString>,
+    candidates: Vec<PathBuf>,
+) -> PathBuf {
+    if let Some(root) = packaged.filter(|root| root.join("scripts").is_dir()) {
+        return root;
+    }
     if let Some(root) = configured {
         return PathBuf::from(root);
     }
@@ -34,6 +44,67 @@ fn discover_action_root(configured: Option<OsString>, candidates: Vec<PathBuf>) 
         .into_iter()
         .next()
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub const MIN_PYTHON: (u8, u8) = (3, 10);
+pub const MAX_PYTHON: (u8, u8) = (3, 13);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PythonDiagnostic {
+    Supported {
+        executable: String,
+        version: (u8, u8),
+    },
+    Missing {
+        expected: String,
+    },
+    Unsupported {
+        executable: String,
+        version: (u8, u8),
+    },
+    Unreadable {
+        executable: String,
+    },
+}
+
+pub fn parse_python_version(output: &str) -> Option<(u8, u8)> {
+    let version = output.split_whitespace().find(|part| {
+        part.chars()
+            .next()
+            .is_some_and(|value| value.is_ascii_digit())
+    })?;
+    let mut parts = version.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+pub fn diagnose_python(executable: &str) -> PythonDiagnostic {
+    let output = Command::new(executable).arg("--version").output();
+    let Ok(output) = output else {
+        return PythonDiagnostic::Missing {
+            expected: executable.to_string(),
+        };
+    };
+    let text = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let Some(version) = parse_python_version(&text) else {
+        return PythonDiagnostic::Unreadable {
+            executable: executable.to_string(),
+        };
+    };
+    if version >= MIN_PYTHON && version <= MAX_PYTHON {
+        PythonDiagnostic::Supported {
+            executable: executable.to_string(),
+            version,
+        }
+    } else {
+        PythonDiagnostic::Unsupported {
+            executable: executable.to_string(),
+            version,
+        }
+    }
 }
 
 pub fn exists_on_path(name: &str) -> bool {
@@ -209,10 +280,32 @@ mod tests {
     fn configured_distribution_root_wins_outside_repository() {
         let root = PathBuf::from("/opt/devtoolbox-package");
         let resolved = discover_action_root(
+            None,
             Some(root.clone().into_os_string()),
             vec![PathBuf::from("/tmp/unrelated-launch-directory")],
         );
         assert_eq!(resolved, root);
+    }
+
+    #[test]
+    fn packaged_resources_win_before_development_overrides() {
+        let packaged =
+            std::env::temp_dir().join(format!("devtoolbox-packaged-root-{}", std::process::id()));
+        std::fs::create_dir_all(packaged.join("scripts")).unwrap();
+        let resolved = discover_action_root(
+            Some(packaged.clone()),
+            Some(OsString::from("/configured")),
+            vec![PathBuf::from("/repository")],
+        );
+        assert_eq!(resolved, packaged);
+        let _ = std::fs::remove_dir_all(resolved);
+    }
+
+    #[test]
+    fn supported_python_range_is_explicit() {
+        assert_eq!(parse_python_version("Python 3.10.14"), Some((3, 10)));
+        assert_eq!(parse_python_version("Python 3.13.1"), Some((3, 13)));
+        assert_eq!(parse_python_version("garbage"), None);
     }
 
     #[test]

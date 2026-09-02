@@ -3468,6 +3468,46 @@ impl EguiApp {
                             self.set_status(format!("Échec de sauvegarde: {error}"), true);
                         }
                     }
+                    if ui.button("Diagnostiquer Python").clicked() {
+                        let executable = crate::python_runtime::python_for_script(Path::new("."));
+                        let message = match crate::python_runtime::diagnose_python(&executable) {
+                            crate::python_runtime::PythonDiagnostic::Supported {
+                                executable,
+                                version,
+                            } => format!(
+                                "Python {}.{} pris en charge ({executable}).",
+                                version.0, version.1
+                            ),
+                            crate::python_runtime::PythonDiagnostic::Missing { expected } => {
+                                format!(
+                                    "Python introuvable ({expected}); installez Python 3.10 à 3.13."
+                                )
+                            }
+                            crate::python_runtime::PythonDiagnostic::Unsupported {
+                                executable,
+                                version,
+                            } => format!(
+                                "Python {}.{} non pris en charge ({executable}); utilisez 3.10 à 3.13.",
+                                version.0, version.1
+                            ),
+                            crate::python_runtime::PythonDiagnostic::Unreadable { executable } => {
+                                format!("Version Python illisible ({executable}).")
+                            }
+                        };
+                        self.set_status(message, false);
+                    }
+                    if ui.button("Préparer la désinstallation").clicked() {
+                        match crate::uninstall::prepare() {
+                            Ok(_) => self.set_status(
+                                "Intégrations retirées. Les données utilisateur sont conservées.",
+                                false,
+                            ),
+                            Err(error) => self.set_status(
+                                format!("Préparation de la désinstallation impossible: {error}"),
+                                true,
+                            ),
+                        }
+                    }
                     return;
                 }
                 PreferencesSection::Actions => {

@@ -1,0 +1,34 @@
+productName = "DevToolBox"
+version = "0.10.0"
+identifier = "com.rebellioussmile.devtoolbox"
+publisher = "RebelliousSmile"
+description = "Cross-platform developer toolbox"
+homepage = "https://github.com/RebelliousSmile/DevToolBox"
+licenseFile = "LICENSE"
+category = "DeveloperTool"
+outDir = "dist"
+binariesDir = "target/release"
+beforeEachPackageCommand = "cargo build --release --locked"
+icons = ["assets/app-icon/devtoolbox.icns", "assets/app-icon/devtoolbox.ico", "assets/app-icon/devtoolbox.png"]
+resources = [
+  { src = "config", target = "config" },
+  { src = "scripts", target = "scripts" },
+  { src = "assets/fonts", target = "assets/fonts" }
+]
+
+[[binaries]]
+path = "devtoolbox"
+main = true
+
+[macos]
+minimumSystemVersion = "13.0"
+entitlements = "packaging/macos/entitlements.plist"
+
+[nsis]
+installMode = "perUser"
+
+[deb]
+depends = ["libc6 (>= 2.35)", "libx11-6", "libwayland-client0"]
+
+[linux]
+desktopTemplate = "packaging/linux/devtoolbox.desktop"

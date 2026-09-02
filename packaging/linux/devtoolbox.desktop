@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DevToolBox
+Comment=Developer toolbox and command launcher
+Exec=devtoolbox
+Icon=devtoolbox
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=com.rebellioussmile.devtoolbox

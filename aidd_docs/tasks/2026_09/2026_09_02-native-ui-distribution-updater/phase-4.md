@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 # Instruction: Configurer les paquets, ressources et parcours de désinstallation

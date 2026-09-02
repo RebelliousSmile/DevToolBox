@@ -1,5 +1,5 @@
 ---
-status: pending
+status: in-progress
 ---
 
 # Instruction: Implémenter l'updater signé et ses chemins de récupération
@@ -136,4 +136,3 @@ journey
 | 2 | Réseau et installation ne bloquent jamais l'UI, et deb ou emplacement non inscriptible déclenchent un handoff explicite. |
 | 3 | Disque plein, interruption et échec du premier lancement sélectionnent par test le rollback AppImage, la réinstallation NSIS ou la restauration app macOS ; un payload de récupération absent ou invalide interdit l'auto-installation. |
 | 4 | Les fixtures couvrent cadence 24 heures, commande manuelle, jitter, 403, 429, proxy, cache, downgrade, mauvais OS ou architecture, signatures, annulation et absence de clé de production. |
-
