@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.1] - 2026-09-02
+
+### Fixed
+- Docker snapshots now load asynchronously instead of blocking the application
+  while the Docker view initializes
+- Windows debug and release builds both use the GUI subsystem, preventing an
+  empty console or Windows Terminal window when the registered startup entry
+  launches DevToolBox
+
 ## [0.9.0] - 2026-08-28
 
 ### Added
