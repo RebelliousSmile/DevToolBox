@@ -114,6 +114,7 @@ use crate::ui::models_view::{self, ModelsAction, ModelsUiState, ModelsViewState}
 use crate::ui::port_plan;
 use crate::ui::terminal_view::{self, TerminalEvent};
 use crate::ui::{components, native_window, theme};
+use crate::update::service::UpdateState;
 
 /// A resolved, cached representation of a command/category `icon` field,
 /// ready to draw without re-decoding every frame.
@@ -911,6 +912,10 @@ enum ModelsJob {
 /// needs both: the identifier to call the façade with, the name for the
 /// "in progress" and result status messages.
 enum PendingAction {
+    InstallUpdate {
+        manifest: crate::update::manifest::ReleaseManifest,
+        asset: crate::update::manifest::ReleaseAsset,
+    },
     RemoveCategory(String),
     RemoveCommand(String),
     RemoveCommandGroup(String),
@@ -1034,6 +1039,9 @@ pub struct EguiApp {
     active_view: ActiveView,
     native_profile: native_window::NativeProfile,
     native_effect_warning_logged: bool,
+    update_state: UpdateState,
+    update_rx: Option<Receiver<UpdateState>>,
+    update_auto_checked: bool,
     preferences_section: PreferencesSection,
     user_script_proposals: Vec<UserScriptProposal>,
     user_script_scan_error: Option<String>,
@@ -1395,6 +1403,16 @@ impl EguiApp {
             active_view: ActiveView::default(),
             native_profile: native_window::NativeProfile::Opaque,
             native_effect_warning_logged: false,
+            update_state: if crate::update::keys::configured() {
+                UpdateState::Idle
+            } else {
+                UpdateState::Disabled(
+                    "Mises à jour indisponibles dans cette build (aucune clé de production)."
+                        .to_string(),
+                )
+            },
+            update_rx: None,
+            update_auto_checked: false,
             preferences_section: PreferencesSection::default(),
             user_script_proposals: Vec::new(),
             user_script_scan_error: None,
@@ -1478,6 +1496,88 @@ impl EguiApp {
             || self.terminal_running
             || self.cleanup_job.is_some()
             || self.models_job.is_some()
+    }
+
+    fn start_update_check(&mut self) {
+        let Some(format) = crate::update::service::current_package_format() else {
+            self.update_state = UpdateState::Disabled(
+                "Mise à jour intégrée réservée aux paquets installés; utilisez GitHub Releases."
+                    .to_string(),
+            );
+            return;
+        };
+        let Ok(ring) = crate::update::keys::KeyRing::embedded() else {
+            self.update_state =
+                UpdateState::Disabled("Trousseau de mise à jour invalide.".to_string());
+            return;
+        };
+        let Ok(current) = semver::Version::parse(env!("CARGO_PKG_VERSION")) else {
+            self.update_state = UpdateState::Failed("Version applicative invalide.".to_string());
+            return;
+        };
+        let (os, arch) = crate::update::service::current_target();
+        let days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() / 86_400)
+            .unwrap_or(0);
+        crate::update::service::record_check(days.saturating_mul(86_400));
+        self.update_rx = Some(crate::update::service::spawn_check(
+            crate::update::service::UpdateService::new(
+                crate::update::service::HttpTransport,
+                crate::update::service::CheckOnlyInstaller,
+                ring,
+            ),
+            crate::update::MANIFEST_ENDPOINT.to_string(),
+            current,
+            os.to_string(),
+            arch.to_string(),
+            format,
+            days,
+        ));
+        self.update_state = UpdateState::Checking;
+    }
+
+    fn start_update_install(
+        &mut self,
+        manifest: crate::update::manifest::ReleaseManifest,
+        asset: crate::update::manifest::ReleaseAsset,
+    ) {
+        let Ok(ring) = crate::update::keys::KeyRing::embedded() else {
+            self.update_state = UpdateState::Failed("Trousseau de mise à jour invalide.".into());
+            return;
+        };
+        let days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() / 86_400)
+            .unwrap_or(0);
+        self.update_rx = Some(crate::update::service::spawn_install(
+            crate::update::service::UpdateService::new(
+                crate::update::service::HttpTransport,
+                crate::update::service::PlatformInstaller,
+                ring,
+            ),
+            manifest,
+            asset,
+            days,
+        ));
+        self.update_state = UpdateState::Downloading;
+    }
+
+    fn drain_update_events(&mut self) {
+        let Some(receiver) = &self.update_rx else {
+            return;
+        };
+        let mut latest = None;
+        while let Ok(state) = receiver.try_recv() {
+            latest = Some(state);
+        }
+        if let Some(state) = latest {
+            let terminal = !matches!(state, UpdateState::Checking);
+            self.update_state = state;
+            if terminal {
+                self.update_rx = None;
+            }
+        }
     }
 
     fn start_cleanup_analysis(&mut self) {
@@ -2231,6 +2331,9 @@ impl EguiApp {
     /// picked "Oui" — see [`ActiveDialog::on_confirm`].
     fn resolve_pending_action(&mut self, action: PendingAction) {
         match action {
+            PendingAction::InstallUpdate { manifest, asset } => {
+                self.start_update_install(manifest, asset);
+            }
             PendingAction::RemoveCategory(id) => {
                 match storage::remove_category(&mut self.config, &id) {
                     Ok(()) => match self.persist() {
@@ -3508,6 +3611,69 @@ impl EguiApp {
                             ),
                         }
                     }
+                    ui.separator();
+                    ui.strong("Mises à jour");
+                    match &self.update_state {
+                        UpdateState::Disabled(message)
+                        | UpdateState::Failed(message)
+                        | UpdateState::Recovery(message)
+                        | UpdateState::HandOff(message) => {
+                            ui.label(message);
+                        }
+                        UpdateState::Available { manifest, asset } => {
+                            ui.label(format!(
+                                "Version {} disponible — {} octets",
+                                manifest.version, asset.size
+                            ));
+                            ui.label(&manifest.notes);
+                            ui.label(
+                                "L'installation demande une confirmation explicite dans le paquet natif.",
+                            );
+                            if components::primary_button(ui, "Télécharger et installer").clicked()
+                            {
+                                self.active_dialog = Some(ActiveDialog {
+                                    kind: dialogs::confirm(
+                                        "Installer la mise à jour ?",
+                                        format!(
+                                            "Télécharger, vérifier puis installer DevToolBox {} ({} octets) ? L'application devra redémarrer.",
+                                            manifest.version, asset.size
+                                        ),
+                                    ),
+                                    on_confirm: Some(PendingAction::InstallUpdate {
+                                        manifest: manifest.clone(),
+                                        asset: asset.clone(),
+                                    }),
+                                });
+                            }
+                        }
+                        UpdateState::Checking => {
+                            ui.spinner();
+                            ui.label("Recherche d'une mise à jour…");
+                        }
+                        UpdateState::UpToDate => {
+                            ui.label("DevToolBox est à jour.");
+                        }
+                        UpdateState::Idle => {
+                            ui.label("Recherche automatique après le premier rendu.");
+                        }
+                        UpdateState::Downloading => {
+                            ui.label("Téléchargement…");
+                        }
+                        UpdateState::Verifying => {
+                            ui.label("Vérification de la signature…");
+                        }
+                        UpdateState::Installing => {
+                            ui.label("Installation…");
+                        }
+                        UpdateState::RestartRequired => {
+                            ui.label("Redémarrage requis pour terminer la mise à jour.");
+                        }
+                    }
+                    if !matches!(self.update_state, UpdateState::Checking)
+                        && ui.button("Vérifier maintenant").clicked()
+                    {
+                        self.start_update_check();
+                    }
                     return;
                 }
                 PreferencesSection::Actions => {
@@ -3915,6 +4081,29 @@ impl EguiApp {
         self.drain_model_events();
         self.drain_compose_events();
         self.drain_scan_events();
+        self.drain_update_events();
+        if !self.update_auto_checked {
+            self.update_auto_checked = true;
+            if crate::update::keys::configured() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                let jitter = crate::update::service::machine_jitter_secs(&self.machine_id);
+                if crate::update::service::should_auto_check(
+                    crate::update::service::read_last_check(),
+                    now,
+                    jitter,
+                ) {
+                    crate::update::service::record_check(now);
+                    self.start_update_check();
+                }
+            }
+        }
+        if self.update_rx.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
         if self.compose_running || self.compose_scanning || self.docker_fetching {
             // Same polling rationale as `cleanup_job`: the worker's events
             // only land on a repaint.

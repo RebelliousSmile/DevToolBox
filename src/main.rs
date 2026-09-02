@@ -23,6 +23,7 @@ mod python_runtime;
 mod storage;
 mod ui;
 mod uninstall;
+mod update;
 #[cfg(windows)]
 mod windows;
 

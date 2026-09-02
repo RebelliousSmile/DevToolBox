@@ -30,6 +30,12 @@ env_logger = "0.10"
 # keeps a `node_modules` or a `.cache` tree from being walked at all.
 walkdir = "2.5"
 cargo-packager-resource-resolver = { version = "=0.1.2", features = ["auto-detect-format"] }
+cargo-packager-updater = "=0.2.3"
+base64 = "=0.22.1"
+ed25519-dalek = "=2.2.0"
+semver = { version = "=1.0.27", features = ["serde"] }
+sha2 = "=0.10.9"
+ureq = { version = "=3.4.0", features = ["json"] }
 
 # Native cross-platform folder picker for user-script preferences.
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
@@ -64,3 +70,6 @@ identifier = "com.rebellioussmile.devtoolbox"
 
 [dev-dependencies]
 egui_kittest = { version = "0.35.0", default-features = false }
+
+[build-dependencies]
+serde_json = "=1.0.151"

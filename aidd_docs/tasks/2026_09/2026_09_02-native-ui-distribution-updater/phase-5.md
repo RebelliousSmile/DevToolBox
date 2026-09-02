@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 # Instruction: Implémenter l'updater signé et ses chemins de récupération
