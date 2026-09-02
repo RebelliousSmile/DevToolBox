@@ -93,4 +93,3 @@ Total gaps: 22 | Blocker: 6 | Major: 16 | Minor: 0
 
 **[major]** Which pinned Rust toolchain, cargo-packager version, Python range, NSIS toolchain, Linux packaging tools, Xcode version, and notarization tooling define reproducible builds?
 > Vérifier version Cargo/paquet, présence des ressources et absence de fichier sensible avant succès.
-

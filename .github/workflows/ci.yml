@@ -55,4 +55,3 @@ jobs:
           cargo +1.93.0 test --all-targets --locked -- --test-threads=1
       - name: Build unsigned release candidate
         run: cargo +1.93.0 build --release --locked
-
