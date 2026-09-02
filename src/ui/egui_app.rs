@@ -4310,6 +4310,10 @@ impl EguiApp {
 
     fn render_automations_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("DevToolBox — Automatisations");
+        if !crate::platform::capabilities().automations {
+            ui.label("Cette fonction n'est pas encore disponible sur macOS.");
+            return;
+        }
         ui.label("Automatisations créées par l'utilisateur ou un logiciel tiers (les tâches/timers fournis par l'OS sont masqués).");
 
         if let Some(status) = &self.status {
@@ -4380,6 +4384,14 @@ impl EguiApp {
     /// first screenful — the installed-apps report below.
     fn render_cleanup_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("DevToolBox — Nettoyage");
+
+        let capabilities = crate::platform::capabilities();
+        if !capabilities.cleanup && !capabilities.recommendations {
+            ui.label(
+                "Le nettoyage et les recommandations ne sont pas encore disponibles sur macOS.",
+            );
+            return;
+        }
 
         let state = CleanupViewState {
             rows: self.cleanup_rows.as_deref(),

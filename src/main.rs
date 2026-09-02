@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-//! DevToolBox - Windows 11 / Linux Command Launcher
+//! DevToolBox - cross-platform developer toolbox
 //!
 //! Cross-platform Rust application using `eframe`/`egui` for the UI (Part 2
 //! of the multi-OS transformation). Phase 1 wires up a minimal `eframe::App`
@@ -11,7 +11,10 @@ mod cleanup;
 mod command_runner;
 mod docker;
 mod icons;
+#[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
 mod models;
 mod net;
 mod platform;
@@ -19,6 +22,7 @@ mod process_flags;
 mod python_runtime;
 mod storage;
 mod ui;
+#[cfg(windows)]
 mod windows;
 
 use eframe::egui;
@@ -66,12 +70,9 @@ fn rotate_if_oversized(path: &std::path::Path, max_bytes: u64) {
 }
 
 fn init_logging() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let directory = base.join("DevToolBox");
+    let path = platform::state_log_path();
+    let directory = path.parent()?.to_path_buf();
     std::fs::create_dir_all(&directory).ok()?;
-    let path = directory.join("devtoolbox.log");
     rotate_if_oversized(&path, LOG_MAX_BYTES);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -109,7 +110,8 @@ fn main() {
     }));
 
     log::info!(
-        "DevToolBox v0.1.0 starting; pid={}; log={:?}",
+        "DevToolBox v{} starting; pid={}; log={:?}",
+        env!("CARGO_PKG_VERSION"),
         std::process::id(),
         log_path
     );
@@ -128,7 +130,7 @@ fn main() {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("DevToolBox - Actions Windows")
+            .with_title("DevToolBox")
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([400.0, 300.0]),
         ..Default::default()

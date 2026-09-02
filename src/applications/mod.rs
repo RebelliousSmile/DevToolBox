@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
 pub mod usage;
 #[cfg(windows)]
 mod windows;
@@ -33,6 +35,10 @@ impl ProcessProvider for SystemProcessProvider {
         #[cfg(windows)]
         {
             windows::executable_paths()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::executable_paths()
         }
     }
 }

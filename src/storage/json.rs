@@ -119,7 +119,12 @@ fn default_config_filename() -> &'static str {
     "default.linux.json"
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn default_config_filename() -> &'static str {
+    "default.macos.json"
+}
+
+#[cfg(windows)]
 fn default_config_filename() -> &'static str {
     "default.json"
 }
@@ -460,6 +465,18 @@ mod tests {
             !config.commands.is_empty(),
             "default.linux.json must ship at least one real command"
         );
+    }
+
+    #[test]
+    fn all_shipped_defaults_parse_and_keep_schema_version() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("config");
+        for filename in ["default.json", "default.linux.json", "default.macos.json"] {
+            let config = load_from(&root.join(filename)).expect("shipped default must parse");
+            assert_eq!(config.version, "0.1.0", "{filename} schema changed");
+            let serialized = serde_json::to_string(&config).expect("serialize default");
+            let round_trip: Config = serde_json::from_str(&serialized).expect("round trip");
+            assert_eq!(round_trip.version, "0.1.0");
+        }
     }
 
     #[test]

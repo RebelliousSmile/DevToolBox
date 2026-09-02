@@ -25,6 +25,8 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(any(target_os = "macos", test))]
+pub mod macos;
 #[cfg(windows)]
 pub mod windows;
 
@@ -64,6 +66,11 @@ pub fn config_path() -> PathBuf {
     linux::config_path()
 }
 
+#[cfg(target_os = "macos")]
+pub fn config_path() -> PathBuf {
+    macos::config_path()
+}
+
 /// Base directory for application data (icons, etc.).
 ///
 /// - Windows: `%APPDATA%\DevToolBox` — relocated from the first candidate
@@ -79,6 +86,11 @@ pub fn data_dir() -> PathBuf {
 #[cfg(target_os = "linux")]
 pub fn data_dir() -> PathBuf {
     linux::data_dir()
+}
+
+#[cfg(target_os = "macos")]
+pub fn data_dir() -> PathBuf {
+    macos::data_dir()
 }
 
 /// Path to the application log file.
@@ -97,6 +109,11 @@ pub fn state_log_path() -> PathBuf {
 #[cfg(target_os = "linux")]
 pub fn state_log_path() -> PathBuf {
     linux::state_log_path()
+}
+
+#[cfg(target_os = "macos")]
+pub fn state_log_path() -> PathBuf {
+    macos::state_log_path()
 }
 
 /// Sync the OS "launch at startup/login" registration to match `enabled`.
@@ -130,6 +147,16 @@ pub fn sync_startup(enabled: bool) -> Result<(), StartupError> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn sync_startup(enabled: bool) -> Result<(), StartupError> {
+    let provider = macos::MacStartupProvider;
+    if enabled {
+        provider.register()
+    } else {
+        provider.unregister()
+    }
+}
+
 /// Identifier for "which machine is this", used by the (future) per-machine
 /// command mapping resolution layer.
 ///
@@ -154,6 +181,11 @@ pub fn machine_id() -> String {
     linux::machine_id()
 }
 
+#[cfg(target_os = "macos")]
+pub fn machine_id() -> String {
+    macos::machine_id()
+}
+
 /// Path to the per-machine command mapping file (`machine-commands.json`).
 ///
 /// Deliberately mirrors [`state_log_path`]'s directory-resolution
@@ -174,6 +206,11 @@ pub fn machine_commands_path() -> PathBuf {
     linux::machine_commands_path()
 }
 
+#[cfg(target_os = "macos")]
+pub fn machine_commands_path() -> PathBuf {
+    macos::machine_commands_path()
+}
+
 /// Machine-local, non-roaming prospective application usage history.
 #[cfg(windows)]
 pub fn application_usage_path() -> PathBuf {
@@ -184,4 +221,78 @@ pub fn application_usage_path() -> PathBuf {
 #[cfg(target_os = "linux")]
 pub fn application_usage_path() -> PathBuf {
     linux::application_usage_path()
+}
+
+#[cfg(target_os = "macos")]
+pub fn application_usage_path() -> PathBuf {
+    macos::application_usage_path()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capabilities {
+    pub actions: bool,
+    pub terminal: bool,
+    pub docker_read: bool,
+    pub automations: bool,
+    pub recommendations: bool,
+    pub cleanup: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformKind {
+    Windows,
+    Linux,
+    Macos,
+}
+
+pub const fn capabilities_for(platform: PlatformKind) -> Capabilities {
+    match platform {
+        PlatformKind::Windows | PlatformKind::Linux => Capabilities {
+            actions: true,
+            terminal: true,
+            docker_read: true,
+            automations: true,
+            recommendations: true,
+            cleanup: true,
+        },
+        PlatformKind::Macos => Capabilities {
+            actions: true,
+            terminal: true,
+            docker_read: true,
+            automations: false,
+            recommendations: false,
+            cleanup: false,
+        },
+    }
+}
+
+pub const fn capabilities() -> Capabilities {
+    #[cfg(windows)]
+    {
+        capabilities_for(PlatformKind::Windows)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        capabilities_for(PlatformKind::Linux)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        capabilities_for(PlatformKind::Macos)
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn macos_core_and_unavailable_capabilities_are_explicit() {
+        let capabilities = capabilities_for(PlatformKind::Macos);
+        assert!(capabilities.actions);
+        assert!(capabilities.terminal);
+        assert!(capabilities.docker_read);
+        assert!(!capabilities.automations);
+        assert!(!capabilities.recommendations);
+        assert!(!capabilities.cleanup);
+    }
 }

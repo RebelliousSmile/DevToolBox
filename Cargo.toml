@@ -1,9 +1,9 @@
 [package]
 name = "devtoolbox"
-version = "0.1.0"
+version = "0.10.0"
 edition = "2021"
 authors = ["RebelliousSmile <contact@rebellioussmile.com>"]
-description = "Cross-platform (Windows/Linux) command launcher with a native eframe/egui UI"
+description = "Cross-platform command launcher and developer toolbox with a native eframe/egui UI"
 license = "MIT"
 
 [dependencies]
