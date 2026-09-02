@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def verify(root: Path) -> None:
     cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
-    packager = tomllib.loads((root / "Packager.toml").read_text(encoding="utf-8"))
+    packager = tomllib.loads((root / "packager.toml").read_text(encoding="utf-8"))
     toolchain = tomllib.loads((root / "rust-toolchain.toml").read_text(encoding="utf-8"))
     version = cargo["package"]["version"]
     if version != packager["version"] or tuple(map(int, version.split("."))) < (0, 10, 0):
@@ -44,7 +44,7 @@ def self_test() -> None:
         root = Path(directory)
         (root / ".github" / "workflows").mkdir(parents=True)
         (root / "Cargo.toml").write_text('[package]\nversion = "0.10.0"\n', encoding="utf-8")
-        (root / "Packager.toml").write_text('version = "0.10.0"\n', encoding="utf-8")
+        (root / "packager.toml").write_text('version = "0.10.0"\n', encoding="utf-8")
         (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.93.0"\n', encoding="utf-8")
         workflow = """permissions:\n  contents: read\njobs:\n  fixture:\n    runs-on: windows-2025\n    steps:\n      - uses: actions/checkout@1111111111111111111111111111111111111111\n# ubuntu-22.04 macos-15 macos-15-intel\n"""
         (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")

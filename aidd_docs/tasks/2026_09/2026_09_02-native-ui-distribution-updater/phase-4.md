@@ -12,7 +12,7 @@ status: done
 .
 ├── Cargo.toml                         ✏️ ajouter métadonnées et suite cargo-packager épinglée
 ├── Cargo.lock                         ✏️ verrouiller le resolver
-├── Packager.toml                      ✅ configurer DMG NSIS deb et AppImage
+├── packager.toml                      ✅ configurer DMG NSIS deb et AppImage
 ├── THIRD_PARTY_LICENSES.md            ✅ inventorier les ressources redistribuées
 ├── assets
 │   └── app-icon

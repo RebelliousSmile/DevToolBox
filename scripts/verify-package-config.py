@@ -7,7 +7,7 @@ import sys
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-config = tomllib.loads((ROOT / "Packager.toml").read_text(encoding="utf-8"))
+config = tomllib.loads((ROOT / "packager.toml").read_text(encoding="utf-8"))
 cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
 errors: list[str] = []
 
@@ -16,11 +16,13 @@ def require(condition: bool, message: str) -> None:
         errors.append(message)
 
 require(config.get("identifier") == "com.rebellioussmile.devtoolbox", "identifiant incorrect")
+require(config.get("name") == cargo["package"]["name"], "nom de paquet Cargo absent ou divergent")
 require(config.get("version") == cargo["package"]["version"], "versions Cargo/Packager divergentes")
-require(config.get("nsis", {}).get("installMode") == "perUser", "NSIS doit être par utilisateur")
+require(config.get("nsis", {}).get("installMode") == "currentUser", "NSIS doit être par utilisateur")
 require(config.get("macos", {}).get("minimumSystemVersion") == "13.0", "macOS 13 minimum absent")
 require(set(config.get("deb", {}).get("depends", [])) >= {"libc6 (>= 2.35)", "libx11-6", "libwayland-client0"}, "dépendances deb incomplètes")
-require("desktopTemplate" in config.get("linux", {}), "desktop Linux absent")
+require("desktopTemplate" in config.get("deb", {}), "template desktop deb absent")
+require(config.get("linux", {}).get("generateDesktopEntry") is True, "desktop Linux absent")
 for path in [
     "assets/app-icon/devtoolbox.icns", "assets/app-icon/devtoolbox.ico",
     "assets/app-icon/devtoolbox.png", "packaging/macos/entitlements.plist",
