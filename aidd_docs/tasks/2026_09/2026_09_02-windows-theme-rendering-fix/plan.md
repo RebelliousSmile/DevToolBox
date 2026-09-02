@@ -1,6 +1,6 @@
 ---
 objective: "DevToolBox affiche sous Windows un thème cohérent, replie Mica sans perte de lisibilité et peut être réinstallé sans que le répertoire du programme menace les données utilisateur."
-status: in-progress
+status: implemented
 ---
 
 # Plan: Corriger le thème et le rendu natif Windows
