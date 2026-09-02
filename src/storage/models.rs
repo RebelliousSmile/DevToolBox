@@ -27,6 +27,10 @@ pub struct Settings {
     /// and drop the user into `fallback_config()`.
     #[serde(default = "default_dormant_after_days")]
     pub dormant_after_days: u32,
+    /// Base directory for relative user-authored `@python` actions. Bundled
+    /// Python tools keep their own distribution-root resolution.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_scripts_directory: String,
 }
 
 /// Two months, the threshold the user asked for.
@@ -179,6 +183,7 @@ mod tests {
         assert_eq!(s.theme, "light");
         assert!(s.launch_at_startup);
         assert!(s.show_descriptions);
+        assert!(s.user_scripts_directory.is_empty());
 
         // Categories
         assert_eq!(config.categories.len(), 3);
@@ -239,6 +244,20 @@ mod tests {
             assert_eq!(reloaded, config, "round-trip must be lossless");
             assert_eq!(reloaded.default_settings.dormant_after_days, threshold);
         }
+    }
+
+    #[test]
+    fn user_scripts_directory_defaults_empty_and_round_trips_when_configured() {
+        let mut config: Config = serde_json::from_str(DEFAULT_JSON).expect("parse failed");
+        assert!(config.default_settings.user_scripts_directory.is_empty());
+
+        config.default_settings.user_scripts_directory = "/home/user/scripts".to_string();
+        let serialized = serde_json::to_string(&config).expect("serialize failed");
+        let reloaded: Config = serde_json::from_str(&serialized).expect("re-parse failed");
+        assert_eq!(
+            reloaded.default_settings.user_scripts_directory,
+            "/home/user/scripts"
+        );
     }
 
     #[test]

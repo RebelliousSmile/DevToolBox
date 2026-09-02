@@ -430,6 +430,7 @@ mod tests {
             launch_at_startup: false,
             show_descriptions: true,
             dormant_after_days: 60,
+            user_scripts_directory: String::new(),
         }
     }
 

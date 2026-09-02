@@ -125,7 +125,16 @@ fn exists_on_path(name: &str) -> bool {
 ///
 /// Non-`@python` commands pass through unchanged, same as the Windows
 /// cascade.
+#[cfg(test)]
 fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, String> {
+    resolve_action_with_user_scripts(command, root, None)
+}
+
+fn resolve_action_with_user_scripts(
+    command: &str,
+    bundled_root: &Path,
+    user_scripts_directory: Option<&Path>,
+) -> Result<ActionSpec, String> {
     let (program, args) = tokenize(command)?;
     if program != "@python" {
         return Ok(ActionSpec {
@@ -141,7 +150,14 @@ fn resolve_action(command: &str, root: &Path) -> Result<ActionSpec, String> {
     let script_path = if Path::new(script).is_absolute() {
         PathBuf::from(script)
     } else {
-        root.join(script)
+        let bundled_candidate = bundled_root.join(script);
+        if bundled_candidate.is_file() {
+            bundled_candidate
+        } else if let Some(user_root) = user_scripts_directory {
+            user_root.join(script)
+        } else {
+            bundled_candidate
+        }
     };
     if !script_path.is_file() {
         return Err(format!(
@@ -201,8 +217,20 @@ fn stream_output<R: Read + Send + 'static>(
 /// `config/builtin-actions.json`) are transparently rewritten to a real
 /// Python interpreter invocation before spawning — every other command
 /// passes through unchanged.
+#[cfg(test)]
 pub fn launch_captured(command: &str, sender: Sender<TerminalEvent>) -> Result<u32, String> {
-    let spec = resolve_action(command, &action_root())?;
+    launch_captured_with_user_scripts(command, None, sender)
+}
+
+/// Launch an action while resolving missing relative Python paths against a
+/// user-selected scripts directory. Bundled paths that exist below the
+/// distribution root always win, keeping internal tools isolated.
+pub fn launch_captured_with_user_scripts(
+    command: &str,
+    user_scripts_directory: Option<&Path>,
+    sender: Sender<TerminalEvent>,
+) -> Result<u32, String> {
+    let spec = resolve_action_with_user_scripts(command, &action_root(), user_scripts_directory)?;
     launch_captured_program(
         &spec.program,
         &spec.args,
@@ -445,6 +473,39 @@ mod tests {
             "expected a PATH-resolved interpreter (no local .venv here), got: {}",
             spec.program
         );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn user_scripts_directory_resolves_custom_paths_without_shadowing_bundled_tools() {
+        let temp = std::env::temp_dir().join(format!(
+            "devtoolbox_terminal_user_scripts_{}",
+            std::process::id()
+        ));
+        let bundled_script = temp.join("distribution/scripts/builtin.py");
+        let user_script = temp.join("user-scripts/custom.py");
+        let shadow_script = temp.join("user-scripts/scripts/builtin.py");
+        for script in [&bundled_script, &user_script, &shadow_script] {
+            std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+            std::fs::write(script, "print('ok')").unwrap();
+        }
+
+        let custom = resolve_action_with_user_scripts(
+            "@python custom.py",
+            &temp.join("distribution"),
+            Some(&temp.join("user-scripts")),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&custom.args[1]), user_script.as_path());
+
+        let bundled = resolve_action_with_user_scripts(
+            "@python scripts/builtin.py",
+            &temp.join("distribution"),
+            Some(&temp.join("user-scripts")),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&bundled.args[1]), bundled_script.as_path());
 
         let _ = std::fs::remove_dir_all(temp);
     }

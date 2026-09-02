@@ -30,6 +30,9 @@ env_logger = "0.10"
 # keeps a `node_modules` or a `.cache` tree from being walked at all.
 walkdir = "2.5"
 
+# Native cross-platform folder picker for user-script preferences.
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+
 [target.'cfg(windows)'.dependencies]
 # Windows APIs
 windows = { version = "0.52", features = [

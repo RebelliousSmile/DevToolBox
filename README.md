@@ -6,8 +6,8 @@ actions personnalisées, avec une interface graphique native cross-plateforme
 
 ## Actions de script
 
-Les commandes classiques restent acceptées telles quelles. Une action Python utilise
-le préfixe `@python` et un chemin relatif à la racine DevToolBox :
+Les commandes classiques restent acceptées telles quelles. Une action Python intégrée
+utilise le préfixe `@python` et un chemin relatif à la racine interne de DevToolBox :
 
 ```text
 @python scripts/sftp_fetch/sftp_fetch.py config.yaml --only pro
@@ -17,6 +17,17 @@ DevToolBox utilise en priorité `.venv/Scripts/python.exe` (Windows) ou `.venv/b
 (Linux) à côté du script, puis la variable `DEVTOOLBOX_PYTHON`, et enfin `python3`
 disponible dans le système. Le script est exécuté depuis son propre dossier, ce qui rend
 ses fichiers de configuration relatifs portables.
+
+Un dossier distinct pour les scripts de l'utilisateur peut être sélectionné avec
+**Préférences → Actions et scripts → Parcourir…**. Une action telle que
+`@python sauvegarde.py` est alors résolue dans ce dossier. Les chemins absolus restent
+acceptés. Ce réglage ne modifie jamais la racine des outils intégrés ni
+`DEVTOOLBOX_HOME`, qui reste géré par le programme.
+
+Le bouton **Scanner** parcourt récursivement cette bibliothèque, ignore les marqueurs
+de paquet et les environnements cachés, puis présente les scripts Python comme des
+propositions sélectionnables. Leur ajout explicite crée les actions dans la catégorie
+« Scripts utilisateur ».
 
 ## 🎯 Objectifs
 

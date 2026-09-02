@@ -81,6 +81,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use eframe::egui;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::applications::{
     self, RecommendationReport, ReportEvent, SystemProcessProvider, UsageService,
@@ -645,6 +646,7 @@ fn fallback_config() -> Config {
             launch_at_startup: false,
             show_descriptions: true,
             dormant_after_days: 60,
+            user_scripts_directory: String::new(),
         },
         categories: Vec::new(),
         commands: vec![
@@ -793,6 +795,86 @@ enum ActiveView {
     Models,
     Docker,
     Preferences,
+}
+
+/// Sub-navigation within the Preferences workspace, mirroring the permanent
+/// selectable sections used by the Models view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PreferencesSection {
+    General,
+    #[default]
+    Actions,
+    Terminal,
+    Automations,
+    Cleanup,
+    Models,
+    Docker,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UserScriptProposal {
+    relative_path: PathBuf,
+    selected: bool,
+}
+
+fn should_descend_into_script_entry(entry: &DirEntry) -> bool {
+    if !entry.file_type().is_dir() || entry.depth() == 0 {
+        return true;
+    }
+    let name = entry.file_name().to_string_lossy();
+    !name.starts_with('.') && name != "__pycache__" && name != "node_modules"
+}
+
+fn scan_user_python_scripts(root: &Path) -> Result<Vec<PathBuf>, String> {
+    if !root.is_dir() {
+        return Err(format!(
+            "Dossier de scripts introuvable : {}",
+            root.display()
+        ));
+    }
+    let mut scripts = Vec::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(should_descend_into_script_entry)
+    {
+        let entry = entry.map_err(|error| format!("Scan impossible : {error}"))?;
+        let path = entry.path();
+        let is_python = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("py"));
+        let is_package_marker = path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("__init__.py"));
+        if entry.file_type().is_file() && is_python && !is_package_marker {
+            if let Ok(relative) = path.strip_prefix(root) {
+                scripts.push(relative.to_path_buf());
+            }
+        }
+    }
+    scripts.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+    Ok(scripts)
+}
+
+fn user_script_command(relative_path: &Path) -> String {
+    let portable = relative_path.to_string_lossy().replace('\\', "/");
+    format!("@python \"{portable}\"")
+}
+
+fn user_script_id(relative_path: &Path) -> String {
+    let slug: String = relative_path
+        .with_extension("")
+        .to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("user-script-{}", slug.trim_matches('-'))
 }
 
 /// What the background `clean.py` thread is currently doing, if anything —
@@ -948,6 +1030,10 @@ pub struct EguiApp {
     rename_buffers: HashMap<String, String>,
     status: Option<StatusMessage>,
     active_view: ActiveView,
+    preferences_section: PreferencesSection,
+    user_script_proposals: Vec<UserScriptProposal>,
+    user_script_scan_error: Option<String>,
+    user_scripts_scanned: bool,
     /// `Some` blocks the rest of the UI for the frame — see `ui_content`.
     active_dialog: Option<ActiveDialog>,
     terminal_input: String,
@@ -1284,6 +1370,10 @@ impl EguiApp {
             rename_buffers: HashMap::new(),
             status: None,
             active_view: ActiveView::default(),
+            preferences_section: PreferencesSection::default(),
+            user_script_proposals: Vec::new(),
+            user_script_scan_error: None,
+            user_scripts_scanned: false,
             active_dialog: None,
             terminal_input: String::new(),
             terminal_lines: VecDeque::new(),
@@ -1964,7 +2054,9 @@ impl EguiApp {
     /// status with no visible result.
     fn launch_command(&mut self, command_id: &str, command: &str) {
         let (tx, rx) = std::sync::mpsc::channel();
-        match terminal_view::launch_captured(command, tx) {
+        let user_scripts = self.config.default_settings.user_scripts_directory.trim();
+        let user_scripts = (!user_scripts.is_empty()).then(|| Path::new(user_scripts));
+        match terminal_view::launch_captured_with_user_scripts(command, user_scripts, tx) {
             Ok(_pid) => {
                 self.action_rx = Some(rx);
                 self.action_running = Some(command_id.to_string());
@@ -3009,6 +3101,273 @@ impl EguiApp {
         }
     }
 
+    fn render_preferences_actions_header(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Scripts");
+        ui.label(
+            "Dossier de base des scripts ajoutés par l’utilisateur. Les outils intégrés conservent leur emplacement géré par DevToolBox.",
+        );
+        let current_directory = self
+            .config
+            .default_settings
+            .user_scripts_directory
+            .trim()
+            .to_string();
+        let mut browse = false;
+        let mut reset = false;
+        ui.horizontal(|ui| {
+            ui.label("Dossier de scripts utilisateur");
+            if current_directory.is_empty() {
+                ui.weak("Aucun dossier sélectionné");
+            } else {
+                ui.monospace(&current_directory);
+            }
+            if ui.button("Parcourir…").clicked() {
+                browse = true;
+            }
+            if ui
+                .add_enabled(
+                    !current_directory.is_empty(),
+                    egui::Button::new("Réinitialiser"),
+                )
+                .clicked()
+            {
+                reset = true;
+            }
+        });
+        ui.weak("Exemple : @python sauvegarde.py résout sauvegarde.py dans ce dossier.");
+
+        if browse {
+            let mut dialog = rfd::FileDialog::new().set_title("Choisir le dossier de scripts");
+            if !current_directory.is_empty() && Path::new(&current_directory).is_dir() {
+                dialog = dialog.set_directory(&current_directory);
+            }
+            if let Some(directory) = dialog.pick_folder() {
+                self.persist_user_scripts_directory(Some(&directory));
+            }
+        } else if reset {
+            self.persist_user_scripts_directory(None);
+        }
+
+        let mut scan = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!current_directory.is_empty(), egui::Button::new("Scanner"))
+                .on_disabled_hover_text("Sélectionnez d’abord un dossier de scripts")
+                .clicked()
+            {
+                scan = true;
+            }
+            ui.label("Recherche récursivement les fichiers Python à proposer comme actions.");
+        });
+        if scan {
+            self.user_scripts_scanned = true;
+            match scan_user_python_scripts(Path::new(&current_directory)) {
+                Ok(paths) => {
+                    self.user_script_proposals = paths
+                        .into_iter()
+                        .map(|relative_path| UserScriptProposal {
+                            relative_path,
+                            selected: true,
+                        })
+                        .collect();
+                    self.user_script_scan_error = None;
+                }
+                Err(error) => {
+                    self.user_script_proposals.clear();
+                    self.user_script_scan_error = Some(error);
+                }
+            }
+        }
+
+        if let Some(error) = &self.user_script_scan_error {
+            ui.colored_label(egui::Color32::from_rgb(0xC4, 0x2B, 0x1C), error);
+        } else if self.user_scripts_scanned && self.user_script_proposals.is_empty() {
+            ui.label("Aucun script Python à proposer.");
+        }
+
+        if !self.user_script_proposals.is_empty() {
+            ui.separator();
+            ui.strong("Propositions d’actions");
+            let configured: HashSet<String> = self
+                .config
+                .commands
+                .iter()
+                .map(|command| command.command.clone())
+                .collect();
+            for proposal in &mut self.user_script_proposals {
+                let command = user_script_command(&proposal.relative_path);
+                let already_added = configured.contains(&command);
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        !already_added,
+                        egui::Checkbox::new(
+                            &mut proposal.selected,
+                            proposal.relative_path.display().to_string(),
+                        ),
+                    );
+                    if already_added {
+                        ui.weak("déjà configuré");
+                    }
+                });
+            }
+            let selected_count = self
+                .user_script_proposals
+                .iter()
+                .filter(|proposal| {
+                    proposal.selected
+                        && !configured.contains(&user_script_command(&proposal.relative_path))
+                })
+                .count();
+            if ui
+                .add_enabled(
+                    selected_count > 0,
+                    egui::Button::new(format!(
+                        "Ajouter les scripts sélectionnés ({selected_count})"
+                    )),
+                )
+                .clicked()
+            {
+                self.inject_selected_user_scripts();
+            }
+        }
+    }
+
+    fn render_preferences_docker(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.strong("Docker");
+        let mut persist_threshold = false;
+        ui.horizontal(|ui| {
+            let label = ui.label("Seuil de dormance (jours)");
+            let response = ui
+                .add(
+                    egui::DragValue::new(&mut self.config.default_settings.dormant_after_days)
+                        .range(1..=3650)
+                        .speed(1.0),
+                )
+                .labelled_by(label.id)
+                .on_hover_text(
+                    "Un conteneur arrêté, une image inutilisée ou un volume orphelin \
+                     plus ancien que ce seuil est signalé « dormant ».",
+                );
+            if response.drag_stopped() || response.lost_focus() {
+                persist_threshold = true;
+            }
+        });
+        if persist_threshold {
+            match self.persist() {
+                Ok(()) => self.set_status("Seuil de dormance mis à jour.", false),
+                Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
+            }
+        }
+    }
+
+    fn inject_selected_user_scripts(&mut self) {
+        let mut used_ids: HashSet<String> = self
+            .config
+            .commands
+            .iter()
+            .map(|command| command.id.clone())
+            .collect();
+        let existing_commands: HashSet<String> = self
+            .config
+            .commands
+            .iter()
+            .map(|command| command.command.clone())
+            .collect();
+        let selected: Vec<PathBuf> = self
+            .user_script_proposals
+            .iter()
+            .filter(|proposal| proposal.selected)
+            .map(|proposal| proposal.relative_path.clone())
+            .collect();
+        let previous = self.config.clone();
+        let mut added = 0usize;
+
+        for relative_path in selected {
+            let command_text = user_script_command(&relative_path);
+            if existing_commands.contains(&command_text) {
+                continue;
+            }
+            let base_id = user_script_id(&relative_path);
+            let mut id = base_id.clone();
+            let mut suffix = 2usize;
+            while used_ids.contains(&id) {
+                id = format!("{base_id}-{suffix}");
+                suffix += 1;
+            }
+            used_ids.insert(id.clone());
+            let name = relative_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().replace(['_', '-'], " "))
+                .unwrap_or_else(|| relative_path.display().to_string());
+            self.config.commands.push(storage::Command {
+                id,
+                name,
+                command: command_text,
+                category: "user-scripts".to_string(),
+                icon: "🐍".to_string(),
+                is_favorite: false,
+                shortcut: None,
+                variant_group: None,
+                group_name: None,
+                variant_label: None,
+                machine_specific: false,
+                info: Some(format!("Importé depuis {}", relative_path.display())),
+            });
+            added += 1;
+        }
+
+        if added == 0 {
+            self.set_status("Aucune nouvelle action à ajouter.", false);
+            return;
+        }
+        if !self
+            .config
+            .categories
+            .iter()
+            .any(|category| category.id == "user-scripts")
+        {
+            self.config.categories.push(storage::Category {
+                id: "user-scripts".to_string(),
+                name: "Scripts utilisateur".to_string(),
+                icon: "🐍".to_string(),
+            });
+        }
+        match self.persist() {
+            Ok(()) => {
+                self.user_script_proposals.retain(|proposal| {
+                    !self.config.commands.iter().any(|command| {
+                        command.command == user_script_command(&proposal.relative_path)
+                    })
+                });
+                self.set_status(format!("{added} action(s) ajoutée(s)."), false);
+            }
+            Err(error) => {
+                self.config = previous;
+                self.set_status(format!("Échec de sauvegarde: {error}"), true);
+            }
+        }
+    }
+
+    fn persist_user_scripts_directory(&mut self, directory: Option<&Path>) {
+        let previous = self.config.default_settings.user_scripts_directory.clone();
+        self.config.default_settings.user_scripts_directory = directory
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        match self.persist() {
+            Ok(()) => {
+                self.user_script_proposals.clear();
+                self.user_script_scan_error = None;
+                self.user_scripts_scanned = false;
+                self.set_status("Dossier de scripts utilisateur mis à jour.", false);
+            }
+            Err(err) => {
+                self.config.default_settings.user_scripts_directory = previous;
+                self.set_status(format!("Échec de sauvegarde: {err}"), true);
+            }
+        }
+    }
+
     /// Dedicated Préférences view — moved out of `render_actions_view` (was
     /// a `CollapsingHeader` at the top of the Actions grid) so category
     /// management no longer eats into the vertical space available for
@@ -3018,6 +3377,43 @@ impl EguiApp {
     /// existing category-creation form and the action create/edit form.
     fn render_preferences_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Préférences");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::General,
+                "Général",
+            );
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::Actions,
+                "Actions et scripts",
+            );
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::Terminal,
+                "Terminal",
+            );
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::Automations,
+                "Automatisations",
+            );
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::Cleanup,
+                "Nettoyage",
+            );
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::Models,
+                "Modèles",
+            );
+            ui.selectable_value(
+                &mut self.preferences_section,
+                PreferencesSection::Docker,
+                "Docker",
+            );
+        });
         ui.separator();
 
         if let Some(status) = &self.status {
@@ -3030,6 +3426,44 @@ impl EguiApp {
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            match self.preferences_section {
+                PreferencesSection::General => {
+                    ui.strong("Général");
+                    ui.label("Les préférences sont regroupées par espace de travail.");
+                    return;
+                }
+                PreferencesSection::Actions => {
+                    self.render_preferences_actions_header(ui);
+                    ui.separator();
+                }
+                PreferencesSection::Docker => {
+                    self.render_preferences_docker(ui);
+                    return;
+                }
+                PreferencesSection::Terminal => {
+                    ui.strong("Terminal");
+                    ui.label("Aucun réglage spécifique pour le moment.");
+                    return;
+                }
+                PreferencesSection::Automations => {
+                    ui.strong("Automatisations");
+                    ui.label("Aucun réglage spécifique pour le moment.");
+                    return;
+                }
+                PreferencesSection::Cleanup => {
+                    ui.strong("Nettoyage");
+                    ui.label("Aucun réglage spécifique pour le moment.");
+                    return;
+                }
+                PreferencesSection::Models => {
+                    ui.strong("Modèles");
+                    ui.label(
+                        "Les réglages de bibliothèque et de fournisseurs restent accessibles dans Modèles → Réglages.",
+                    );
+                    return;
+                }
+            }
+
             let mut category_actions: Vec<CategoryAction> = Vec::new();
             let mut remove_command_request: Option<(String, String)> = None;
             let mut edit_command_request: Option<storage::Command> = None;
@@ -3346,39 +3780,6 @@ impl EguiApp {
 
             ui.separator();
             self.render_action_form(ui);
-
-            // Self-contained Docker block, deliberately last: it only reads
-            // and writes `default_settings.dormant_after_days`, so it adds no
-            // coupling to anything above it.
-            ui.separator();
-            ui.strong("Docker");
-            let mut persist_threshold = false;
-            ui.horizontal(|ui| {
-                let label = ui.label("Seuil de dormance (jours)");
-                let response = ui
-                    .add(
-                        egui::DragValue::new(&mut self.config.default_settings.dormant_after_days)
-                            .range(1..=3650)
-                            .speed(1.0),
-                    )
-                    .labelled_by(label.id)
-                    .on_hover_text(
-                        "Un conteneur arrêté, une image inutilisée ou un volume orphelin \
-                         plus ancien que ce seuil est signalé « dormant ».",
-                    );
-                // A `DragValue` reports `changed()` on *every frame* of a
-                // drag; persisting there would rewrite config.json dozens of
-                // times per second.
-                if response.drag_stopped() || response.lost_focus() {
-                    persist_threshold = true;
-                }
-            });
-            if persist_threshold {
-                match self.persist() {
-                    Ok(()) => self.set_status("Seuil de dormance mis à jour.", false),
-                    Err(err) => self.set_status(format!("Échec de sauvegarde: {err}"), true),
-                }
-            }
         });
     }
 
@@ -3593,7 +3994,9 @@ impl EguiApp {
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
-        match terminal_view::launch_captured(&command, tx) {
+        let user_scripts = self.config.default_settings.user_scripts_directory.trim();
+        let user_scripts = (!user_scripts.is_empty()).then(|| Path::new(user_scripts));
+        match terminal_view::launch_captured_with_user_scripts(&command, user_scripts, tx) {
             Ok(_pid) => {
                 self.terminal_lines.push_back(format!("$ {command}"));
                 terminal_view::trim_lines(&mut self.terminal_lines);
@@ -4342,6 +4745,7 @@ mod tests {
                 launch_at_startup: false,
                 show_descriptions: true,
                 dormant_after_days: 60,
+                user_scripts_directory: String::new(),
             },
             categories: vec![Category {
                 id: "system".into(),
@@ -4750,6 +5154,118 @@ mod tests {
     // then reload the saved file from disk to confirm the on-disk state
     // actually round-trips. `config_path` is a tempfile, so the real user
     // config is never touched.
+
+    #[test]
+    fn preferences_use_one_per_workspace_subtab_and_persist_user_scripts() {
+        let config_path = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-preferences-tabs.json",
+            std::process::id()
+        ));
+        let app = EguiApp::new_for_test(sample_config(), config_path.clone());
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut EguiApp| {
+                    app.ui_content(ui);
+                },
+                app,
+            );
+
+        harness.get_by_label("Préférences").click();
+        harness.run();
+        for label in ["Général", "Actions et scripts"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "onglet absent: {label}"
+            );
+        }
+        for label in ["Terminal", "Automatisations", "Nettoyage", "Modèles"] {
+            assert!(
+                harness.get_all_by_label(label).nth(1).is_some(),
+                "sous-onglet absent: {label}"
+            );
+        }
+        assert!(harness.query_by_label("Docker").is_some());
+        assert!(harness.query_by_label("Catégories").is_some());
+        assert!(harness
+            .query_by_label("Dossier de scripts utilisateur")
+            .is_some());
+        assert!(harness.query_by_label("Parcourir…").is_some());
+        assert!(harness.query_by_label("Scanner").is_some());
+
+        harness.get_by_label("Général").click();
+        harness.run();
+        assert!(harness.query_by_label("Catégories").is_none());
+        harness.get_by_label("Actions et scripts").click();
+        harness.run();
+
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        harness
+            .state_mut()
+            .persist_user_scripts_directory(Some(repository_root));
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload persisted config");
+        assert_eq!(
+            reloaded.default_settings.user_scripts_directory,
+            repository_root.display().to_string(),
+            "saving the Scripts preference must persist the selected root"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn script_library_scan_proposes_python_files_and_injects_selected_actions() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtoolbox-test-{}-script-library",
+            std::process::id()
+        ));
+        let library = dir.join("library");
+        for relative in [
+            "backup.py",
+            "tools/report.py",
+            "tools/__init__.py",
+            ".venv/ignored.py",
+            "notes.txt",
+        ] {
+            let path = library.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "print('ok')").unwrap();
+        }
+
+        let found = scan_user_python_scripts(&library).expect("scan script library");
+        assert_eq!(
+            found,
+            vec![PathBuf::from("backup.py"), PathBuf::from("tools/report.py")]
+        );
+
+        let config_path = dir.join("config.json");
+        let mut app = EguiApp::new_for_test(sample_config(), config_path.clone());
+        app.persist_user_scripts_directory(Some(&library));
+        app.user_script_proposals = found
+            .into_iter()
+            .map(|relative_path| UserScriptProposal {
+                relative_path,
+                selected: true,
+            })
+            .collect();
+        app.inject_selected_user_scripts();
+
+        let reloaded = storage::json::load_from(&config_path).expect("reload imported actions");
+        assert!(reloaded
+            .categories
+            .iter()
+            .any(|category| category.id == "user-scripts"));
+        assert!(reloaded
+            .commands
+            .iter()
+            .any(|command| command.command == "@python \"backup.py\""));
+        assert!(reloaded
+            .commands
+            .iter()
+            .any(|command| command.command == "@python \"tools/report.py\""));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn toggling_favorite_via_the_real_ui_persists_across_a_simulated_restart() {
