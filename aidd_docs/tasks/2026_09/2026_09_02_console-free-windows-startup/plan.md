@@ -1,6 +1,6 @@
 ---
 objective: "Garantir que DevToolBox ne crée aucune fenêtre console au démarrage Windows, quel que soit le profil de compilation, et que l'entrée Run active cible le binaire release."
-status: in-progress
+status: implemented
 ---
 
 # Plan: Supprimer la console vide au démarrage Windows
