@@ -1038,6 +1038,7 @@ pub struct EguiApp {
     status: Option<StatusMessage>,
     active_view: ActiveView,
     native_profile: native_window::NativeProfile,
+    native_material_renderer_support: bool,
     native_effect_warning_logged: bool,
     update_state: UpdateState,
     update_rx: Option<Receiver<UpdateState>>,
@@ -1314,6 +1315,7 @@ impl EguiApp {
             crate::platform::application_usage_path(),
             Arc::new(SystemProcessProvider),
         );
+        let renderer_support = native_window::current_renderer_support(cc);
         let mut app = Self::from_parts(
             config,
             None,
@@ -1324,9 +1326,11 @@ impl EguiApp {
             true,
             docker_view::available(),
         );
+        app.native_material_renderer_support = renderer_support;
         let dark = cc.egui_ctx.theme() == egui::Theme::Dark;
         let desired = native_window::decide(native_window::current_inputs(
             app.config.default_settings.native_effects,
+            app.native_material_renderer_support,
         ));
         match native_window::apply(cc, native_window::NativeProfile::Opaque, desired, dark) {
             Ok(profile) => app.native_profile = profile,
@@ -1402,6 +1406,7 @@ impl EguiApp {
             status: None,
             active_view: ActiveView::default(),
             native_profile: native_window::NativeProfile::Opaque,
+            native_material_renderer_support: false,
             native_effect_warning_logged: false,
             update_state: if crate::update::keys::configured() {
                 UpdateState::Idle
@@ -5040,6 +5045,7 @@ impl eframe::App for EguiApp {
         let dark = ui.visuals().dark_mode;
         let desired = native_window::decide(native_window::current_inputs(
             self.config.default_settings.native_effects,
+            self.native_material_renderer_support,
         ));
         if desired != self.native_profile {
             match native_window::apply(frame, self.native_profile, desired, dark) {

@@ -15,16 +15,29 @@ pub enum HostPlatform {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererBackend {
+    Dx12,
+    Metal,
+    Other,
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MaterialInputs {
     pub platform: HostPlatform,
     pub native_effects: bool,
     pub reduce_transparency: bool,
     pub system_support: bool,
+    pub renderer_support: bool,
 }
 
 pub fn decide(inputs: MaterialInputs) -> NativeProfile {
-    if !inputs.native_effects || inputs.reduce_transparency || !inputs.system_support {
+    if !inputs.native_effects
+        || inputs.reduce_transparency
+        || !inputs.system_support
+        || !inputs.renderer_support
+    {
         return NativeProfile::Opaque;
     }
     match inputs.platform {
@@ -34,7 +47,7 @@ pub fn decide(inputs: MaterialInputs) -> NativeProfile {
     }
 }
 
-pub fn current_inputs(native_effects: bool) -> MaterialInputs {
+pub fn current_inputs(native_effects: bool, renderer_support: bool) -> MaterialInputs {
     let reduce_transparency = std::env::var("DEVTOOLBOX_REDUCE_TRANSPARENCY")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"));
     MaterialInputs {
@@ -50,7 +63,73 @@ pub fn current_inputs(native_effects: bool) -> MaterialInputs {
         native_effects,
         reduce_transparency,
         system_support: cfg!(any(target_os = "macos", target_os = "windows")),
+        renderer_support,
     }
+}
+
+pub fn renderer_supports_material(platform: HostPlatform, backend: RendererBackend) -> bool {
+    matches!(
+        (platform, backend),
+        (HostPlatform::Windows, RendererBackend::Dx12)
+            | (HostPlatform::MacOS, RendererBackend::Metal)
+    )
+}
+
+pub fn current_renderer_support(cc: &eframe::CreationContext<'_>) -> bool {
+    let platform = current_inputs(true, true).platform;
+    let backend = cc
+        .wgpu_render_state
+        .as_ref()
+        .map(|state| match state.adapter.get_info().backend {
+            eframe::wgpu::Backend::Dx12 => RendererBackend::Dx12,
+            eframe::wgpu::Backend::Metal => RendererBackend::Metal,
+            _ => RendererBackend::Other,
+        })
+        .unwrap_or(RendererBackend::Unavailable);
+    renderer_supports_material(platform, backend)
+}
+
+fn backend_priority(backend: eframe::wgpu::Backend) -> u8 {
+    if backend == eframe::wgpu::Backend::Dx12 {
+        0
+    } else {
+        1
+    }
+}
+
+fn device_priority(device: eframe::wgpu::DeviceType) -> u8 {
+    match device {
+        eframe::wgpu::DeviceType::DiscreteGpu => 0,
+        eframe::wgpu::DeviceType::IntegratedGpu => 1,
+        eframe::wgpu::DeviceType::VirtualGpu => 2,
+        eframe::wgpu::DeviceType::Cpu => 3,
+        eframe::wgpu::DeviceType::Other => 4,
+    }
+}
+
+pub fn configure_renderer(options: &mut eframe::NativeOptions) {
+    #[cfg(windows)]
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
+            adapters
+                .iter()
+                .filter(|adapter| {
+                    surface.is_none_or(|surface| adapter.is_surface_supported(surface))
+                })
+                .min_by_key(|adapter| {
+                    let info = adapter.get_info();
+                    (
+                        backend_priority(info.backend),
+                        device_priority(info.device_type),
+                    )
+                })
+                .cloned()
+                .ok_or_else(|| "aucun adaptateur wgpu compatible avec la surface".to_string())
+        }));
+    }
+
+    #[cfg(not(windows))]
+    let _ = options;
 }
 
 pub fn configure_viewport(builder: eframe::egui::ViewportBuilder) -> eframe::egui::ViewportBuilder {
@@ -105,7 +184,10 @@ pub fn apply(
             let _ = window_vibrancy::clear_mica(window);
         }
         if desired == NativeProfile::WindowsMica {
-            window_vibrancy::apply_mica(window, Some(dark)).map_err(|error| error.to_string())?;
+            if let Err(error) = window_vibrancy::apply_mica(window, Some(dark)) {
+                let _ = window_vibrancy::clear_mica(window);
+                return Err(error.to_string());
+            }
         }
     }
     Ok(desired)
@@ -142,6 +224,7 @@ mod tests {
             native_effects: true,
             reduce_transparency: false,
             system_support: true,
+            renderer_support: true,
         }
     }
 
@@ -170,6 +253,9 @@ mod tests {
         value.reduce_transparency = false;
         value.system_support = false;
         assert_eq!(decide(value), NativeProfile::Opaque);
+        value.system_support = true;
+        value.renderer_support = false;
+        assert_eq!(decide(value), NativeProfile::Opaque);
     }
 
     #[test]
@@ -186,5 +272,37 @@ mod tests {
             fallback_after_error(NativeProfile::MacVibrancy, Err("permission refused"));
         assert_eq!(profile, NativeProfile::Opaque);
         assert_eq!(diagnostic.as_deref(), Some("permission refused"));
+    }
+
+    #[test]
+    fn native_material_requires_the_platform_renderer_pair() {
+        assert!(renderer_supports_material(
+            HostPlatform::Windows,
+            RendererBackend::Dx12
+        ));
+        assert!(!renderer_supports_material(
+            HostPlatform::Windows,
+            RendererBackend::Other
+        ));
+        assert!(renderer_supports_material(
+            HostPlatform::MacOS,
+            RendererBackend::Metal
+        ));
+        assert!(!renderer_supports_material(
+            HostPlatform::Linux,
+            RendererBackend::Dx12
+        ));
+    }
+
+    #[test]
+    fn dx12_is_preferred_without_overriding_device_quality() {
+        assert!(
+            backend_priority(eframe::wgpu::Backend::Dx12)
+                < backend_priority(eframe::wgpu::Backend::Vulkan)
+        );
+        assert!(
+            device_priority(eframe::wgpu::DeviceType::DiscreteGpu)
+                < device_priority(eframe::wgpu::DeviceType::Cpu)
+        );
     }
 }

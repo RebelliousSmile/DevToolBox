@@ -133,7 +133,7 @@ fn main() {
         }
     }
 
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport: ui::native_window::configure_viewport(
             egui::ViewportBuilder::default()
                 .with_title("DevToolBox")
@@ -142,6 +142,7 @@ fn main() {
         ),
         ..Default::default()
     };
+    ui::native_window::configure_renderer(&mut native_options);
 
     let run_result = eframe::run_native(
         "DevToolBox",
