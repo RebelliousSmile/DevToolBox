@@ -1,6 +1,6 @@
 ---
 objective: "DevToolBox contient une interface soignée avec replis natifs, des paquets installables sur trois OS, un updater signé et une automatisation prête à être qualifiée puis publiée par les responsables de release."
-status: in-progress
+status: implemented
 ---
 
 # Plan: Interface native et distribution qualifiable sur trois OS
