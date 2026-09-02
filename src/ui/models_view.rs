@@ -539,20 +539,22 @@ mod tests {
 
     #[test]
     fn filters_protected_duplicates_and_variants_without_confusing_sizes() {
-        let mut artifact = Artifact::default();
-        artifact.artifact_id = "llama-q4".into();
-        artifact.family = "llm".into();
-        artifact.format = "gguf".into();
-        artifact.quantization = Some("Q4_K_M".into());
-        artifact.logical_size = Some(10);
-        artifact.allocated_size = Some(20);
-        artifact.duplicate_group = Some("sha256:x".into());
-        artifact.protection = Protection {
-            protected: true,
-            reasons: vec!["keep".into()],
-        };
-        artifact.identity = ArtifactIdentity {
-            state: "verified".into(),
+        let artifact = Artifact {
+            artifact_id: "llama-q4".into(),
+            family: "llm".into(),
+            format: "gguf".into(),
+            quantization: Some("Q4_K_M".into()),
+            logical_size: Some(10),
+            allocated_size: Some(20),
+            duplicate_group: Some("sha256:x".into()),
+            protection: Protection {
+                protected: true,
+                reasons: vec!["keep".into()],
+            },
+            identity: ArtifactIdentity {
+                state: "verified".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let snapshot = snapshot(vec![artifact]);
@@ -598,6 +600,7 @@ mod tests {
         assert!(!offer.executable);
     }
 
+    #[derive(Default)]
     struct TestState {
         form: ModelsUiState,
         snapshot: Option<CatalogSnapshot>,
@@ -610,24 +613,6 @@ mod tests {
         loading: bool,
         busy: bool,
         actions: Vec<ModelsAction>,
-    }
-
-    impl Default for TestState {
-        fn default() -> Self {
-            Self {
-                form: ModelsUiState::default(),
-                snapshot: None,
-                offers: Vec::new(),
-                progress: Vec::new(),
-                recovery: Vec::new(),
-                guided: None,
-                terminal: None,
-                error: None,
-                loading: false,
-                busy: false,
-                actions: Vec::new(),
-            }
-        }
     }
 
     fn view_harness(state: TestState) -> Harness<'static, TestState> {

@@ -1246,14 +1246,38 @@ mod tests {
 
     // --- run_command_with_timeout / classification --------------------------
 
+    #[cfg(windows)]
+    fn slow_test_command() -> (&'static str, Vec<&'static str>) {
+        (
+            "cmd.exe",
+            vec!["/C", "ping", "-n", "3", "127.0.0.1", ">NUL"],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn slow_test_command() -> (&'static str, Vec<&'static str>) {
+        ("sleep", vec!["2"])
+    }
+
+    #[cfg(windows)]
+    fn fast_test_command() -> (&'static str, Vec<&'static str>) {
+        ("cmd.exe", vec!["/C", "exit", "0"])
+    }
+
+    #[cfg(not(windows))]
+    fn fast_test_command() -> (&'static str, Vec<&'static str>) {
+        ("true", vec![])
+    }
+
     #[test]
     fn action_timeout_classifies_as_command_failed_not_daemon_unreachable() {
         // `sleep 2` deliberately outlives the 100ms timeout so this stays
         // fast: run_command_with_timeout doesn't care what binary it
         // spawns, only that it doesn't exit in time.
+        let (program, arguments) = slow_test_command();
         let result = run_command_with_timeout(
-            "sleep",
-            &["2"],
+            program,
+            &arguments,
             Duration::from_millis(100),
             OperationClass::Action,
         );
@@ -1265,9 +1289,10 @@ mod tests {
 
     #[test]
     fn listing_timeout_classifies_as_daemon_unreachable() {
+        let (program, arguments) = slow_test_command();
         let result = run_command_with_timeout(
-            "sleep",
-            &["2"],
+            program,
+            &arguments,
             Duration::from_millis(100),
             OperationClass::Listing,
         );
@@ -1279,8 +1304,13 @@ mod tests {
 
     #[test]
     fn a_fast_command_succeeds_before_its_timeout() {
-        let result =
-            run_command_with_timeout("true", &[], Duration::from_secs(5), OperationClass::Action);
+        let (program, arguments) = fast_test_command();
+        let result = run_command_with_timeout(
+            program,
+            &arguments,
+            Duration::from_secs(5),
+            OperationClass::Action,
+        );
         assert_eq!(result, Ok(String::new()));
     }
 

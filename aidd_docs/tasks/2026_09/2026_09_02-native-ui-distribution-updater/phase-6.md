@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Instruction: Livrer la CI, les portes de release et le dossier de qualification
@@ -115,4 +115,3 @@ journey
 | 2 | Les fixtures de cinq artefacts produisent un manifeste exact ; clé production absente, empreinte divergente, updater désactivé ou autre incohérence empêche la transition draft vers publiée. |
 | 3 | Chaque porte externe possède un acteur, une preuve, un état et un message ; son absence bloque uniquement la publication stable. |
 | 4 | README, changelog, mémoire et dossier readiness distinguent sans ambiguïté implémentation, qualification et publication ; Linux documente une vérification Minisign reproductible avant la première exécution. |
-

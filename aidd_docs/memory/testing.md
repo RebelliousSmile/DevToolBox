@@ -88,4 +88,18 @@ This document outlines the testing strategy for DevToolBox.
   effect; tests gate real side effects behind a `docker_actions_enabled`
   flag (false in tests) and assert on an invocation counter.
 
-> No CI integration yet; tests are run locally.
+## Native distribution matrix
+
+GitHub CI runs format, check, clippy, serialized tests and a release build on Windows
+x64, Ubuntu 22.04 x64, macOS arm64 and macOS Intel with Rust 1.93.0. Cross-compilation
+checks both Apple targets locally where installed. Updater unit tests use deterministic
+Ed25519 fixtures and injected transport/installers; they cover downgrade, target and
+URL rejection, rotation, payload/recovery integrity, cadence, backoff and recovery
+strategy without network or production secrets.
+
+Release configuration tests are secret-free:
+`python scripts/verify-package-config.py`,
+`python scripts/verify-release-config.py`, and
+`python scripts/generate-update-manifest.py --self-test`. Native visual, installer,
+signature, update and removal evidence remains a publication gate documented in
+`docs/release-readiness.md`; its absence does not turn a code test green.

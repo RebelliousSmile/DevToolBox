@@ -2,8 +2,9 @@
 
 ## Design Implementation
 
-- **UI Framework**: WinUI 3 (Microsoft UI Library) — native Windows 11 look & feel, no WebView
-- **Styling Method**: native XAML controls; dynamic XAML generation planned (`src/ui/xaml_gen.rs`)
+- **UI Framework**: `eframe`/`egui`, native Rust rendering without a WebView
+- **Styling Method**: semantic tokens in `src/ui/theme.rs`, shared components and
+  platform window materials behind `src/ui/native_window.rs`
 
 ## Design System
 
@@ -51,4 +52,9 @@ When `storage::remove_category` is called, it:
 
 - **Keyboard navigation**: customizable per-command shortcuts (e.g. `Ctrl+N`)
 
-> Detailed design tokens / component specs not yet defined — UI is in Phase 1 (MVP).
+The current measurable contract is `docs/visual-contract.md`: compact horizontal
+navigation below 1024 px, 184 px sidebar above it, 160 ms meaningful transitions,
+AA-oriented contrast assertions and no continuous repaint at idle. macOS uses system
+fonts and vibrancy when available, Windows 11 uses Mica, and all targets retain a fully
+opaque accessible fallback. `DEVTOOLBOX_REDUCE_TRANSPARENCY` provides a deterministic
+qualification switch.

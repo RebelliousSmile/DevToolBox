@@ -562,5 +562,13 @@ C4Context
     Rel(app, lin, "Spawns process, registers XDG autostart - cfg(target_os = linux)")
 ```
 
-> No external/network services. All integration is with local OS APIs (Windows 11 or
-> Linux with `systemd --user`).
+The normal application remains local-first. The optional updater is the sole remote
+path: it reads `latest.json` and immutable release assets from
+`RebelliousSmile/DevToolBox` on GitHub over HTTPS. `src/update/` rejects other hosts,
+unknown keys, incompatible targets, downgrade/equal versions, invalid hashes and
+payloads outside the size bound before invoking an installer.
+
+macOS 13+ is a first-class target alongside Windows and Linux. Platform services live
+behind `src/platform/`; macOS startup uses a user LaunchAgent. Window materials are a
+cosmetic policy only: vibrancy on macOS, Mica on Windows 11, opaque fallback elsewhere
+or when accessibility requests reduced transparency.

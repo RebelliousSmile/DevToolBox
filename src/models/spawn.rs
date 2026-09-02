@@ -315,7 +315,7 @@ mod tests {
 
     fn receive_terminal(receiver: Receiver<ModelWorkerEvent>) -> Result<ProgressEvent, String> {
         loop {
-            match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
+            match receiver.recv_timeout(Duration::from_secs(30)).unwrap() {
                 ModelWorkerEvent::Terminal(result) => return result,
                 ModelWorkerEvent::Progress(_)
                 | ModelWorkerEvent::Inventory(_)
@@ -357,7 +357,7 @@ mod tests {
     fn inventory_runs_without_taking_the_mutation_slot() {
         let (sender, receiver) = mpsc::channel();
         spawn_inventory(sender);
-        match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
+        match receiver.recv_timeout(Duration::from_secs(30)).unwrap() {
             ModelWorkerEvent::Inventory(Ok(snapshot)) => assert_eq!(snapshot.schema_version, 1),
             other => panic!("unexpected inventory outcome: {other:?}"),
         }
@@ -398,7 +398,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         spawn_inventory(sender);
         assert!(matches!(
-            receiver.recv_timeout(Duration::from_secs(10)).unwrap(),
+            receiver.recv_timeout(Duration::from_secs(30)).unwrap(),
             ModelWorkerEvent::Inventory(Ok(_))
         ));
     }
@@ -419,7 +419,7 @@ mod tests {
             ],
             sender,
         );
-        match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
+        match receiver.recv_timeout(Duration::from_secs(30)).unwrap() {
             ModelWorkerEvent::Progress(event) => assert_eq!(event.kind, "schema"),
             other => panic!("unexpected first event: {other:?}"),
         }

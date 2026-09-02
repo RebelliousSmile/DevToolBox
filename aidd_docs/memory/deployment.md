@@ -57,3 +57,17 @@ on the end-user machine, for either OS.
 | Command exec overhead | < 50 ms     |
 
 > No CI/CD pipeline, container, or remote infrastructure at this stage — local build and run only.
+# Distribution and release
+
+Rust 1.93.0 and dependency lockfiles are release inputs. `cargo-packager` 0.11.8
+builds two DMGs (macOS arm64/Intel), NSIS x64, deb x64 and AppImage x64. CI uses
+explicit `windows-2025`, `ubuntu-22.04`, `macos-15` and `macos-15-intel` runners;
+third-party actions are pinned by full commit SHA and default permissions are read-only.
+
+Development builds may omit updater keys and show a disabled updater. Stable builds
+set `DEVTOOLBOX_RELEASE_BUILD=1` and point `DEVTOOLBOX_UPDATE_PUBLIC_KEYS` at the
+protected public JSON keyring; `build.rs` refuses the build otherwise. Signing and
+publication run only in the protected `production-release` environment. Assets first
+enter a draft; `latest.json` is generated and uploaded last, and explicit protected
+approval is required to clear the draft flag. See `docs/release-readiness.md` and
+`docs/updater-key-operations.md`.

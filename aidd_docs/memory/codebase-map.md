@@ -36,6 +36,15 @@ flowchart TD
     UIMOD --> MODELS
 ```
 
+Distribution additions: `src/macos/` provides LaunchAgent/process integration;
+`src/ui/{theme,components,native_window,visual_harness}.rs` owns the adaptive visual
+contract and native-material fallback; `src/update/` owns manifest selection,
+embedded public keys, bounded workers, payload verification and installer handoff;
+`src/uninstall.rs` separates integration cleanup from confirmed data deletion.
+`Packager.toml`, `packaging/`, and `scripts/package.*` produce DMG, NSIS, deb and
+AppImage artifacts. `.github/workflows/` plus the three `scripts/*release*.py` gates
+turn those artifacts into a protected draft and an updater manifest.
+
 ## Standalone scripts (`scripts/`)
 
 Independent, stdlib-only Python utilities living alongside the Rust crate, each with its own `tests/` run via `python -m unittest discover`: `sftp_fetch/`, `deps_audit/` (repo-declared deps vs source audit), `system_inventory/` (read-only Windows dev-machine disk inventory: registry, AppData/dotfolders/ProgramData, Scoop/Choco, PATH, Docker/WSL vhdx), `winclean/` (dry-run-first disk cleaner; imports `system_inventory` as its **read-only** discovery layer and must never modify it — see `memory/internal/decisions/winclean-separate-package.md`).

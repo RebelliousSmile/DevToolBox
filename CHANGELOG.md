@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0] - Unreleased
+
+### Added
+- Support macOS 13+ Intel et Apple Silicon, avec intégrations LaunchAgent et chemins
+  natifs.
+- Contrat visuel adaptatif egui, thèmes accessibles, motion bornée, vibrancy macOS,
+  Mica Windows 11 et fallback opaque portable.
+- Paquets finaux DMG, NSIS, deb et AppImage, ressources reproductibles et parcours
+  explicites de préparation du retrait ou suppression confirmée des données.
+- Updater intégré signé Ed25519 : sélection par OS/architecture/format, contrôle de
+  version, URL GitHub immuable, taille et SHA-256, cadence 24 h et confirmation.
+- Récupération vérifiée avant installation NSIS/macOS et sauvegarde atomique de
+  l'AppImage ; le deb reste géré par le système.
+- CI quatre cibles et release draft protégée : secrets absents des pull requests,
+  actions épinglées, `latest.json` publié en dernier après contrôle des cinq assets.
+
+### Security
+- Une build stable échoue sans trousseau public de production ; les clés privées ne
+  sont lues que par le job protégé et ne sont jamais stockées dans le dépôt.
+
 ## [0.9.1] - 2026-09-02
 
 ### Fixed

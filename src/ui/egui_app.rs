@@ -914,7 +914,7 @@ enum ModelsJob {
 enum PendingAction {
     InstallUpdate {
         manifest: crate::update::manifest::ReleaseManifest,
-        asset: crate::update::manifest::ReleaseAsset,
+        asset: Box<crate::update::manifest::ReleaseAsset>,
     },
     RemoveCategory(String),
     RemoveCommand(String),
@@ -2332,7 +2332,7 @@ impl EguiApp {
     fn resolve_pending_action(&mut self, action: PendingAction) {
         match action {
             PendingAction::InstallUpdate { manifest, asset } => {
-                self.start_update_install(manifest, asset);
+                self.start_update_install(manifest, *asset);
             }
             PendingAction::RemoveCategory(id) => {
                 match storage::remove_category(&mut self.config, &id) {
@@ -5082,6 +5082,14 @@ mod tests {
     };
     use storage::{Category, Command, Settings};
 
+    fn echo_test_command(message: &str) -> String {
+        if cfg!(windows) {
+            format!("cmd.exe /C echo {message}")
+        } else {
+            format!("echo {message}")
+        }
+    }
+
     fn sample_config() -> Config {
         Config {
             docker_stacks: Vec::new(),
@@ -6634,7 +6642,7 @@ mod tests {
         harness.run();
         harness
             .get_by_label("commande")
-            .type_text("echo hello-from-kittest-terminal-view");
+            .type_text(&echo_test_command("hello-from-kittest-terminal-view"));
         harness.run();
 
         harness.get_by_label("Lancer").click();
@@ -6842,7 +6850,7 @@ mod tests {
         config.commands.push(Command {
             id: "echo-card".into(),
             name: "Echo Carte".into(),
-            command: "echo hello-from-card-click".into(),
+            command: echo_test_command("hello-from-card-click"),
             category: "system".into(),
             icon: "🔧".into(),
             is_favorite: false,
@@ -6972,7 +6980,7 @@ mod tests {
                 "sync",
                 "Synchroniser",
                 "Pro",
-                "echo hello-from-pro",
+                &echo_test_command("hello-from-pro"),
                 "system",
                 true,
             ),
@@ -6981,7 +6989,7 @@ mod tests {
                 "sync",
                 "Synchroniser",
                 "Perso",
-                "echo hello-from-perso",
+                &echo_test_command("hello-from-perso"),
                 "system",
                 true,
             ),
@@ -7055,7 +7063,7 @@ mod tests {
                 "sync",
                 "Synchroniser",
                 "Pro",
-                "echo hello-from-pro",
+                &echo_test_command("hello-from-pro"),
                 "system",
                 true,
             ),
@@ -7064,7 +7072,7 @@ mod tests {
                 "sync",
                 "Synchroniser",
                 "Perso",
-                "echo hello-from-perso",
+                &echo_test_command("hello-from-perso"),
                 "system",
                 true,
             ),

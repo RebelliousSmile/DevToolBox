@@ -17,7 +17,7 @@ pub enum UpdateState {
     Checking,
     Available {
         manifest: ReleaseManifest,
-        asset: ReleaseAsset,
+        asset: Box<ReleaseAsset>,
     },
     Downloading,
     Verifying,
@@ -87,11 +87,11 @@ impl Installer for PlatformInstaller {
         payload: &[u8],
         recovery: Option<&VerifiedRecovery>,
     ) -> Result<UpdateState, String> {
-        match format {
-            PackageFormat::Deb => Ok(UpdateState::HandOff(
+        match recovery_strategy(format) {
+            RecoveryStrategy::SystemPackageManager => Ok(UpdateState::HandOff(
                 "Mise à jour déléguée au gestionnaire de paquets système.".to_string(),
             )),
-            PackageFormat::Nsis => {
+            RecoveryStrategy::ReinstallNsis => {
                 let recovery = recovery.ok_or_else(|| {
                     "verified NSIS recovery payload missing; manual reinstall required".to_string()
                 })?;
@@ -109,8 +109,8 @@ impl Installer for PlatformInstaller {
                     .map_err(|error| format!("cannot launch NSIS updater: {error}"))?;
                 Ok(UpdateState::RestartRequired)
             }
-            PackageFormat::Appimage => install_appimage(payload),
-            PackageFormat::App => {
+            RecoveryStrategy::RestorePreviousAppImage => install_appimage(payload),
+            RecoveryStrategy::RestoreMacApp => {
                 let recovery = recovery.ok_or_else(|| {
                     "verified macOS recovery payload missing; manual reinstall required".to_string()
                 })?;
@@ -189,7 +189,26 @@ impl Transport for HttpTransport {
             .max_redirects(3)
             .build();
         let agent = ureq::Agent::new_with_config(config);
-        let mut response = agent.get(url).call().map_err(|error| error.to_string())?;
+        let mut attempt = 0;
+        let mut response = loop {
+            match agent.get(url).call() {
+                Ok(response) => break response,
+                Err(error) => {
+                    let status = match &error {
+                        ureq::Error::StatusCode(code) => Some(*code),
+                        _ => None,
+                    };
+                    let Some(delay) = status.and_then(|code| backoff_seconds(code, attempt)) else {
+                        return Err(error.to_string());
+                    };
+                    if attempt >= 2 {
+                        return Err(error.to_string());
+                    }
+                    std::thread::sleep(Duration::from_secs(delay));
+                    attempt += 1;
+                }
+            }
+        };
         response
             .body_mut()
             .with_config()
@@ -229,6 +248,7 @@ impl<T: Transport, I: Installer> UpdateService<T, I> {
         Ok((manifest, asset))
     }
 
+    #[cfg(test)]
     pub fn download_and_install(
         &self,
         manifest: &ReleaseManifest,
@@ -304,7 +324,10 @@ pub fn spawn_check<T: Transport, I: Installer>(
         };
         match service.check(&endpoint, &context) {
             Ok((manifest, asset)) => {
-                let _ = sender.send(UpdateState::Available { manifest, asset });
+                let _ = sender.send(UpdateState::Available {
+                    manifest,
+                    asset: Box::new(asset),
+                });
             }
             Err(error) if error.contains("not newer") => {
                 let _ = sender.send(UpdateState::UpToDate);
@@ -455,14 +478,14 @@ mod tests {
         }
     }
 
-    fn signed_fixture(
-        tamper_recovery: bool,
-    ) -> (
+    type SignedFixture = (
         UpdateService<Fixtures, RecoveryRecorder>,
         ReleaseManifest,
         ReleaseAsset,
         Arc<Mutex<Vec<bool>>>,
-    ) {
+    );
+
+    fn signed_fixture(tamper_recovery: bool) -> SignedFixture {
         let update = b"update-v0.11.0".to_vec();
         let recovery = b"recovery-v0.10.0".to_vec();
         let signing = SigningKey::from_bytes(&[7; 32]);

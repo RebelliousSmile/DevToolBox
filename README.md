@@ -1,4 +1,4 @@
-# DevToolBox - Lanceur d'actions personnalisées (Windows / Linux)
+# DevToolBox - Lanceur d'actions personnalisées (macOS / Windows / Linux)
 
 Une application Rust minimaliste pour centraliser et lancer des commandes, scripts et
 actions personnalisées, avec une interface graphique native cross-plateforme
@@ -104,8 +104,49 @@ DevToolBox/
 
 ## 📦 Installation
 
+Les releases GitHub fournissent cinq artefacts : deux DMG (Apple Silicon et Intel),
+un installeur NSIS x64, un paquet deb x64 et une AppImage x64. La version 0.10.0 est
+la première base compatible avec les mises à jour intégrées ; depuis 0.9.x ou un
+binaire brut, installez-la manuellement.
+
+- macOS 13+ : ouvrir le DMG correspondant à l'architecture et déplacer DevToolBox
+  dans Applications. La vibrancy est native ; elle devient automatiquement opaque
+  si l'API ou l'accessibilité l'exige.
+- Windows 11 x64 : exécuter le NSIS par utilisateur. La désinstallation passe par
+  Applications installées et conserve les préférences.
+- Ubuntu 22.04/24.04 x64 : installer le deb avec le gestionnaire de paquets, ou
+  rendre l'AppImage exécutable. Selon l'hôte, l'AppImage peut nécessiter FUSE 2.
+
+Avant un premier lancement Linux, télécharger l'asset, son `.minisig`, puis vérifier :
+
+```sh
+minisign -Vm DevToolBox_0.10.0_linux_x86_64.AppImage \
+  -P '<clé publique et empreinte publiées dans la release>'
+```
+
+Le deb se met à jour via le gestionnaire de paquets. NSIS et AppImage proposent la
+mise à jour dans **Préférences → Général** après un clic explicite ; macOS télécharge
+et vérifie les archives avant le handoff d'installation. Les téléchargements sont
+acceptés uniquement depuis un tag immuable du dépôt et après SHA-256 + signature
+Ed25519. Sans trousseau de production, l'updater reste visiblement désactivé.
+
+La désinstallation standard conserve configuration, historique et scripts utilisateur.
+Le bouton **Préparer la désinstallation** retire d'abord l'autostart et les fichiers
+temporaires. La suppression des données est une opération séparée et confirmée :
+`devtoolbox --delete-user-data --confirm-delete-data`. Python 3.10 à 3.13 reste requis
+pour les outils Python embarqués ; un diagnostic est disponible dans les préférences.
+
+En cas d'update interrompue, l'AppImage conserve une copie `.previous`; NSIS et macOS
+exigent un payload de la version courante, signé et vérifié avant toute installation.
+Sinon, DevToolBox refuse l'auto-installation et indique la réinstallation manuelle.
+Voir [le dossier de qualification](docs/release-readiness.md).
+
 ### Prérequis communs
 - Rust toolchain (edition 2021)
+
+### macOS
+- macOS 13 Ventura ou plus récent
+- DMG `aarch64` pour Apple Silicon, `x86_64` pour Mac Intel
 
 ### Windows
 - Windows 11 (22H2+)

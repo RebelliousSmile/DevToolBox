@@ -399,7 +399,11 @@ mod tests {
     #[test]
     fn launch_captured_streams_real_process_output() {
         let (tx, rx) = channel();
-        launch_captured("echo hello-terminal-view", tx).expect("spawn echo");
+        #[cfg(windows)]
+        let command = "cmd.exe /C echo hello-terminal-view";
+        #[cfg(not(windows))]
+        let command = "echo hello-terminal-view";
+        launch_captured(command, tx).expect("spawn echo");
 
         let mut saw_output = false;
         let mut finished = false;

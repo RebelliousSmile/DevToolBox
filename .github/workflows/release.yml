@@ -1,0 +1,200 @@
+name: Release candidate
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag
+        required: true
+      publish:
+        description: Publish after protected qualification
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - run: python scripts/verify-release-config.py
+      - name: Verify tag and crate version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([0-9.]*\)"/\1/p' Cargo.toml | head -1)"
+          test "$RELEASE_TAG" = "v$version"
+
+  build:
+    needs: validate
+    environment: production-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            format: nsis
+            expected: windows_x86_64-setup.exe
+          - runner: ubuntu-22.04
+            format: deb,appimage
+            expected: linux_x86_64
+          - runner: macos-15
+            format: dmg
+            expected: macos_aarch64.dmg
+          - runner: macos-15-intel
+            format: dmg
+            expected: macos_x86_64.dmg
+    runs-on: ${{ matrix.runner }}
+    env:
+      DEVTOOLBOX_RELEASE_BUILD: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Materialize public updater keyring
+        shell: bash
+        env:
+          UPDATE_PUBLIC_KEYS_JSON: ${{ secrets.UPDATE_PUBLIC_KEYS_JSON }}
+        run: |
+          test -n "$UPDATE_PUBLIC_KEYS_JSON"
+          umask 077
+          printf '%s' "$UPDATE_PUBLIC_KEYS_JSON" > "$RUNNER_TEMP/update-public-keys.json"
+          echo "DEVTOOLBOX_UPDATE_PUBLIC_KEYS=$RUNNER_TEMP/update-public-keys.json" >> "$GITHUB_ENV"
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libfuse2
+      - name: Install pinned tools
+        shell: bash
+        run: |
+          rustup toolchain install 1.93.0 --profile minimal
+          cargo +1.93.0 install cargo-packager --version 0.11.8 --locked
+          test "$(rustc +1.93.0 --version | cut -d' ' -f2)" = "1.93.0"
+          test "$(cargo packager --version)" = "cargo-packager 0.11.8"
+      - name: Build packages
+        shell: bash
+        run: cargo packager --release --formats '${{ matrix.format }}'
+      - name: Normalize candidate names
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          mkdir candidate
+          case '${{ matrix.format }}' in
+            nsis) cp "$(find dist -type f -name '*.exe' | head -1)" "candidate/DevToolBox_${version}_windows_x86_64-setup.exe" ;;
+            dmg) cp "$(find dist -type f -name '*.dmg' | head -1)" "candidate/DevToolBox_${version}_${{ matrix.expected }}" ;;
+            deb,appimage)
+              cp "$(find dist -type f -name '*.deb' | head -1)" "candidate/DevToolBox_${version}_linux_x86_64.deb"
+              cp "$(find dist -type f -iname '*.AppImage' | head -1)" "candidate/DevToolBox_${version}_linux_x86_64.AppImage"
+              ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: candidate-${{ matrix.runner }}
+          path: candidate/*
+          if-no-files-found: error
+
+  publish-draft:
+    needs: build
+    runs-on: ubuntu-22.04
+    environment: production-release
+    permissions:
+      contents: write
+    env:
+      DEVTOOLBOX_RELEASE_BUILD: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: candidate-*
+          path: dist
+          merge-multiple: true
+      - name: Install release signing tool
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Verify protected release inputs
+        shell: bash
+        env:
+          UPDATE_PUBLIC_KEYS_JSON: ${{ secrets.UPDATE_PUBLIC_KEYS_JSON }}
+          UPDATE_PRIVATE_KEYS_JSON: ${{ secrets.UPDATE_PRIVATE_KEYS_JSON }}
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+          QA_EVIDENCE_SHA256: ${{ vars.QA_EVIDENCE_SHA256 }}
+        run: |
+          test -n "$UPDATE_PUBLIC_KEYS_JSON"
+          test -n "$UPDATE_PRIVATE_KEYS_JSON"
+          test -n "$MINISIGN_PRIVATE_KEY"
+          test -n "$QA_EVIDENCE_SHA256"
+          umask 077
+          printf '%s' "$UPDATE_PUBLIC_KEYS_JSON" > "$RUNNER_TEMP/update-public-keys.json"
+          printf '%s' "$UPDATE_PRIVATE_KEYS_JSON" > "$RUNNER_TEMP/update-private-keys.json"
+          printf '%s' "$MINISIGN_PRIVATE_KEY" > "$RUNNER_TEMP/minisign.key"
+          echo "DEVTOOLBOX_UPDATE_PUBLIC_KEYS=$RUNNER_TEMP/update-public-keys.json" >> "$GITHUB_ENV"
+          echo "DEVTOOLBOX_UPDATE_PRIVATE_KEYS=$RUNNER_TEMP/update-private-keys.json" >> "$GITHUB_ENV"
+      - name: Create draft before exposing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --verify-tag --draft=true --title "DevToolBox $RELEASE_TAG"
+      - name: Prepare signed recovery assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          if test "$version" = "0.10.0"; then
+            echo "FIRST_UPDATER_RELEASE=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          previous_tag="$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName')"
+          test -n "$previous_tag"
+          previous="${previous_tag#v}"
+          mkdir recovery
+          for suffix in windows_x86_64-setup.exe macos_aarch64.dmg macos_x86_64.dmg; do
+            gh release download "$previous_tag" --dir recovery --pattern "DevToolBox_${previous}_${suffix}*"
+          done
+          for suffix in windows_x86_64-setup.exe macos_aarch64.dmg macos_x86_64.dmg; do
+            printf '{"version":"%s","filename":"DevToolBox_%s_%s"}\n' "$previous" "$previous" "$suffix" > "dist/DevToolBox_${version}_${suffix}.recovery.json"
+          done
+      - name: Sign candidate bytes
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          minor="$(printf '%s' "$version" | cut -d. -f2)"
+          valid_until="$(( $(date +%s) / 86400 + 180 ))"
+          for asset in \
+            "dist/DevToolBox_${version}_windows_x86_64-setup.exe" \
+            "dist/DevToolBox_${version}_macos_aarch64.dmg" \
+            "dist/DevToolBox_${version}_macos_x86_64.dmg" \
+            "dist/DevToolBox_${version}_linux_x86_64.deb" \
+            "dist/DevToolBox_${version}_linux_x86_64.AppImage"; do
+            cargo +1.93.0 run --quiet --bin devtoolbox-update-signer -- "$asset" "$asset.signatures.json" "$minor" "$valid_until"
+          done
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m "dist/DevToolBox_${version}_linux_x86_64.deb"
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m "dist/DevToolBox_${version}_linux_x86_64.AppImage"
+      - name: Gate manifest and upload assets
+        if: env.FIRST_UPDATER_RELEASE != '1'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          python scripts/generate-update-manifest.py --assets dist --version "$version" --notes "See CHANGELOG.md" --recovery-assets recovery --output dist/latest.json
+          python scripts/verify-release-manifest.py dist/latest.json dist "$version"
+          gh release upload "$RELEASE_TAG" dist/DevToolBox_* --clobber
+          gh release upload "$RELEASE_TAG" dist/latest.json --clobber
+      - name: Upload first updater release without an update feed
+        if: env.FIRST_UPDATER_RELEASE == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/DevToolBox_* --clobber
+      - name: Publish only after explicit protected approval
+        if: inputs.publish == true && vars.NATIVE_QUALIFICATION_COMPLETE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

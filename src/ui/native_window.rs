@@ -56,18 +56,20 @@ pub fn current_inputs(native_effects: bool) -> MaterialInputs {
 pub fn configure_viewport(builder: eframe::egui::ViewportBuilder) -> eframe::egui::ViewportBuilder {
     #[cfg(target_os = "macos")]
     {
-        return builder
+        builder
             .with_transparent(true)
             .with_fullsize_content_view(true)
             .with_titlebar_shown(false)
-            .with_titlebar_buttons_shown(true);
+            .with_titlebar_buttons_shown(true)
     }
     #[cfg(target_os = "windows")]
     {
-        return builder.with_transparent(true);
+        builder.with_transparent(true)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    builder
+    {
+        builder
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

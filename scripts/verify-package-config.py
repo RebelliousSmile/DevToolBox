@@ -25,6 +25,7 @@ for path in [
     "assets/app-icon/devtoolbox.icns", "assets/app-icon/devtoolbox.ico",
     "assets/app-icon/devtoolbox.png", "packaging/macos/entitlements.plist",
     "packaging/linux/devtoolbox.desktop", "THIRD_PARTY_LICENSES.md",
+    "LICENSE",
 ]:
     require((ROOT / path).is_file(), f"ressource absente: {path}")
 
