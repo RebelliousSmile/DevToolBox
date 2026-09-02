@@ -57,3 +57,29 @@ hors secrets ni l'état « implemented » du plan.
 0.10.0 est la première installation compatible avec l'updater : son installation
 initiale et toute migration depuis 0.9.x restent manuelles. Après une fenêtre de
 rotation manquée (deux versions mineures ou 180 jours), réinstaller un paquet signé.
+
+## Qualification locale Windows — 2 septembre 2026
+
+La version `0.10.0` a été construite en NSIS x64 puis désinstallée et réinstallée
+silencieusement sur Windows 11. L'ancien désinstalleur et le nouveau désinstalleur
+contrôlé ont chacun retourné `0`; l'entrée « Applications installées », le binaire et
+`uninstall.exe` ont été recréés. Avant le premier lancement, les trois empreintes
+prises avant retrait étaient inchangées après migration vers
+`%LOCALAPPDATA%\RebelliousSmile\DevToolBox` :
+
+| Fichier | SHA-256 conservé |
+| --- | --- |
+| `application-usage.json` | `A246D55491A28CC5A7CD4A863255C4D3AA4DB8E41DE466758E7D45A2FD9FD0F2` |
+| `devtoolbox.log` | `60B54275CF328FA911ECD98E12785F58F8D7F2D24A90DC7896C8B0CD2B7950D4` |
+| `devtoolbox.log.old` | `0F6A8A2F66561425A8008BB449ADD8AAD3B3E4327D983436A16DF4A2CE71BC0E` |
+
+Le pilote NVIDIA de la machine expose DX12, mais WGPU signale qu'aucun
+`CompositeAlphaMode` transparent n'est disponible. eframe 0.35 n'expose pas cette
+capacité au code applicatif : demander une fenêtre transparente rendait la fenêtre
+maximisée invisible. Windows utilise donc le repli opaque tant que ce support ne peut
+pas être prouvé. Les captures [claire](../aidd_docs/tasks/2026_09/2026_09_02-windows-theme-rendering-fix/evidence/windows-light-opaque.png)
+et [sombre](../aidd_docs/tasks/2026_09/2026_09_02-windows-theme-rendering-fix/evidence/windows-dark-opaque.png)
+montrent des palettes cohérentes. Les interactions Compose et Docker sont couvertes
+par respectivement 33 et 96 tests ciblés ; la largeur des tableaux est recalculée au
+redimensionnement. Mica reste non qualifié sur ce matériel, et cette preuve locale ne
+qualifie ni macOS ni Linux.

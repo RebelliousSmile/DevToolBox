@@ -51,6 +51,7 @@ impl std::io::Write for FlushFile {
 /// grows. 5 MB is roughly two thousand normal startups' worth of `info` lines,
 /// while still being small enough to attach to a bug report.
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const MAINTENANCE_ERROR_EXIT_CODE: i32 = 20;
 
 /// One-generation rotation: when `path` is at or past `LOG_MAX_BYTES`, move it
 /// to `<path>.old` (replacing any previous `.old`) so the next run starts from
@@ -103,8 +104,13 @@ fn init_logging() -> Option<std::path::PathBuf> {
 }
 
 fn main() {
-    if run_maintenance_command() {
-        return;
+    if let Some(exit_code) = run_maintenance_command() {
+        std::process::exit(exit_code);
+    }
+    #[cfg(windows)]
+    if let Err(error) = platform::windows::migrate_legacy_local_state() {
+        eprintln!("Migration des données locales impossible: {error}");
+        std::process::exit(MAINTENANCE_ERROR_EXIT_CODE);
     }
     let log_path = init_logging();
     std::panic::set_hook(Box::new(|info| {
@@ -156,20 +162,41 @@ fn main() {
     }
 }
 
-fn run_maintenance_command() -> bool {
+fn run_maintenance_command() -> Option<i32> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    run_maintenance_command_with(
+        &arguments,
+        || uninstall::prepare().map(|inventory| inventory.user_data.len()),
+        |confirmed| uninstall::delete_user_data(confirmed).map(|paths| paths.len()),
+    )
+}
+
+fn run_maintenance_command_with<Prepare, Delete>(
+    arguments: &[String],
+    prepare: Prepare,
+    delete: Delete,
+) -> Option<i32>
+where
+    Prepare: FnOnce() -> Result<usize, String>,
+    Delete: FnOnce(bool) -> Result<usize, String>,
+{
     if arguments
         .iter()
         .any(|argument| argument == "--prepare-uninstall")
     {
-        match uninstall::prepare() {
-            Ok(inventory) => println!(
-                "Intégrations retirées; {} racine(s) de données conservée(s).",
-                inventory.user_data.len()
-            ),
-            Err(error) => eprintln!("Préparation de la désinstallation impossible: {error}"),
-        }
-        return true;
+        return Some(match prepare() {
+            Ok(preserved_roots) => {
+                println!(
+                    "Intégrations retirées; {} racine(s) de données conservée(s).",
+                    preserved_roots
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("Préparation de la désinstallation impossible: {error}");
+                MAINTENANCE_ERROR_EXIT_CODE
+            }
+        });
     }
     if arguments
         .iter()
@@ -178,18 +205,26 @@ fn run_maintenance_command() -> bool {
         let confirmed = arguments
             .iter()
             .any(|argument| argument == "--confirm-delete-data");
-        match uninstall::delete_user_data(confirmed) {
-            Ok(paths) => println!("{} racine(s) de données supprimée(s).", paths.len()),
-            Err(error) => eprintln!("Données conservées: {error}"),
-        }
-        return true;
+        return Some(match delete(confirmed) {
+            Ok(removed_roots) => {
+                println!("{removed_roots} racine(s) de données supprimée(s).");
+                0
+            }
+            Err(error) => {
+                eprintln!("Données conservées: {error}");
+                MAINTENANCE_ERROR_EXIT_CODE
+            }
+        });
     }
-    false
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{rotate_if_oversized, LOG_MAX_BYTES};
+    use super::{
+        rotate_if_oversized, run_maintenance_command_with, LOG_MAX_BYTES,
+        MAINTENANCE_ERROR_EXIT_CODE,
+    };
     use std::io::Write as _;
 
     /// A private temp directory for one test, named after the test and the
@@ -277,5 +312,38 @@ mod tests {
         assert!(!log.exists());
         assert!(!dir.join("devtoolbox.log.old").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn maintenance_success_and_failure_have_stable_exit_codes_without_real_side_effects() {
+        let prepare = vec!["--prepare-uninstall".to_string()];
+        assert_eq!(
+            run_maintenance_command_with(&prepare, || Ok(3), |_| unreachable!()),
+            Some(0)
+        );
+        assert_eq!(
+            run_maintenance_command_with(
+                &prepare,
+                || Err("fixture failure".to_string()),
+                |_| unreachable!()
+            ),
+            Some(MAINTENANCE_ERROR_EXIT_CODE)
+        );
+    }
+
+    #[test]
+    fn delete_without_confirmation_is_reported_as_a_maintenance_failure() {
+        let delete = vec!["--delete-user-data".to_string()];
+        assert_eq!(
+            run_maintenance_command_with(
+                &delete,
+                || unreachable!(),
+                |confirmed| {
+                    assert!(!confirmed);
+                    Err("confirmation required".to_string())
+                }
+            ),
+            Some(MAINTENANCE_ERROR_EXIT_CODE)
+        );
     }
 }

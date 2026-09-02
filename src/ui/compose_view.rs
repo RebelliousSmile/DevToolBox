@@ -758,12 +758,25 @@ fn render_stack(
         // of the row and the last one of the row gets clipped.
         let frame = egui::Frame::group(ui.style());
         let chrome = frame.inner_margin.sum().x + frame.outer_margin.sum().x;
-        ui.set_width((card_width - chrome).max(0.0));
+        let content_width = (card_width - chrome).max(0.0);
+        ui.set_width(content_width);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                // Truncated, not wrapped: a long project name must not be
-                // allowed to decide the card's height either.
-                ui.add(egui::Label::new(egui::RichText::new(&stack.project).strong()).truncate());
+                // A fixed leading region keeps every state label on the same
+                // vertical axis without an unbounded right-to-left layout.
+                let trailing_width = if state.log_target == Some(stack.file.as_str()) && state.busy
+                {
+                    104.0
+                } else {
+                    82.0
+                };
+                ui.add_sized(
+                    [
+                        (content_width - trailing_width).max(40.0),
+                        ui.spacing().interact_size.y,
+                    ],
+                    egui::Label::new(egui::RichText::new(&stack.project).strong()).truncate(),
+                );
                 ui.colored_label(state_color(stack.state), stack.state.label());
                 if state.log_target == Some(stack.file.as_str()) && state.busy {
                     ui.spinner();

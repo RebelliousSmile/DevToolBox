@@ -76,6 +76,11 @@ pub fn renderer_supports_material(platform: HostPlatform, backend: RendererBacke
 }
 
 pub fn current_renderer_support(cc: &eframe::CreationContext<'_>) -> bool {
+    // eframe 0.35 does not expose the surface `CompositeAlphaMode` selected
+    // by its wgpu painter. Backend identity alone is insufficient: the QA
+    // machine exposes DX12 yet reports no transparent composite mode, which
+    // turns a maximized Mica window fully invisible. Until that capability
+    // can be observed, Windows must take the safe opaque branch.
     let platform = current_inputs(true, true).platform;
     let backend = cc
         .wgpu_render_state
@@ -86,7 +91,18 @@ pub fn current_renderer_support(cc: &eframe::CreationContext<'_>) -> bool {
             _ => RendererBackend::Other,
         })
         .unwrap_or(RendererBackend::Unavailable);
-    renderer_supports_material(platform, backend)
+    let backend_support = renderer_supports_material(platform, backend);
+    #[cfg(windows)]
+    {
+        log::info!(
+            "native material renderer={backend:?} backend_support={backend_support}; alpha surface support is not observable, using opaque Windows fallback"
+        );
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        backend_support
+    }
 }
 
 fn backend_priority(backend: eframe::wgpu::Backend) -> u8 {
@@ -143,7 +159,9 @@ pub fn configure_viewport(builder: eframe::egui::ViewportBuilder) -> eframe::egu
     }
     #[cfg(target_os = "windows")]
     {
-        builder.with_transparent(true)
+        // See `current_renderer_support`: requesting an alpha surface when
+        // wgpu cannot expose/guarantee one can make the entire window vanish.
+        builder.with_transparent(false)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

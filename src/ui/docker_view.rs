@@ -1165,7 +1165,10 @@ fn header_row(ui: &mut egui::Ui, total_width: f32, columns: &[(&str, f32)]) {
     for (text, weight) in columns {
         let width = (usable * weight).max(60.0);
         ui.allocate_ui_with_layout(
-            egui::vec2(width, 0.0),
+            // A zero-height child reports only its label's intrinsic width
+            // back to `Grid`, so maximized tables collapse around their
+            // content. A real row height makes the width allocation binding.
+            egui::vec2(width, ui.spacing().interact_size.y),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| ui.strong(*text),
         );
@@ -1376,13 +1379,13 @@ fn render_containers_section(
                         ui,
                         total_width,
                         &[
-                            ("Sél.", 0.04),
-                            ("Nom", 0.16),
-                            ("Image", 0.22),
+                            ("Sél.", 0.05),
+                            ("Nom", 0.15),
+                            ("Image", 0.18),
                             ("État", 0.08),
-                            ("Statut", 0.17),
-                            ("Ports", 0.22),
-                            ("Action", 0.11),
+                            ("Statut", 0.16),
+                            ("Ports", 0.20),
+                            ("Action", 0.18),
                         ],
                     );
                     for container in containers {
@@ -1436,7 +1439,8 @@ fn render_containers_section(
                             let stop_button = with_disabled_reason(
                                 ui.add_enabled(
                                     ctx.buttons_enabled && stop_reason.is_none(),
-                                    egui::Button::new("Arrêter"),
+                                    egui::Button::new("Arrêter")
+                                        .min_size(egui::vec2(82.0, ui.spacing().interact_size.y)),
                                 ),
                                 stop_reason,
                             );
@@ -1447,7 +1451,8 @@ fn render_containers_section(
                             let remove_button = with_disabled_reason(
                                 ui.add_enabled(
                                     ctx.buttons_enabled && remove_reason.is_none(),
-                                    egui::Button::new("Supprimer"),
+                                    egui::Button::new("Supprimer")
+                                        .min_size(egui::vec2(82.0, ui.spacing().interact_size.y)),
                                 ),
                                 remove_reason,
                             );
@@ -2027,12 +2032,17 @@ pub fn render(ui: &mut egui::Ui, state: &DockerViewState<'_>) -> Vec<DockerActio
     ui.separator();
     render_list_tabs(ui, state, snapshot, allocations.len(), &mut actions);
 
+    let list_width = ui.available_width();
     egui::ScrollArea::vertical()
         // Fills the tab in both directions: the sections below size their
         // grids from the width this hands them, so a shrinking scroll area
         // would make the tables narrower than the window on every frame.
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // A vertical ScrollArea otherwise keeps the widest width it saw
+            // near startup. Pin its content to the current viewport so a
+            // later maximize/resize also recomputes every table column.
+            ui.set_width(list_width);
             ui.separator();
             match state.active_list {
                 DockerList::Containers => render_containers_section(

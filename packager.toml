@@ -27,6 +27,7 @@ entitlements = "packaging/macos/entitlements.plist"
 
 [nsis]
 installMode = "currentUser"
+template = "packaging/windows/installer.nsi"
 
 [deb]
 depends = ["libc6 (>= 2.35)", "libx11-6", "libwayland-client0"]

@@ -51,6 +51,8 @@ fn startup_integration_path() -> PathBuf {
 }
 
 pub fn prepare() -> Result<UninstallInventory, String> {
+    #[cfg(windows)]
+    crate::platform::windows::migrate_legacy_local_state()?;
     crate::platform::sync_startup(false).map_err(|error| error.to_string())?;
     let inventory = inventory();
     for temporary in &inventory.temporary {

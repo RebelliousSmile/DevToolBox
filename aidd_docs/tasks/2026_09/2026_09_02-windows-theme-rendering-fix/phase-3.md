@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Instruction: Séparer les données, empaqueter et qualifier Windows
