@@ -3576,6 +3576,31 @@ impl EguiApp {
                             self.set_status(format!("Échec de sauvegarde: {error}"), true);
                         }
                     }
+                    let mut launch_at_startup = self.config.default_settings.launch_at_startup;
+                    if ui
+                        .checkbox(&mut launch_at_startup, "Lancer au démarrage")
+                        .changed()
+                    {
+                        self.config.default_settings.launch_at_startup = launch_at_startup;
+                        if let Err(error) = self.persist() {
+                            self.set_status(format!("Échec de sauvegarde: {error}"), true);
+                        } else if let Err(error) = crate::platform::sync_startup(launch_at_startup)
+                        {
+                            self.set_status(
+                                format!("Échec de synchronisation du démarrage: {error}"),
+                                true,
+                            );
+                        } else {
+                            self.set_status(
+                                if launch_at_startup {
+                                    "Lancement au démarrage activé."
+                                } else {
+                                    "Lancement au démarrage désactivé."
+                                },
+                                false,
+                            );
+                        }
+                    }
                     if ui.button("Diagnostiquer Python").clicked() {
                         let executable = crate::python_runtime::python_for_script(Path::new("."));
                         let message = match crate::python_runtime::diagnose_python(&executable) {
