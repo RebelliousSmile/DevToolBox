@@ -266,6 +266,11 @@ pub fn launch_captured_program(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Harmless for non-Python commands (Docker compose, arbitrary CLI
+    // actions): only strips two env vars an AppImage's generic AppRun sets
+    // as boilerplate and this app never populates. See
+    // `python_runtime::clear_appimage_python_env`.
+    crate::python_runtime::clear_appimage_python_env(&mut process);
     // Kept from the Windows branch through the compose extraction: without
     // it a console-subsystem child opens its own window, and closing that
     // window kills the child (see this module's header).

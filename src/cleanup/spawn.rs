@@ -80,6 +80,7 @@ fn clean_command_from_root(root: PathBuf, arguments: &[&str]) -> Result<Command,
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    python_runtime::clear_appimage_python_env(&mut command);
     hide_console_window(&mut command);
     Ok(command)
 }

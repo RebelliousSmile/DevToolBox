@@ -1,0 +1,1 @@
+devtoolbox_0.10.0_x86_64.AppImage on /tmp/.mount_devtooFoFOgk type fuse.devtoolbox_0.10.0_x86_64.AppImage (ro,nosuid,nodev,relatime,user_id=1000,group_id=1000)
