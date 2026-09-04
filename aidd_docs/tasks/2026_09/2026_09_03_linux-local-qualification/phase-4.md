@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 <!-- Fill or omit these sections; never add, rename, or reorder one. -->
@@ -61,6 +61,17 @@ journey
 3. Capturer `evidence/linux-theme-light.png` et `evidence/linux-theme-dark.png` (thème clair puis sombre, basculé dans les Préférences) depuis l'application installée par le `.deb` (résultat de la phase 2), à l'image des deux captures de la section Windows
 4. Lier les captures et sorties de `evidence/` (thèmes clair/sombre, menu GNOME, exécution AppImage, layout dpkg, montage FUSE)
 5. Nommer explicitement ce que cette preuve NE qualifie PAS : Minisign, activation réelle de l'updater, Wayland, Ubuntu 24.04 — sur le modèle de la phrase finale de la section Windows
+
+**Fait (2026-09-04).** La section `## Qualification locale Linux — 4 septembre
+2026` a été ajoutée à `docs/release-readiness.md` avec les liens vers les
+preuves des phases 1-3 : captures thème [clair](./evidence/linux-theme-light.png)
+et [sombre](./evidence/linux-theme-dark.png), [entrée GNOME du paquet
+deb](./evidence/linux-deb-menu-entry.png), [rapport d'applications depuis le
+deb](./evidence/linux-deb-app-report.png), [layout installé du deb](./evidence/linux-deb-layout.txt),
+[exécution réelle de l'AppImage](./evidence/linux-appimage-run.png) et
+[montage FUSE observé](./evidence/linux-appimage-mount.txt). La portée
+restante non couverte est explicitée : Minisign, updater réel, Wayland et
+Ubuntu 24.04.
 
 ## Test acceptance criteria
 

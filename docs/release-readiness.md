@@ -83,3 +83,33 @@ montrent des palettes cohérentes. Les interactions Compose et Docker sont couve
 par respectivement 33 et 96 tests ciblés ; la largeur des tableaux est recalculée au
 redimensionnement. Mica reste non qualifié sur ce matériel, et cette preuve locale ne
 qualifie ni macOS ni Linux.
+
+## Qualification locale Linux — 4 septembre 2026
+
+La version `0.10.0` a été construite puis qualifiée localement sous Ubuntu 22.04 x64
+en session X11, à la fois en `.deb` et en `AppImage`. Le `.deb` installe ses ressources
+sous `/usr/lib/devtoolbox/` ; l'AppImage les résout sous `$APPDIR/usr/lib/devtoolbox/`.
+Le paquet `.deb` a été installé puis retiré réellement, avec entrée de menu GNOME
+présente, thèmes [clair](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-theme-light.png)
+et [sombre](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-theme-dark.png)
+capturés, [rapport d'applications](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-deb-app-report.png)
+fonctionnel et [layout installé](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-deb-layout.txt)
+conforme. L'intégration bureau du `.deb` est qualifiée via
+[l'entrée GNOME](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-deb-menu-entry.png) ;
+le lanceur utilise désormais `StartupWMClass=DevToolBox` et la catégorie
+`Development;`.
+
+L'AppImage reconstruite a été copiée hors dépôt puis exécutée directement depuis
+`~/Téléchargements`. La capture de [l'exécution réelle](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-appimage-run.png)
+montre le rendu correct de l'application et du rapport d'applications ; le
+[montage FUSE](../aidd_docs/tasks/2026_09/2026_09_03_linux-local-qualification/evidence/linux-appimage-mount.txt)
+confirme le mode portable attendu. Le correctif consiste à nettoyer `PYTHONHOME`
+et `PYTHONPATH` avant de lancer `python3` depuis l'AppImage, pour éviter
+l'échec `init_fs_encoding` hérité de l'environnement AppImage. Les données
+restent sous `~/.config/devtoolbox` et `~/.local/state/devtoolbox`, jamais sous
+le point de montage temporaire. L'AppImage portable reste un binaire non
+installé : cette preuve qualifie son exécution, pas son épinglage comme favori
+GNOME persistant.
+
+Cette preuve locale ne qualifie ni Minisign, ni l'activation réelle de
+l'updater, ni Wayland, ni Ubuntu 24.04.
