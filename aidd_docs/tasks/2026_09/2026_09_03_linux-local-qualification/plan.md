@@ -1,6 +1,6 @@
 ---
 objective: "Le paquet .deb et l'AppImage 0.10.0 sont construits, installés/exécutés réellement sur cette machine Ubuntu 22.04 X11, leur comportement hors arbre de dev est vérifié et corrigé si besoin, et la preuve datée est consignée dans docs/release-readiness.md."
-status: blocked
+status: implemented
 ---
 
 <!-- Fill or omit these sections; never add, rename, or reorder one. -->
