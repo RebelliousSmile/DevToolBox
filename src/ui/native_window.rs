@@ -105,6 +105,11 @@ pub fn current_renderer_support(cc: &eframe::CreationContext<'_>) -> bool {
     }
 }
 
+// Used from the `#[cfg(windows)]` adapter selector above and from the
+// cross-platform tests below; on a non-Windows `cargo check`/`clippy` run
+// (which does not compile `#[cfg(test)]` code) neither call site is visible,
+// so clippy reports these as dead code.
+#[allow(dead_code)]
 fn backend_priority(backend: eframe::wgpu::Backend) -> u8 {
     if backend == eframe::wgpu::Backend::Dx12 {
         0
@@ -113,6 +118,7 @@ fn backend_priority(backend: eframe::wgpu::Backend) -> u8 {
     }
 }
 
+#[allow(dead_code)]
 fn device_priority(device: eframe::wgpu::DeviceType) -> u8 {
     match device {
         eframe::wgpu::DeviceType::DiscreteGpu => 0,

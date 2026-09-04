@@ -25,6 +25,11 @@ require(config.get("macos", {}).get("minimumSystemVersion") == "13.0", "macOS 13
 require(set(config.get("deb", {}).get("depends", [])) >= {"libc6 (>= 2.35)", "libx11-6", "libwayland-client0"}, "dépendances deb incomplètes")
 require("desktopTemplate" in config.get("deb", {}), "template desktop deb absent")
 require(config.get("linux", {}).get("generateDesktopEntry") is True, "desktop Linux absent")
+desktop_template = ROOT / config.get("deb", {}).get("desktopTemplate", "")
+if desktop_template.is_file():
+    desktop = desktop_template.read_text(encoding="utf-8")
+    require("Categories=Development;" in desktop, "catégorie Linux Development absente")
+    require("StartupWMClass=DevToolBox" in desktop, "StartupWMClass Linux doit correspondre à la fenêtre X11")
 for path in [
     "assets/app-icon/devtoolbox.icns", "assets/app-icon/devtoolbox.ico",
     "assets/app-icon/devtoolbox.png", "packaging/macos/entitlements.plist",

@@ -4,12 +4,10 @@
 //! autostart (Part 3 Phase 1), freedesktop icon-theme lookup and systemd
 //! Automations parsing (Part 3 Phase 2).
 //!
-//! The entire module body is gated on `#[cfg(target_os = "linux")]`
-//! (module-level, via this inner attribute), mirroring the pattern already
-//! used by `crate::windows` (see `src/windows/mod.rs`) — `mod linux;` in
-//! `main.rs` is declared unconditionally, and this attribute makes the file
-//! compile to nothing on non-Linux targets.
-#![cfg(target_os = "linux")]
+//! The entire module body is gated by the `#[cfg(target_os = "linux")]`
+//! declaration in `main.rs` (`mod linux;`), mirroring the pattern already
+//! used by `crate::windows` (see `src/windows/mod.rs`) — this file compiles
+//! to nothing on non-Linux targets.
 
 pub mod automations;
 pub mod autostart;

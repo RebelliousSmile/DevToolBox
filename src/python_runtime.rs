@@ -129,6 +129,20 @@ pub fn python_for_script(script: &Path) -> String {
     )
 }
 
+/// Strip `PYTHONHOME`/`PYTHONPATH` before spawning a real interpreter.
+///
+/// The AppImage runtime's own generic `AppRun` unconditionally sets both to
+/// paths under the read-only `.mount_*` tree (`usr/`, `usr/share/pyshared/`)
+/// as boilerplate for apps that bundle their own Python — DevToolBox never
+/// does. Left inherited, a spawned system `python3` tries to load its
+/// standard library from that bogus `PYTHONHOME` and fails immediately with
+/// `Fatal Python error: init_fs_encoding` / `ModuleNotFoundError: No module
+/// named 'encodings'`. Harmless to call unconditionally: neither variable is
+/// ever set intentionally by this app or expected by any bundled script.
+pub fn clear_appimage_python_env(command: &mut Command) -> &mut Command {
+    command.env_remove("PYTHONHOME").env_remove("PYTHONPATH")
+}
+
 fn select_python(local: PathBuf, configured: Option<OsString>, python3_on_path: bool) -> String {
     if local.is_file() {
         return local.display().to_string();
@@ -188,6 +202,7 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    clear_appimage_python_env(&mut command);
     hide_console_window(&mut command);
     Ok(command)
 }
@@ -228,6 +243,7 @@ fn recommendation_command_from_root(root: PathBuf, history_path: &Path) -> Resul
         .env("PYTHONIOENCODING", "utf-8")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    clear_appimage_python_env(&mut command);
     hide_console_window(&mut command);
     Ok(command)
 }
