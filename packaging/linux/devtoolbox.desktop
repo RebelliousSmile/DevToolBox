@@ -5,5 +5,5 @@ Comment=Developer toolbox and command launcher
 Exec=devtoolbox
 Icon=devtoolbox
 Terminal=false
-Categories=Development;Utility;
-StartupWMClass=com.rebellioussmile.devtoolbox
+Categories=Development;
+StartupWMClass=DevToolBox

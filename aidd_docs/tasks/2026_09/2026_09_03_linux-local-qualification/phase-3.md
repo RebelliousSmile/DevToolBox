@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 <!-- Fill or omit these sections; never add, rename, or reorder one. -->
@@ -66,12 +66,13 @@ journey
 3. Pendant l'exécution, capturer `mount | grep '\.mount_'` dans `evidence/linux-appimage-mount.txt`
 4. Capturer `evidence/linux-appimage-run.png`
 
-**Fait (2026-09-03).** AppImage copiée sous `~/Téléchargements/`, rendue exécutable,
+**Fait (2026-09-04).** AppImage reconstruite, copiée sous `~/Téléchargements/`, rendue exécutable,
 lancée directement. `mount | grep '.mount_devtoo'` confirme le montage FUSE
 (`evidence/linux-appimage-mount.txt`) : `libfuse2`, `/dev/fuse` et
 `fusermount`/`fusermount3` présents, montage réussi sans intervention. Capture
 `evidence/linux-appimage-run.png` : fenêtre rendue correctement, police
-embarquée nette (pas de repli visible vers une police système).
+embarquée nette (pas de repli visible vers une police système), puis rapport
+d'applications visible.
 
 ### `2)` Vérifier le comportement réel
 
@@ -82,14 +83,16 @@ embarquée nette (pas de repli visible vers une police système).
 3. Confirmer que `config.json`/données utilisateur restent sous les répertoires XDG habituels et non sous le point de montage `.mount_` (qui disparaît à la fermeture)
 4. Fermer l'application et confirmer la disparition du point de montage `.mount_`
 
-**En cours (2026-09-03).** Étape 1 confirmée avec la tâche 1 ci-dessus. Étape 2 a
+**Fait (2026-09-04).** Étape 1 est confirmée avec la tâche 1 ci-dessus. L'étape 2 avait
 révélé un vrai écart, traité en tâche 3 ci-dessous : le clic sur l'action
 « rapport d'applications » (onglet Nettoyage → Applications installées)
-produisait un `Fatal Python error: init_fs_encoding` /
+produisait auparavant un `Fatal Python error: init_fs_encoding` /
 `ModuleNotFoundError: No module named 'encodings'`, absent du `.deb` (voir
-`linux-deb-app-report.png` en phase 2). Étapes 3-4 pas encore rejouées : en
-attente de la reconstruction de l'AppImage (tâche 3, étape 3) avant de
-revalider l'ensemble de la tâche 2.
+`linux-deb-app-report.png` en phase 2). Après reconstruction, le rapport
+affiche 103 candidats sans exception. `~/.config/devtoolbox` et
+`~/.local/state/devtoolbox` restent les seuls emplacements de données observés ;
+aucune donnée utilisateur ne réside sous `/tmp/.mount_devtoo*`. La fermeture
+de la fenêtre retire ce point de montage.
 
 ### `3)` Corriger si la résolution diverge
 
@@ -99,7 +102,7 @@ revalider l'ensemble de la tâche 2.
 2. Avant reconstruction, faire passer `cargo fmt --check`, `cargo clippy -- -D warnings` et `cargo test`
 3. Reconstruire l'AppImage (retour à la phase 1, tâche 2) et revalider les tâches 1-2 de cette phase
 
-**En cours (2026-09-03).** `action_root()` résolvait déjà correctement
+**Fait (2026-09-04).** `action_root()` résolvait déjà correctement
 `scripts/`/`config/` sous `$APPDIR/usr/lib/devtoolbox` (confirmé par
 inspection directe du point de montage) — ce n'était donc pas la cause. La
 cause réelle, hors du périmètre initialement prévu pour cette tâche mais
@@ -127,12 +130,16 @@ grille de cartes.
 Étape 2 : `cargo fmt --check`, `cargo clippy -- -D warnings` passent sans
 avertissement ; `cargo test` : 712 tests passants, 0 échec.
 
-Étape 3 : reconstruction (`cargo build --release --locked` puis
-`cargo packager --release --formats deb,appimage`) lancée mais **interrompue
-avant complétion** (arrêt de session). La revalidation des tâches 1-2 sur
-l'AppImage reconstruite reste à faire à la reprise — tant qu'elle n'est pas
-faite, le correctif n'est pas confirmé fonctionnel en conditions réelles,
-seulement par inspection de code et tests unitaires.
+Étape 3 : la reconstruction (`cargo build --release --locked` puis
+`cargo packager --release --formats deb,appimage`) a produit les deux paquets
+le 2026-09-04. L'AppImage reconstruite a repassé les tâches 1-2 sans écart :
+montage FUSE, police et rapport d'applications fonctionnels, données XDG hors
+montage, et démontage à la fermeture. Le repli
+`--appimage-extract-and-run` démarre aussi DevToolBox sans créer de montage
+FUSE. Côté intégration bureau, le lanceur installé par le `.deb` associe
+désormais correctement la fenêtre via `StartupWMClass=DevToolBox` ; l'AppImage
+portable lancée directement reste, elle, un binaire non installé et n'est donc
+pas qualifiée ici comme favori GNOME persistant.
 
 ## Test acceptance criteria
 

@@ -53,6 +53,19 @@ impl std::io::Write for FlushFile {
 const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const MAINTENANCE_ERROR_EXIT_CODE: i32 = 20;
 
+fn application_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../assets/app-icon/devtoolbox.png"))
+        .expect("bundled DevToolBox icon must be valid PNG")
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 /// One-generation rotation: when `path` is at or past `LOG_MAX_BYTES`, move it
 /// to `<path>.old` (replacing any previous `.old`) so the next run starts from
 /// an empty file. Keeping one generation rather than truncating outright means
@@ -143,6 +156,7 @@ fn main() {
         viewport: ui::native_window::configure_viewport(
             egui::ViewportBuilder::default()
                 .with_title("DevToolBox")
+                .with_icon(application_icon())
                 .with_inner_size([800.0, 600.0])
                 .with_min_inner_size([400.0, 300.0]),
         ),
@@ -222,7 +236,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        rotate_if_oversized, run_maintenance_command_with, LOG_MAX_BYTES,
+        application_icon, rotate_if_oversized, run_maintenance_command_with, LOG_MAX_BYTES,
         MAINTENANCE_ERROR_EXIT_CODE,
     };
     use std::io::Write as _;
@@ -256,6 +270,15 @@ mod tests {
         assert_eq!(std::fs::metadata(&log).expect("still there").len(), 32);
         assert!(!dir.join("devtoolbox.log.old").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundled_application_icon_is_a_square_rgba_image() {
+        let icon = application_icon();
+
+        assert_eq!(icon.width, 1024);
+        assert_eq!(icon.height, 1024);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
     }
 
     #[test]
