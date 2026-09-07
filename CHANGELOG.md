@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.11.0] - Unreleased
+## [0.11.1] - Unreleased
+
+### Fixed
+- L'écran de mise à jour affiche une animation, la taille attendue et les étapes de
+  vérification pendant le téléchargement sécurisé.
+
+## [0.11.0] - 2026-09-07
 
 ### Added
 - Première release de mise à jour publique : le manifeste `latest.json` permet aux
