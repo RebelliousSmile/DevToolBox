@@ -19,7 +19,9 @@ pub enum UpdateState {
         manifest: ReleaseManifest,
         asset: Box<ReleaseAsset>,
     },
-    Downloading,
+    Downloading {
+        total_bytes: u64,
+    },
     Verifying,
     Installing,
     RestartRequired,
@@ -270,7 +272,9 @@ impl<T: Transport, I: Installer> UpdateService<T, I> {
                 "Mise à jour déléguée au gestionnaire de paquets système.".to_string(),
             ));
         }
-        progress(UpdateState::Downloading);
+        progress(UpdateState::Downloading {
+            total_bytes: asset.size,
+        });
         let recovery = if matches!(asset.format, PackageFormat::Nsis | PackageFormat::App) {
             let recovery_asset = asset.recovery.as_ref().ok_or_else(|| {
                 "payload de récupération absent; réinstallation manuelle requise".to_string()

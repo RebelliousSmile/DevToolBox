@@ -1555,6 +1555,7 @@ impl EguiApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs() / 86_400)
             .unwrap_or(0);
+        let total_bytes = asset.size;
         self.update_rx = Some(crate::update::service::spawn_install(
             crate::update::service::UpdateService::new(
                 crate::update::service::HttpTransport,
@@ -1565,7 +1566,7 @@ impl EguiApp {
             asset,
             days,
         ));
-        self.update_state = UpdateState::Downloading;
+        self.update_state = UpdateState::Downloading { total_bytes };
     }
 
     fn drain_update_events(&mut self) {
@@ -3686,13 +3687,20 @@ impl EguiApp {
                         UpdateState::Idle => {
                             ui.label("Recherche automatique après le premier rendu.");
                         }
-                        UpdateState::Downloading => {
-                            ui.label("Téléchargement…");
+                        UpdateState::Downloading { total_bytes } => {
+                            ui.spinner();
+                            ui.label(format!(
+                                "Téléchargement sécurisé de {:.1} Mio…",
+                                *total_bytes as f64 / 1024.0 / 1024.0
+                            ));
+                            ui.weak("La signature et l’empreinte seront vérifiées avant l’installation.");
                         }
                         UpdateState::Verifying => {
+                            ui.spinner();
                             ui.label("Vérification de la signature…");
                         }
                         UpdateState::Installing => {
+                            ui.spinner();
                             ui.label("Installation…");
                         }
                         UpdateState::RestartRequired => {
@@ -7568,6 +7576,7 @@ mod tests {
     // this smoke test shouldn't trigger on every run. Its presence in the
     // rendered view is asserted instead.
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn automations_view_renders_real_systemd_rows_without_panicking_on_linux() {
         let dir = std::env::temp_dir().join(format!(
@@ -7691,6 +7700,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn applications_view_filters_selects_copies_and_refreshes() {
         let dir = std::env::temp_dir().join(format!(
@@ -7770,6 +7780,7 @@ mod tests {
         (app, dir)
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn analyser_sets_job_and_drains_plan_event_into_rows() {
         let (app, dir) = cleanup_test_app("cleanup-analyze");
@@ -7814,6 +7825,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn clean_opens_dialog_and_spawns_only_on_oui() {
         let (mut app, dir) = cleanup_test_app("cleanup-dialog");
