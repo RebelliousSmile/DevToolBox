@@ -1,6 +1,6 @@
 name = "devtoolbox"
 productName = "DevToolBox"
-version = "0.11.1"
+version = "0.11.2"
 identifier = "com.rebellioussmile.devtoolbox"
 publisher = "RebelliousSmile"
 description = "Cross-platform developer toolbox"

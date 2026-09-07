@@ -188,6 +188,7 @@ impl Transport for HttpTransport {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .https_only(true)
+            .ip_family(ureq::config::IpFamily::Ipv4Only)
             .max_redirects(3)
             .build();
         let agent = ureq::Agent::new_with_config(config);

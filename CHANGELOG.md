@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.11.1] - Unreleased
+## [0.11.2] - Unreleased
+
+### Fixed
+- L'updater privilégie IPv4 pour éviter un téléchargement bloqué par une route IPv6
+  indisponible vers les assets GitHub.
+
+## [0.11.1] - 2026-09-07
 
 ### Fixed
 - L'écran de mise à jour affiche une animation, la taille attendue et les étapes de
