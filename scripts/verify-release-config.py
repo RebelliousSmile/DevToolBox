@@ -32,7 +32,7 @@ def verify(root: Path) -> None:
         if "uses:" in line and not re.search(r"@[0-9a-f]{40}(?:\s|#|$)", line):
             raise ValueError(f"action is not pinned by full SHA: {line.strip()}")
     release = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    for token in ("environment: production-release", "DEVTOOLBOX_RELEASE_BUILD", "DEVTOOLBOX_UPDATE_PUBLIC_KEYS", "NATIVE_QUALIFICATION_COMPLETE", "draft=true"):
+    for token in ("pre-release", "production-release", "qualification", "DEVTOOLBOX_RELEASE_BUILD", "DEVTOOLBOX_UPDATE_PUBLIC_KEYS", "NATIVE_QUALIFICATION_COMPLETE", "draft=true"):
         if token not in release:
             raise ValueError(f"missing release gate: {token}")
     if "pull_request_target" in workflows:
@@ -48,7 +48,7 @@ def self_test() -> None:
         (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.93.0"\n', encoding="utf-8")
         workflow = """permissions:\n  contents: read\njobs:\n  fixture:\n    runs-on: windows-2025\n    steps:\n      - uses: actions/checkout@1111111111111111111111111111111111111111\n# ubuntu-22.04 macos-15 macos-15-intel\n"""
         (root / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
-        release = """permissions:\n  contents: read\n# windows-2025 ubuntu-22.04 macos-15 macos-15-intel\n# environment: production-release\n# DEVTOOLBOX_RELEASE_BUILD DEVTOOLBOX_UPDATE_PUBLIC_KEYS NATIVE_QUALIFICATION_COMPLETE draft=true\n"""
+        release = """permissions:\n  contents: read\n# windows-2025 ubuntu-22.04 macos-15 macos-15-intel\n# environment: pre-release production-release qualification\n# DEVTOOLBOX_RELEASE_BUILD DEVTOOLBOX_UPDATE_PUBLIC_KEYS NATIVE_QUALIFICATION_COMPLETE draft=true\n"""
         release_path = root / ".github" / "workflows" / "release.yml"
         release_path.write_text(release, encoding="utf-8")
         verify(root)

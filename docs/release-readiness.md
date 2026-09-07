@@ -23,9 +23,12 @@ python scripts/verify-release-manifest.py --self-test
 | Updater | Mainteneur de release | double signature en rotation, recovery vérifiée | externe | updater désactivé ou draft |
 
 L'environnement GitHub `production-release` doit imposer une approbation humaine. Il
-contient `UPDATE_PUBLIC_KEYS_JSON`, `UPDATE_PRIVATE_KEYS_JSON`,
-`MINISIGN_PRIVATE_KEY`; `QA_EVIDENCE_SHA256` désigne le dossier de preuves archivé et
+contient `UPDATE_PUBLIC_KEYS_JSON`, `UPDATE_PRIVATE_KEYS_JSON` ; les artefacts sont
+attestés par GitHub Actions avec une identité OIDC éphémère. `QA_EVIDENCE_SHA256` désigne le dossier de preuves archivé et
 `NATIVE_QUALIFICATION_COMPLETE=true` n'est posé qu'après validation des signatures OS.
+L'environnement séparé `pre-release` peut publier une candidate publique via l'entrée
+manuelle `qualification`; elle est destinée à la preuve d'update et ne contourne pas
+la porte de publication stable.
 Les clés privées restent hors dépôt. Les certificats Apple et
 Authenticode, leur horodatage, leur révocation et les alertes d'expiration à J-90 et
 J-30 sont sous la responsabilité du mainteneur de release.
@@ -37,7 +40,7 @@ J-30 sont sous la responsabilité du mainteneur de release.
 - Windows 11 23H2+ x64 : installation/désinstallation NSIS par utilisateur, Mica
   puis fallback opaque, élévation expliquée, update et réinstallation de secours.
 - Ubuntu 22.04 et 24.04 x64 : deb sous X11/Wayland et AppImage, présence/absence de
-  FUSE, vérification Minisign, update AppImage, rollback `.previous`, retrait.
+  FUSE, vérification de l'attestation GitHub, update AppImage, rollback `.previous`, retrait.
 - Chaque cible : thèmes clair/sombre, réduction des animations et transparence,
   navigation clavier, contraste, aucune zone illisible.
 
@@ -49,10 +52,11 @@ hors secrets ni l'état « implemented » du plan.
 ## Ordre de publication et récupération
 
 1. Construire les cinq paquets dans des artefacts CI privés.
-2. Créer la release en draft, signer et vérifier les octets, puis joindre les paquets.
+2. Créer la release en draft, attester et vérifier les octets, puis joindre les paquets.
 3. À partir de 0.11.0, récupérer et revérifier les payloads 0.10.0 de secours.
 4. Générer et comparer `latest.json`, puis le téléverser en dernier.
-5. Publier seulement après approbation de l'environnement et de la matrice QA.
+5. Publier seulement après approbation de l'environnement et de la matrice QA, sauf
+   candidate explicitement déclenchée avec `qualification` dans `pre-release`.
 
 0.10.0 est la première installation compatible avec l'updater : son installation
 initiale et toute migration depuis 0.9.x restent manuelles. Après une fenêtre de

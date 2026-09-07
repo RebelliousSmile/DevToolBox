@@ -12,6 +12,10 @@ on:
         description: Publish after protected qualification
         type: boolean
         default: false
+      qualification:
+        description: Publish a public qualification release from pre-release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,7 +39,7 @@ jobs:
 
   build:
     needs: validate
-    environment: production-release
+    environment: ${{ inputs.qualification && 'pre-release' || 'production-release' }}
     strategy:
       fail-fast: false
       matrix:
@@ -103,9 +107,11 @@ jobs:
   publish-draft:
     needs: build
     runs-on: ubuntu-22.04
-    environment: production-release
+    environment: ${{ inputs.qualification && 'pre-release' || 'production-release' }}
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     env:
       DEVTOOLBOX_RELEASE_BUILD: '1'
     steps:
@@ -117,24 +123,21 @@ jobs:
           pattern: candidate-*
           path: dist
           merge-multiple: true
-      - name: Install release signing tool
-        run: sudo apt-get update && sudo apt-get install -y minisign
       - name: Verify protected release inputs
         shell: bash
         env:
           UPDATE_PUBLIC_KEYS_JSON: ${{ secrets.UPDATE_PUBLIC_KEYS_JSON }}
           UPDATE_PRIVATE_KEYS_JSON: ${{ secrets.UPDATE_PRIVATE_KEYS_JSON }}
-          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
           QA_EVIDENCE_SHA256: ${{ vars.QA_EVIDENCE_SHA256 }}
         run: |
           test -n "$UPDATE_PUBLIC_KEYS_JSON"
           test -n "$UPDATE_PRIVATE_KEYS_JSON"
-          test -n "$MINISIGN_PRIVATE_KEY"
-          test -n "$QA_EVIDENCE_SHA256"
+          if test "${{ inputs.qualification }}" != "true"; then
+            test -n "$QA_EVIDENCE_SHA256"
+          fi
           umask 077
           printf '%s' "$UPDATE_PUBLIC_KEYS_JSON" > "$RUNNER_TEMP/update-public-keys.json"
           printf '%s' "$UPDATE_PRIVATE_KEYS_JSON" > "$RUNNER_TEMP/update-private-keys.json"
-          printf '%s' "$MINISIGN_PRIVATE_KEY" > "$RUNNER_TEMP/minisign.key"
           echo "DEVTOOLBOX_UPDATE_PUBLIC_KEYS=$RUNNER_TEMP/update-public-keys.json" >> "$GITHUB_ENV"
           echo "DEVTOOLBOX_UPDATE_PRIVATE_KEYS=$RUNNER_TEMP/update-private-keys.json" >> "$GITHUB_ENV"
       - name: Create draft before exposing assets
@@ -175,9 +178,7 @@ jobs:
             "dist/DevToolBox_${version}_linux_x86_64.AppImage"; do
             cargo +1.93.0 run --quiet --bin devtoolbox-update-signer -- "$asset" "$asset.signatures.json" "$minor" "$valid_until"
           done
-          minisign -S -s "$RUNNER_TEMP/minisign.key" -m "dist/DevToolBox_${version}_linux_x86_64.deb"
-          minisign -S -s "$RUNNER_TEMP/minisign.key" -m "dist/DevToolBox_${version}_linux_x86_64.AppImage"
-      - name: Gate manifest and upload assets
+      - name: Gate manifest
         if: env.FIRST_UPDATER_RELEASE != '1'
         shell: bash
         env:
@@ -186,6 +187,19 @@ jobs:
           version="${RELEASE_TAG#v}"
           python scripts/generate-update-manifest.py --assets dist --version "$version" --notes "See CHANGELOG.md" --recovery-assets recovery --output dist/latest.json
           python scripts/verify-release-manifest.py dist/latest.json dist "$version"
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            dist/DevToolBox_*.exe
+            dist/DevToolBox_*.dmg
+            dist/DevToolBox_*.deb
+            dist/DevToolBox_*.AppImage
+      - name: Upload verified assets
+        if: env.FIRST_UPDATER_RELEASE != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           gh release upload "$RELEASE_TAG" dist/DevToolBox_* --clobber
           gh release upload "$RELEASE_TAG" dist/latest.json --clobber
       - name: Upload first updater release without an update feed
@@ -193,8 +207,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$RELEASE_TAG" dist/DevToolBox_* --clobber
-      - name: Publish only after explicit protected approval
-        if: inputs.publish == true && vars.NATIVE_QUALIFICATION_COMPLETE == 'true'
+      - name: Publish qualification or protected stable release
+        if: inputs.qualification == true || (inputs.publish == true && vars.NATIVE_QUALIFICATION_COMPLETE == 'true')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$RELEASE_TAG" --draft=false

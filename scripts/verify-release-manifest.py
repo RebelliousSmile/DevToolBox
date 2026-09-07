@@ -41,8 +41,6 @@ def verify(manifest_path: Path, assets_dir: Path, version: str) -> None:
             raise ValueError(f"missing updater signature for {name}")
         if asset["format"] in {"nsis", "app"} and not asset.get("recovery"):
             raise ValueError(f"missing recovery payload for {name}")
-        if asset["format"] in {"deb", "appimage"} and not (assets_dir / f"{name}.minisig").is_file():
-            raise ValueError(f"missing Minisign signature for {name}")
 
 
 def self_test() -> None:
@@ -54,8 +52,6 @@ def self_test() -> None:
             path = root / name
             path.write_bytes(name.encode())
             size, sha256 = digest(path)
-            if fmt in {"deb", "appimage"}:
-                (root / f"{name}.minisig").write_text("fixture", encoding="utf-8")
             assets.append({
                 "os": os_name, "arch": arch, "format": fmt,
                 "url": f"https://github.com/RebelliousSmile/DevToolBox/releases/download/v0.11.0/{name}",

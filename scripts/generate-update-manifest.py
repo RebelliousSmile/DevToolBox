@@ -84,8 +84,6 @@ def build_manifest(directory: Path, version: str, notes: str, recovery_dir: Path
                 "sha256": recovery_sha,
                 "signatures": recovery_signatures,
             }
-        if fmt in {"deb", "appimage"} and not path.with_name(filename + ".minisig").is_file():
-            raise ValueError(f"missing first-download Minisign signature: {filename}.minisig")
         assets.append(asset)
     return {"schema_version": 1, "version": version, "notes": notes, "assets": assets}
 
@@ -106,8 +104,6 @@ def self_test() -> None:
             path.with_name(name + ".signatures.json").write_text(
                 json.dumps({"size": size, "sha256": sha, "signatures": [signature]}), encoding="utf-8"
             )
-            if fmt in {"deb", "appimage"}:
-                path.with_name(name + ".minisig").write_text("fixture", encoding="utf-8")
             if fmt in {"nsis", "app"}:
                 old_name = pattern.format(v="0.10.0")
                 old = recovery / old_name
@@ -121,13 +117,6 @@ def self_test() -> None:
                 )
         manifest = build_manifest(current, "0.11.0", "fixture", recovery)
         assert len(manifest["assets"]) == 5
-        (current / "DevToolBox_0.11.0_linux_x86_64.AppImage.minisig").unlink()
-        try:
-            build_manifest(current, "0.11.0", "fixture", recovery)
-        except ValueError as error:
-            assert "Minisign" in str(error)
-        else:
-            raise AssertionError("missing Linux signature did not fail")
 
 
 def main() -> None:
