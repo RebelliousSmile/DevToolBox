@@ -1943,6 +1943,7 @@ mod tests {
     // still passes.
 
     #[test]
+    #[ignore = "requires a reachable Docker daemon on the host"]
     fn real_fetch_returns_well_formed_rows_when_docker_present() {
         if !binary_available() {
             eprintln!("docker introuvable sur cette machine: test ignoré");

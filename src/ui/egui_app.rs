@@ -7578,6 +7578,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires a Linux systemd session with live automation rows"]
     fn automations_view_renders_real_systemd_rows_without_panicking_on_linux() {
         let dir = std::env::temp_dir().join(format!(
             "devtoolbox-test-{}-{}",

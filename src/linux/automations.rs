@@ -470,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Linux systemd session with apt-daily.timer"]
     fn real_systemctl_show_unit_details_returns_known_fields() {
         let details = unit_show_details("apt-daily.timer");
         assert_eq!(
