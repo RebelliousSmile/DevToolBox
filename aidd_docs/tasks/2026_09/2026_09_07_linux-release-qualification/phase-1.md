@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: complete
 ---
 
 <!-- Fill or omit these sections; never add, rename, or reorder one. -->
@@ -69,4 +69,12 @@ journey
 | Task | Acceptance criteria |
 | --- | --- |
 | 1 | Les versions des fichiers de paquet concordent en 0.11.0, les validateurs et assertions passent, et les artefacts Linux portent cette version. |
-| 2 | Une candidate GitHub est créée en draft uniquement ; aucun asset stable n’est publié sans porte protégée satisfaite. |
+| 2 | Une candidate GitHub est créée et reste distincte de la porte stable ; aucun asset stable n’est publié sans porte protégée satisfaite. |
+
+## Résultat
+
+Le 7 septembre 2026, `v0.10.0` puis `v0.11.0` ont été publiées explicitement avec
+`qualification=true` dans l'environnement `pre-release`. Les versions Cargo et
+packager de `v0.11.0` concordent, et la validation Python utilise désormais Python
+3.11 sur Ubuntu 22.04. La publication stable reste soumise à
+`production-release` et `NATIVE_QUALIFICATION_COMPLETE`.

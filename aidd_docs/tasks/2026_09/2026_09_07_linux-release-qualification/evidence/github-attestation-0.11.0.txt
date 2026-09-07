@@ -1,0 +1,18 @@
+Date: 2026-09-07
+Repository: RebelliousSmile/DevToolBox
+Release: v0.11.0
+Tag commit: e33af51fef5587af86768788904de7b29c5944a1
+Workflow: https://github.com/RebelliousSmile/DevToolBox/actions/runs/34103199676
+
+Verified commands:
+  gh attestation verify DevToolBox_0.11.0_linux_x86_64.deb --repo RebelliousSmile/DevToolBox
+  gh attestation verify DevToolBox_0.11.0_linux_x86_64.AppImage --repo RebelliousSmile/DevToolBox
+  python3.11 scripts/verify-release-manifest.py latest.json assets 0.11.0
+
+Result: all commands exited successfully.
+
+SHA-256:
+  DevToolBox_0.11.0_linux_x86_64.deb
+  d9983edb757b831563b1651a790f524e30bfc6e74d9f8e29b2b5ccab2f86b059
+  DevToolBox_0.11.0_linux_x86_64.AppImage
+  6a31c3c32cb09c24a3bf9dd2e10c10ead9b77c661210c42517d1ab699672ad2a

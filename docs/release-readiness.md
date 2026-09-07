@@ -62,6 +62,19 @@ hors secrets ni l'état « implemented » du plan.
 initiale et toute migration depuis 0.9.x restent manuelles. Après une fenêtre de
 rotation manquée (deux versions mineures ou 180 jours), réinstaller un paquet signé.
 
+## Candidate publique et attestations — 7 septembre 2026
+
+Les workflows de qualification publics
+[`v0.10.0`](https://github.com/RebelliousSmile/DevToolBox/actions/runs/34100816761)
+et [`v0.11.0`](https://github.com/RebelliousSmile/DevToolBox/actions/runs/34103199676)
+ont réussi sur Windows, Ubuntu 22.04 et macOS Intel/Apple Silicon. Les artefacts
+Linux 0.11.0 ont été téléchargés depuis la release publique, validés par
+`gh attestation verify`, puis comparés au `latest.json` public avec
+`scripts/verify-release-manifest.py`. Les empreintes sont consignées dans le plan de
+qualification. Cette preuve couvre provenance CI, signatures Ed25519 et feed public ;
+elle ne remplace pas le parcours interactif AppImage 0.10.0 vers 0.11.0, ni les
+sessions Wayland/Ubuntu 24.04 encore à qualifier.
+
 ## Qualification locale Windows — 2 septembre 2026
 
 La version `0.10.0` a été construite en NSIS x64 puis désinstallée et réinstallée
