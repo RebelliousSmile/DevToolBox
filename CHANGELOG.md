@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.10.0] - Unreleased
+## [0.11.0] - Unreleased
+
+### Added
+- Première release de mise à jour publique : le manifeste `latest.json` permet aux
+  installations 0.10.0 de récupérer un paquet 0.11.0 authentifié.
+
+## [0.10.0] - 2026-09-07
 
 ### Added
 - Support macOS 13+ Intel et Apple Silicon, avec intégrations LaunchAgent et chemins
